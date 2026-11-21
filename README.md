@@ -67,10 +67,20 @@ mill plan edit g1               # edit in $EDITOR (default vi); or: mill plan ed
 mill plan approve g1            # create the goal's tasks; the plan can no longer be edited
 mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, COST, TITLE (--json)
 mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
+mill run g1                     # run the approved goal's tasks in dependency order
+mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
 ```
+
+`mill run` starts a task once all its dependencies are verified, up to `max_parallel` at a
+time, and never runs two tasks whose `owns` overlap together. Each task gets the branch
+`mill/<goal>/<task>`, built on its dependencies' branches. When every task is verified the goal
+is `done` (exit 0). When a task blocks or fails, the others continue; the goal then ends
+`blocked` with a reason naming the stopped tasks and the ones waiting on them (exit 4). Ctrl-C
+lets running tasks stop, returns them to pending and leaves the goal blocked; run `mill run g1`
+again to continue. `start_children_on = "published"` is not supported yet; use `"verified"`.
 
 If an `$EDITOR` result is invalid, mill prints the problems and keeps the edited file; fix it and
 run `mill plan edit g1 --file <path>`. `mill plan "some text"` is reserved for the planner and
 currently exits 1.
 
-Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task not verified.
+Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.
