@@ -103,11 +103,12 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 	}
 
 	running := map[string]store.Task{}
+	started := map[string]bool{} // tasks started in this call; none starts twice
 	done := make(chan finished)
 	var loopErr error
 	for {
 		if loopErr == nil && ctx.Err() == nil {
-			if err := s.startReady(ctx, bg, goalID, running, done); err != nil {
+			if err := s.startReady(ctx, bg, goalID, running, started, done); err != nil {
 				loopErr = err
 			}
 		}
@@ -151,7 +152,7 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 		}
 		res.Status, res.Reason = store.GoalBlocked, InterruptedReason(goalID)
 	default:
-		reason, err := s.blockedReason(bg, tasks)
+		reason, err := s.blockedReason(bg, tasks, started)
 		if err != nil {
 			return Result{}, err
 		}
@@ -169,7 +170,7 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 }
 
 // startReady starts ready tasks in plan order while there is room.
-func (s *Scheduler) startReady(ctx, bg context.Context, goalID string, running map[string]store.Task, done chan<- finished) error {
+func (s *Scheduler) startReady(ctx, bg context.Context, goalID string, running map[string]store.Task, started map[string]bool, done chan<- finished) error {
 	tasks, err := s.Store.GoalTasks(bg, goalID)
 	if err != nil {
 		return err
@@ -185,7 +186,7 @@ func (s *Scheduler) startReady(ctx, bg context.Context, goalID string, running m
 		if t.Status != store.TaskPending {
 			continue
 		}
-		if _, ok := running[t.ID]; ok {
+		if _, ok := running[t.ID]; ok || started[t.ID] {
 			continue
 		}
 		deps, err := s.Store.TaskDeps(bg, t.ID)
@@ -202,6 +203,7 @@ func (s *Scheduler) startReady(ctx, bg context.Context, goalID string, running m
 			continue
 		}
 		running[t.ID] = t
+		started[t.ID] = true
 		s.logf("%s: started", t.ID)
 		go func(id string) {
 			_, err := s.RunTask(ctx, id)
@@ -225,8 +227,9 @@ func overlapsRunning(t store.Task, running map[string]store.Task) bool {
 }
 
 // blockedReason lists the tasks that stopped (blocked, failed or left in another state) and
-// the pending tasks waiting on them.
-func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task) (string, error) {
+// the pending tasks waiting on them. A pending task in started ran but did not leave pending;
+// it is reported as stuck.
+func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task, started map[string]bool) (string, error) {
 	status := map[string]string{}
 	for _, t := range tasks {
 		status[t.ID] = t.Status
@@ -236,6 +239,10 @@ func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task) (stri
 		switch t.Status {
 		case store.TaskVerified:
 		case store.TaskPending:
+			if started[t.ID] {
+				stopped = append(stopped, t.ID+" stuck (it did not leave pending after running)")
+				continue
+			}
 			deps, err := s.Store.TaskDeps(ctx, t.ID)
 			if err != nil {
 				return "", err
