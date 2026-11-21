@@ -222,7 +222,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			}
 			if p.Cfg.OwnsPolicy == "enforce" {
 				for _, f := range outside {
-					findings = append(findings, prompt.Finding{Source: "mill", File: f, Issue: "changed outside the task's owns; revert it, or edit the task to widen its owns"})
+					findings = append(findings, prompt.Finding{Source: "mill", File: f, Issue: fmt.Sprintf("changed outside the task's owns; revert it with `git restore --source %s -- %s` (delete it instead if the task created it), or edit the task to widen its owns", short(startSHA), f)})
 				}
 				p.logf("%s a%d owns      %d file(s) outside owns", t.ID, n, len(outside))
 				if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
