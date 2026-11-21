@@ -138,7 +138,7 @@ func TestRecoveryRecordsUsageFromStreamFiles(t *testing.T) {
 	if _, _, err := s.RecoverInterrupted(ctx, usage); err != nil {
 		t.Fatal(err)
 	}
-	if want := "recorded 1,234 tokens (~$1.00) from 1 interrupted attempt(s)"; !strings.Contains(out.String(), want) {
+	if want := "recorded 1,234 tokens (billable, ~$1.00) from 1 interrupted attempt(s)"; !strings.Contains(out.String(), want) {
 		t.Fatalf("output = %q, want %q", out.String(), want)
 	}
 	atts, _ := s.Attempts(ctx, "t1")

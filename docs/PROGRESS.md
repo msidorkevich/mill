@@ -86,9 +86,9 @@ Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–
 - **Usage:** live token counts come from `assistant` events (deduplicated per message id); the
   final `result` event is authoritative and corrects them. Cost only arrives in the `result`
   event, so live USD enforcement is claude's own `--max-budget-usd`.
-- **Known limitation:** a run killed for its token limit has no `result` event, so its cost is
-  recorded as $0 (tokens are exact). USD totals under-count killed runs. A price table could
-  estimate them later.
+- **Known limitation (resolved by the M2 follow-ups, `cost-estimate`):** a run killed for its
+  token limit has no `result` event, so its cost was recorded as $0. It is now estimated from
+  tokens and marked `~$`.
 - **Budget stop rules:** limit crossed while running → killed, `budget_exceeded`, task blocked,
   no automatic retry (BG5). Limit crossed only by the final correction of a finished run → the
   work is kept and a warning is logged.
@@ -200,7 +200,7 @@ Exit criterion (toy Go repo, real agents):
       so goal and task spend under-count killed runs. Recovery could read the attempt's
       stream file and record the usage it reports.
 
-## M2 follow-ups: in progress (goal `g2`, on `main`)
+## M2 follow-ups: done (goal `g2`, on `main`)
 
 `m2-graph` was merged into `main` (fast-forward); mill's tasks now branch from `main`. The
 follow-ups run as one goal through mill's scheduler (plan:
@@ -211,10 +211,46 @@ Correction: the planner follow-up was partly a review mistake. `mill plan` does 
 real gap is smaller: the limit is shared by both planner calls and a timeout reads as a bare
 "context deadline exceeded".
 
-- [ ] `task-edit`: `mill task edit <id>` changes a pending/blocked/failed task's spec, also after
-      approval (goal task spec updated in the task row and the stored plan)
-- [ ] `planner-timeout`: time limit per planner call, with a clear message
-- [ ] `worker-reaper`: record each worker's pid; recovery kills leftover workers of a killed run
-- [ ] `cost-estimate`: price table (overridable in config); runs that end without a result from
-      claude get an estimated cost, marked `~$` (resolves the M1 "killed run costs $0" limitation)
-- [ ] `abandoned-usage`: recovery reads abandoned attempts' streams and records their usage
+Goal `g2`: 5/5 tasks verified in one `mill run`, 321.8k tokens, $1.88. First real retries:
+`planner-timeout` and `worker-reaper` each failed the gate once and passed on attempt 2.
+
+- [x] `task-edit`: `mill task edit <id>` changes a pending/blocked/failed task's spec, also after
+      approval (goal task spec updated in the task row and the stored plan) ($0.39)
+- [x] `planner-timeout`: time limit per planner call, with a clear message ($0.16, 2 attempts)
+- [x] `worker-reaper`: record each worker's pid; recovery kills leftover workers of a killed run
+      ($0.50, 2 attempts)
+- [x] `cost-estimate`: price table (overridable in config); runs that end without a result from
+      claude get an estimated cost, marked `~$` (resolves the M1 "killed run costs $0"
+      limitation) ($0.52)
+- [x] `abandoned-usage`: recovery reads abandoned attempts' streams and records their usage
+      ($0.31; recovery line changed by hand to billable tokens and the existing `fmtInt`)
+
+Checked with real agents (toy repo): `kill -9` of mill during a `claude` run left the worker
+**alive** (so the M2 observation of no survivors was luck). On retry, recovery printed `killed
+leftover worker 7074`, the worker was gone, and the abandoned attempt got its usage from its
+stream with an estimated cost (`~$0.01`).
+
+The M2 follow-ups section above is resolved by this goal:
+- spec cannot change after approval → `task-edit`
+- planner time limit → `planner-timeout`
+- workers surviving a killed mill → `worker-reaper`
+- abandoned attempts record no usage → `abandoned-usage`
+
+### Follow-ups found in the g2 reviews
+
+- [ ] Both gate failures in g2 came from the crash test written in g1, not from the code under
+      change: the test is flaky. `planner-timeout`'s retry fixed nothing (it re-ran until the
+      test passed); `worker-reaper` fixed the test. Two races: (1) it killed mill while task a
+      could still be running, so a reran (fixed: wait until a is verified); (2) "run lock still
+      held" right after the killed process was reaped, seen twice in gates, not reproduced in 21
+      local runs under load. The test now polls the lock for up to 10s, which would also hide a
+      real "lock outlives its holder" bug. Watch for it.
+- [ ] `owns` is advisory: `worker-reaper` changed `internal/cli/crash_test.go`, outside its
+      `owns`. Helpful here, but it is the kind of change `owns` exists to catch. Consider
+      reporting changes outside `owns` as a finding, or at least showing them to the verifier.
+- [ ] The reaper only kills a group whose leader is still alive and matches. If the agent exited
+      but a child it started (e.g. a test run from its Bash tool) survives in the group, it is
+      left alone.
+- [ ] A gate failure caused by a flaky or unrelated test makes the implementer "fix" code that
+      was fine, or retry until it passes. The verifier and findings could say when a failing test
+      is outside the task's diff.

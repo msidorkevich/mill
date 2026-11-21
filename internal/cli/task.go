@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -225,18 +224,10 @@ func interruptedUsage(ctx context.Context, out io.Writer, s *store.Store, prices
 		total = total.Add(u)
 	}
 	if len(usage) > 0 {
-		tokens := total.InputTokens + total.OutputTokens + total.CacheWriteTokens + total.CacheReadTokens
-		fmt.Fprintf(out, "recorded %s tokens (~$%.2f) from %d interrupted attempt(s)\n", commaInt(tokens), total.CostUSD, len(usage))
+		fmt.Fprintf(out, "recorded %s tokens (billable, ~$%.2f) from %d interrupted attempt(s)\n",
+			fmtInt(total.Tokens(budget.CountBillable)), total.CostUSD, len(usage))
 	}
 	return usage, nil
-}
-
-func commaInt(n int64) string {
-	s := strconv.FormatInt(n, 10)
-	for i := len(s) - 3; i > 0; i -= 3 {
-		s = s[:i] + "," + s[i:]
-	}
-	return s
 }
 
 // newPipeline builds the pipeline from the project config: host, runner and agent env.
