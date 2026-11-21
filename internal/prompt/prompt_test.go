@@ -124,3 +124,17 @@ func TestVerifierPromptListsFilesOutsideOwns(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifierPromptNamesFlakyCommands(t *testing.T) {
+	in := VerifierInput{Task: taskspec.Spec{ID: "t", Title: "T", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
+	if p := Verifier(in); strings.Contains(p, "Flaky") {
+		t.Fatal("flaky section shown without flaky commands")
+	}
+	in.Flaky = []string{"go test ./..."}
+	p := Verifier(in)
+	for _, w := range []string{"## Flaky gate commands", "- `go test ./...`", "failed once and passed on a re-run", "nondeterministic"} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+}

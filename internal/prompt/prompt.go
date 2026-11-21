@@ -184,6 +184,8 @@ type VerifierInput struct {
 	Gate     gate.Result
 	// OutsideOwns lists changed files that no pattern in the task's owns matches.
 	OutsideOwns []string
+	// Flaky lists gate commands that failed once and passed on a re-run.
+	Flaky []string
 }
 
 // Verifier builds the verifier prompt.
@@ -211,6 +213,13 @@ func Verifier(in VerifierInput) string {
 		fmt.Fprintf(&b, "- `%s`: %s\n", c.Cmd, status)
 	}
 	b.WriteString("\n")
+	if len(in.Flaky) > 0 {
+		b.WriteString("## Flaky gate commands\n")
+		for _, c := range in.Flaky {
+			fmt.Fprintf(&b, "- `%s`\n", c)
+		}
+		b.WriteString("\nThese commands failed once and passed on a re-run. Fail with a finding if the change itself could make them nondeterministic (for example new tests that depend on timing, ordering, shared state or the environment).\n\n")
+	}
 	fmt.Fprintf(&b, "## Change (diff from %s to HEAD)\n", short(in.BaseSHA))
 	if len(in.Diff) > MaxDiffBytes {
 		fmt.Fprintf(&b, "The diff is too large to include (%d bytes). Files changed:\n```\n%s\n```\nRead the changed files to review them.\n\n", len(in.Diff), in.DiffStat)

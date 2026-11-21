@@ -34,6 +34,12 @@ type Config struct {
 	WorktreeRoot string `toml:"worktree_root"`
 	// GateTimeout bounds each gate command.
 	GateTimeout Duration `toml:"gate_timeout"`
+	// GateRerun re-runs the failed gate commands once; if they all pass then, the gate
+	// passes and the verifier is told which commands were flaky.
+	GateRerun bool `toml:"gate_rerun"`
+	// GateCheckBase runs the commands that still fail on the task's starting point, so a
+	// check that is already broken there blocks the task instead of becoming a finding.
+	GateCheckBase bool `toml:"gate_check_base"`
 	// EnvAllow lists extra environment variables passed to workers and gate commands, on top
 	// of the built-in allowlist (SE3).
 	EnvAllow []string        `toml:"env_allow"`
@@ -115,6 +121,8 @@ func Default() Config {
 		StartChildrenOn: "verified",
 		WorktreeRoot:    "",
 		GateTimeout:     Duration{20 * time.Minute},
+		GateRerun:       true,
+		GateCheckBase:   true,
 		EnvAllow:        []string{},
 		Runner: RunnerConfig{
 			Kind:           "claude",
@@ -154,6 +162,8 @@ owns_policy = "warn"      # changes outside a task's owns: "warn" (verifier must
 
 worktree_root = ""        # where task worktrees live; "" = ~/.cache/mill/worktrees
 gate_timeout = "20m"      # per gate command
+gate_rerun = true         # re-run failed gate commands once; passing then = flaky, the gate passes
+gate_check_base = true    # run still-failing commands on the task's starting point; failing there too blocks the task
 env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
 
 [runner]

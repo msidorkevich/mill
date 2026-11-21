@@ -94,6 +94,27 @@ task's `owns` (a task with empty `owns` is never restricted):
   for that attempt.
 - `"off"`: no check.
 
+When gate commands fail, mill triages them before handing them to the implementer (not when no
+checks are configured, and not when the run was interrupted):
+
+1. Re-run (`gate_rerun = true`, the default): only the failed commands run once more (logs under
+   `.mill/runs/<task>/a<n>/rerun/`). If they all pass, the gate passes, mill records a
+   `gate-flaky` event and the verifier is told which commands were flaky, so it fails the task if
+   the change itself could make them nondeterministic.
+2. Base check (`gate_check_base = true`, the default): the commands still failing run in a
+   temporary detached worktree at the task's starting point, with the same environment and
+   timeout (logs under `a<n>/base/`); the worktree is removed afterwards.
+   - If every one of them fails there too, the task is blocked in the gate phase with a reason
+     naming them: the task did not cause them. Mill records `gate-base-failing` and makes no
+     further attempt; fix the commands on the base branch, then `--retry`.
+   - Otherwise each command that passes on the starting point becomes a finding saying the task's
+     changes cause it, and each that also fails there becomes a finding saying it is not caused by
+     the task and should not be fixed.
+   - If the base worktree cannot be created or the commands cannot run there, mill logs a warning
+     and uses the plain gate findings.
+
+Set either setting to `false` to skip that step.
+
 If an `$EDITOR` result is invalid, mill prints the problems and keeps the edited file; fix it and
 run `mill plan edit g1 --file <path>`.
 

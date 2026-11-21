@@ -69,6 +69,9 @@ func setup(t *testing.T, checkCmd string, script runner.Script, tweak func(*conf
 	cfg.Runner.FakeScript = "unused"
 	cfg.GateTimeout = config.Duration{Duration: 10 * time.Second}
 	cfg.Budget.Task = budget.Limits{} // unlimited unless a test sets it
+	// Most test gates check for the task's own output, which the starting point cannot pass;
+	// the gate triage tests turn the base check on.
+	cfg.GateCheckBase = false
 	if tweak != nil {
 		tweak(&cfg)
 	}

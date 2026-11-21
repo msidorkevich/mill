@@ -243,3 +243,19 @@ func TestOwnsPolicyDefaultsToWarnAndIsValidated(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestGateTriageSettingsDefaultOnAndAreBooleans(t *testing.T) {
+	cfg, err := Parse("")
+	if err != nil || !cfg.GateRerun || !cfg.GateCheckBase {
+		t.Fatalf("defaults: rerun=%v check_base=%v, %v", cfg.GateRerun, cfg.GateCheckBase, err)
+	}
+	cfg, err = Parse("gate_rerun = false\ngate_check_base = false\n")
+	if err != nil || cfg.GateRerun || cfg.GateCheckBase {
+		t.Fatalf("overrides: rerun=%v check_base=%v, %v", cfg.GateRerun, cfg.GateCheckBase, err)
+	}
+	for _, text := range []string{`gate_rerun = "yes"`, `gate_check_base = 1`} {
+		if _, err := Parse(text); err == nil {
+			t.Fatalf("%s accepted", text)
+		}
+	}
+}

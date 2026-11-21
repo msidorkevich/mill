@@ -217,3 +217,46 @@ func TestChangedFilesListsAddedModifiedDeletedRenamed(t *testing.T) {
 		}
 	}
 }
+
+func TestDetachedWorktreeAtShaIsAddedAndRemoved(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	first, _ := RevParse(ctx, r, "main")
+	if err := os.WriteFile(filepath.Join(r, "later"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CommitAll(ctx, r, "later"); err != nil {
+		t.Fatal(err)
+	}
+	branches := mustRun(t, ctx, r, "branch", "--list")
+
+	wt := filepath.Join(t.TempDir(), "base")
+	if err := AddDetachedWorktree(ctx, r, wt, first); err != nil {
+		t.Fatal(err)
+	}
+	if head, _ := RevParse(ctx, wt, "HEAD"); head != first {
+		t.Fatalf("HEAD = %s, want %s", head, first)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "later")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree is not at the requested commit: %v", err)
+	}
+	if _, err := Run(ctx, wt, "symbolic-ref", "-q", "HEAD"); err == nil {
+		t.Fatal("HEAD is not detached")
+	}
+	if got := mustRun(t, ctx, r, "branch", "--list"); got != branches {
+		t.Fatalf("branches changed: %q -> %q", branches, got)
+	}
+
+	if err := RemoveWorktree(ctx, r, wt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(wt); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree directory left behind: %v", err)
+	}
+	if list := mustRun(t, ctx, r, "worktree", "list"); strings.Contains(list, wt) {
+		t.Fatalf("worktree still registered:\n%s", list)
+	}
+	if err := AddDetachedWorktree(ctx, r, filepath.Join(t.TempDir(), "bad"), "0123456789abcdef0123456789abcdef01234567"); err == nil {
+		t.Fatal("unknown sha accepted")
+	}
+}
