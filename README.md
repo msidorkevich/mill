@@ -48,7 +48,12 @@ mill task run --file ../add-reverse.json            # implement → gate → ver
 mill task show add-reverse                          # status, attempts, spend, findings (--json)
 mill task list                                      # every task, oldest first (--status S, --json)
 mill task run --file ../add-reverse.json --retry    # after editing the spec or raising a budget
+mill task edit <id> [--file spec.json]              # change a pending, blocked or failed task's spec
 ```
+
+`mill task edit` opens the task's current spec (id, title, kind, spec, acceptance, checks, owns,
+depends_on, size) in `$EDITOR`, or reads `--file`. Running and verified tasks are refused. The id
+and `depends_on` cannot change. An invalid edit prints the problems and keeps the file.
 
 A verified task is a branch `mill/t/<id>` in a worktree outside your checkout; mill prints the
 command to review its diff. mill never pushes and never touches `main`.
@@ -116,8 +121,9 @@ the diff from where the task started, after those merges.
 `blocked` (exit 4); `mill goal show g1` names the stopped tasks and the ones waiting on them.
 Find the cause with `mill task show g1/<task>` (reason, attempts, last findings), fix it (for
 example a budget or `check_cmd` in `.mill/config.toml`), then `mill run g1 --retry-blocked` puts
-blocked and failed tasks back to pending and continues. A goal task's spec is frozen once the
-plan is approved.
+blocked and failed tasks back to pending and continues. To change a stopped goal task's spec, run
+`mill task edit g1/<task>` (it updates the task and the stored plan; the dependencies stay fixed
+once the plan is approved), then `mill run g1 --retry-blocked`.
 Verified tasks are not run again.
 
 **Interrupted or killed runs.** After Ctrl-C, a crash or `kill -9`, nothing is lost. The next
