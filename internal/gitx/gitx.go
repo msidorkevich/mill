@@ -117,3 +117,55 @@ func Diff(ctx context.Context, dir, base string) (string, error) {
 func DiffStat(ctx context.Context, dir, base string) (string, error) {
 	return Run(ctx, dir, "diff", "--no-color", "--stat", base+"..HEAD")
 }
+
+// ConflictError reports a merge that stopped on conflicts. The merge has been aborted.
+type ConflictError struct {
+	Branch string
+	Files  []string
+}
+
+func (e *ConflictError) Error() string {
+	return fmt.Sprintf("merging %s conflicts in %s", e.Branch, strings.Join(e.Files, ", "))
+}
+
+// Merge merges branch into the branch checked out in dir with a merge commit (no
+// fast-forward), skipping hooks and signing. When the repository has no identity configured,
+// mill's own is used. On conflicts the merge is aborted and a *ConflictError lists the files.
+func Merge(ctx context.Context, dir, branch, message string) error {
+	args := []string{"-c", "commit.gpgsign=false"}
+	if email, _ := Run(ctx, dir, "config", "user.email"); email == "" {
+		args = append(args, "-c", "user.name=mill", "-c", "user.email=mill@localhost")
+	}
+	args = append(args, "merge", "--no-ff", "--no-verify", "-q", "-m", message, branch)
+	_, mergeErr := Run(ctx, dir, args...)
+	if mergeErr == nil {
+		return nil
+	}
+	files, lsErr := Run(ctx, dir, "diff", "--name-only", "--diff-filter=U")
+	if lsErr != nil || files == "" {
+		// Not a conflict (or undecidable): clean up if a merge is in progress and report as is.
+		if _, err := Run(ctx, dir, "rev-parse", "-q", "--verify", "MERGE_HEAD"); err == nil {
+			if _, err := Run(ctx, dir, "merge", "--abort"); err != nil {
+				return fmt.Errorf("%w; and aborting the merge failed: %v", mergeErr, err)
+			}
+		}
+		return mergeErr
+	}
+	ce := &ConflictError{Branch: branch, Files: strings.Split(files, "\n")}
+	if _, err := Run(ctx, dir, "merge", "--abort"); err != nil {
+		return fmt.Errorf("%w; and aborting the merge failed, run `git merge --abort` in %s: %v", ce, dir, err)
+	}
+	return ce
+}
+
+// RemoveWorktree deletes a worktree directory and git's record of it, even when it is dirty.
+func RemoveWorktree(ctx context.Context, repo, path string) error {
+	_, err := Run(ctx, repo, "worktree", "remove", "--force", path)
+	return err
+}
+
+// DeleteBranch force-deletes a local branch.
+func DeleteBranch(ctx context.Context, repo, name string) error {
+	_, err := Run(ctx, repo, "branch", "-D", "-q", name)
+	return err
+}

@@ -9,7 +9,10 @@ import (
 	"testing"
 
 	"mill/internal/gitx"
+	"mill/internal/plan"
 	"mill/internal/project"
+	"mill/internal/store"
+	"mill/internal/taskspec"
 )
 
 const taskFile = `{
@@ -256,5 +259,32 @@ func TestTaskList(t *testing.T) {
 
 	if r := run(t, root, nil, "task"); !strings.Contains(r.stderr, "mill task list") {
 		t.Errorf("usage lacks list: %s", r.stderr)
+	}
+}
+
+func TestTaskShowAcceptsGoalTaskID(t *testing.T) {
+	root, _ := taskRepo(t, passScript, 3)
+	ctx := context.Background()
+	p := project.PathsAt(root)
+	s, err := store.Open(ctx, p.DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.CreateGoal(ctx, "goal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl := plan.Plan{Goal: "goal", Assumptions: []string{}, Tasks: []taskspec.Spec{{
+		ID: "config", Title: "Config", Kind: "implement", Spec: "do it", Acceptance: []string{"done"},
+		Checks: []string{}, Owns: []string{}, Size: "S", DependsOn: []string{}}}}
+	if err := s.ApproveGoal(ctx, g.ID, pl); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "task", "show", g.ID+"/config")
+	if r.code != ExitOK || !strings.Contains(r.stdout, g.ID+"/config") || !strings.Contains(r.stdout, "pending") {
+		t.Fatalf("show: %+v", r)
 	}
 }

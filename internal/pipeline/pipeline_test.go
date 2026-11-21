@@ -15,6 +15,7 @@ import (
 	"mill/internal/config"
 	"mill/internal/gitx"
 	"mill/internal/host"
+	"mill/internal/plan"
 	"mill/internal/project"
 	"mill/internal/runner"
 	"mill/internal/store"
@@ -431,4 +432,175 @@ func (c cancelRunner) Run(ctx context.Context, req runner.Request) (runner.Resul
 	orig := req.OnUsage
 	req.OnUsage = func(d budget.Usage) { orig(d); c.cancel() }
 	return c.inner.Run(ctx, req)
+}
+
+// goal approves a goal whose plan has the given tasks (id -> depends_on, in the order given).
+func (e *env) goal(t *testing.T, deps ...[]string) {
+	t.Helper()
+	ctx := context.Background()
+	var tasks []taskspec.Spec
+	for i := 0; i < len(deps); i += 1 {
+		id := string(rune('a' + i))
+		tasks = append(tasks, taskspec.Spec{ID: id, Title: "Task " + id, Kind: "implement", Spec: "create a file",
+			Acceptance: []string{"file exists"}, Checks: []string{}, Owns: []string{}, Size: "S", DependsOn: deps[i]})
+	}
+	g, err := e.p.Store.CreateGoal(ctx, "goal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.Store.ApproveGoal(ctx, g.ID, plan.Plan{Goal: "goal", Assumptions: []string{}, Tasks: tasks}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func goalImpl(file, body string) runner.Step { return impl(map[string]string{file: body}) }
+
+func TestGoalTaskPathsAndDependencyBase(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.goal(t, nil, []string{"a"})
+	if out := e.run(t, "g1/a"); out.Status != store.TaskVerified {
+		t.Fatalf("a: %+v", out)
+	}
+	if out := e.run(t, "g1/b"); out.Status != store.TaskVerified {
+		t.Fatalf("b: %+v\n%s", out, e.out)
+	}
+	ctx := context.Background()
+	ba, _ := e.p.Store.GetBranch(ctx, "g1/a")
+	bb, _ := e.p.Store.GetBranch(ctx, "g1/b")
+	if ba.Name != "mill/g1/a" || bb.Name != "mill/g1/b" {
+		t.Fatalf("branches %s, %s", ba.Name, bb.Name)
+	}
+	if want := filepath.Join(e.p.Cfg.Worktrees(e.root, e.p.Home), "g1", "b"); bb.Worktree != want {
+		t.Fatalf("worktree %s, want %s", bb.Worktree, want)
+	}
+	if _, err := os.Stat(filepath.Join(e.p.Paths.Runs, "g1", "b", "a1", "diff.patch")); err != nil {
+		t.Fatal(err)
+	}
+	if bb.Base != "mill/g1/a" || bb.BaseSHA != ba.HeadSHA || bb.StartSHA != ba.HeadSHA {
+		t.Fatalf("b branch = %+v, a head %s", bb, ba.HeadSHA)
+	}
+	if _, err := os.Stat(filepath.Join(bb.Worktree, "a.txt")); err != nil {
+		t.Fatal("dependency file missing in worktree")
+	}
+}
+
+func TestFanInMergesOtherDependenciesAndDiffsFromStart(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a-content\n"), goalImpl("b.txt", "b-content\n"), goalImpl("c.txt", "c-content\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass"), verdict("pass")},
+	}, nil)
+	e.goal(t, nil, nil, []string{"a", "b"})
+	for _, id := range []string{"g1/a", "g1/b", "g1/c"} {
+		if out := e.run(t, id); out.Status != store.TaskVerified {
+			t.Fatalf("%s: %+v\n%s", id, out, e.out)
+		}
+	}
+	ctx := context.Background()
+	bb, _ := e.p.Store.GetBranch(ctx, "g1/b")
+	bc, _ := e.p.Store.GetBranch(ctx, "g1/c")
+	if bc.Base != "mill/g1/b" || bc.BaseSHA != bb.HeadSHA || bc.StartSHA == bc.BaseSHA || bc.StartSHA == "" {
+		t.Fatalf("c branch = %+v", bc)
+	}
+	for _, f := range []string{"a.txt", "b.txt", "c.txt"} {
+		if _, err := os.Stat(filepath.Join(bc.Worktree, f)); err != nil {
+			t.Fatalf("%s missing: %v", f, err)
+		}
+	}
+	if parents, _ := gitx.Run(ctx, bc.Worktree, "rev-parse", bc.StartSHA+"^@"); len(strings.Fields(parents)) != 2 {
+		t.Fatalf("start is not a merge commit: %q", parents)
+	}
+	vp := prompts(e.fake, runner.RoleVerifier)[2]
+	if !strings.Contains(vp, "c-content") || strings.Contains(vp, "a-content") || strings.Contains(vp, "b-content") {
+		t.Fatalf("verifier prompt has foreign changes:\n%s", vp)
+	}
+	patch, _ := os.ReadFile(filepath.Join(e.p.Paths.Runs, "g1", "c", "a1", "diff.patch"))
+	if !strings.Contains(string(patch), "c-content") || strings.Contains(string(patch), "a-content") || strings.Contains(string(patch), "b-content") {
+		t.Fatalf("diff.patch has foreign changes:\n%s", patch)
+	}
+}
+
+func TestConflictingDependenciesBlockTask(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("same.txt", "from a\n"), goalImpl("same.txt", "from b\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.goal(t, nil, nil, []string{"a", "b"})
+	e.run(t, "g1/a")
+	e.run(t, "g1/b")
+	out := e.run(t, "g1/c")
+	if out.Status != store.TaskBlocked || !strings.Contains(out.Reason, "g1/a") || !strings.Contains(out.Reason, "same.txt") {
+		t.Fatalf("outcome = %+v", out)
+	}
+	task, _ := e.p.Store.GetTask(context.Background(), "g1/c")
+	if task.Status != store.TaskBlocked {
+		t.Fatalf("status = %s", task.Status)
+	}
+	if gitx.BranchExists(context.Background(), e.root, "mill/g1/c") {
+		t.Fatal("conflicted branch left behind")
+	}
+	if _, err := os.Stat(filepath.Join(e.p.Cfg.Worktrees(e.root, e.p.Home), "g1", "c")); err == nil {
+		t.Fatal("worktree left behind")
+	}
+}
+
+func TestUnverifiedDependencyBlocksTask(t *testing.T) {
+	e := setup(t, `true`, runner.Script{}, nil)
+	e.goal(t, nil, []string{"a"})
+	out := e.run(t, "g1/b")
+	if out.Status != store.TaskBlocked || !strings.Contains(out.Reason, "g1/a") || !strings.Contains(out.Reason, "pending") {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if len(e.fake.Calls()) != 0 {
+		t.Fatal("agent ran")
+	}
+}
+
+func TestGoalBudgetBlocksGoalTask(t *testing.T) {
+	e := setup(t, `true`, runner.Script{}, func(c *config.Config) {
+		c.Budget.Goal = budget.Limits{Tokens: 1000}
+	})
+	e.goal(t, nil)
+	ctx := context.Background()
+	id, err := e.p.Store.StartAttempt(ctx, "g1/a", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.Store.FinishAttempt(ctx, id, "ok", budget.Usage{InputTokens: 900}, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	out := e.run(t, "g1/a")
+	if out.Status != store.TaskBlocked || !strings.Contains(out.Reason, "goal budget exhausted") || !strings.Contains(out.Reason, "900") {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if len(e.fake.Calls()) != 0 {
+		t.Fatal("agent ran")
+	}
+}
+
+func TestRetryWithoutStartSHAUsesBaseSHA(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("x.txt", "x\n")},
+		runner.RoleVerifier:    {verdict("pass")},
+	}, nil)
+	e.task(t, "old")
+	ctx := context.Background()
+	// A branch recorded before start_sha existed.
+	baseSHA, _ := gitx.RevParse(ctx, e.root, "main")
+	wt := filepath.Join(e.p.Cfg.Worktrees(e.root, e.p.Home), "old")
+	if err := gitx.AddWorktree(ctx, e.root, wt, "mill/t/old", baseSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.Store.SaveBranch(ctx, store.Branch{TaskID: "old", Name: "mill/t/old", Base: "main", BaseSHA: baseSHA, HeadSHA: baseSHA, Worktree: wt}); err != nil {
+		t.Fatal(err)
+	}
+	out := e.run(t, "old")
+	if out.Status != store.TaskVerified {
+		t.Fatalf("outcome = %+v\n%s", out, e.out)
+	}
+	if vp := prompts(e.fake, runner.RoleVerifier)[0]; !strings.Contains(vp, "+x") {
+		t.Fatalf("verifier prompt:\n%s", vp)
+	}
 }

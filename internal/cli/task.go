@@ -162,7 +162,11 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		return ExitNotVerified
 	}
 	if br, err := s.GetBranch(ctx, spec.ID); err == nil {
-		fmt.Fprintf(env.Stdout, "\nReview: git -C %s diff %s..%s\n", br.Worktree, short(br.BaseSHA), br.Name)
+		from := br.StartSHA
+		if from == "" {
+			from = br.BaseSHA
+		}
+		fmt.Fprintf(env.Stdout, "\nReview: git -C %s diff %s..%s\n", br.Worktree, short(from), br.Name)
 	}
 	return ExitOK
 }
