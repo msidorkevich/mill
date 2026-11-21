@@ -175,12 +175,11 @@ func runPlanGoal(ctx context.Context, env Env, goal string) int {
 	allow := append(append(append([]string{}, host.DefaultEnvAllow...), cfg.EnvAllow...), p.AgentEnvAllow...)
 
 	fmt.Fprintf(env.Stdout, "Planning (model %s, logs in %s)...\n", cfg.Model("M"), logDir)
-	rctx, cancel := context.WithTimeout(ctx, cfg.Runner.AttemptTimeout.Duration)
-	defer cancel()
-	res, err := planner.Generate(rctx, planner.Options{
+	res, err := planner.Generate(ctx, planner.Options{
 		Runner: p.Runner, Goal: goal, Root: paths.Root, CheckCmd: cfg.CheckCmd,
 		Model: cfg.Model("M"), Budget: cfg.AttemptBudget("M"), Count: cfg.Budget.Count,
 		LogDir: logDir, ProtectedPaths: []string{paths.MillDir}, Env: host.AllowEnv(os.Environ(), allow),
+		Timeout: cfg.Runner.AttemptTimeout.Duration,
 	})
 	cost := fmt.Sprintf("planning cost: %s tokens (billable), $%.2f in %d agent call(s)",
 		fmtInt(res.Usage.Tokens(budget.CountBillable)), res.Usage.CostUSD, res.Calls)

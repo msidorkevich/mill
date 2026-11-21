@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"mill/internal/budget"
 	"mill/internal/gitx"
@@ -186,6 +187,7 @@ type Options struct {
 	LogDir         string
 	ProtectedPaths []string
 	Env            []string
+	Timeout        time.Duration // per agent call; 0 means no limit
 }
 
 // Result is what Generate produced.
@@ -223,7 +225,7 @@ func Generate(ctx context.Context, o Options) (Result, error) {
 				return res, err
 			}
 		}
-		out, usage, err := runOnce(ctx, o, Prompt(o.Goal, survey, problems), logDir)
+		out, usage, err := runOnce(ctx, o, call, Prompt(o.Goal, survey, problems), logDir)
 		res.Calls++
 		res.Usage = res.Usage.Add(usage)
 		if err != nil {
@@ -244,8 +246,15 @@ func Generate(ctx context.Context, o Options) (Result, error) {
 }
 
 // runOnce runs the planner agent once, stopping it when it crosses the budget.
-func runOnce(ctx context.Context, o Options, promptText, logDir string) (json.RawMessage, budget.Usage, error) {
-	rctx, cancel := context.WithCancel(ctx)
+// A call that outlives o.Timeout is cancelled and reported as a timeout.
+func runOnce(ctx context.Context, o Options, call int, promptText, logDir string) (json.RawMessage, budget.Usage, error) {
+	var rctx context.Context
+	var cancel context.CancelFunc
+	if o.Timeout > 0 {
+		rctx, cancel = context.WithTimeout(ctx, o.Timeout)
+	} else {
+		rctx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 	var mu sync.Mutex
 	var spent budget.Usage
@@ -267,6 +276,9 @@ func runOnce(ctx context.Context, o Options, promptText, logDir string) (json.Ra
 	mu.Lock()
 	overReason := over
 	mu.Unlock()
+	if o.Timeout > 0 && ctx.Err() == nil && errors.Is(rctx.Err(), context.DeadlineExceeded) && overReason == "" {
+		return nil, res.Usage, fmt.Errorf("the planner timed out after %s on call %d; raise runner.attempt_timeout in the mill config to give it more time", o.Timeout, call)
+	}
 	if err != nil {
 		return nil, res.Usage, fmt.Errorf("planner run: %w", err)
 	}

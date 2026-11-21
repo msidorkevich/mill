@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"mill/internal/budget"
 	"mill/internal/gitx"
@@ -277,5 +278,40 @@ func TestGenerateStopsAtBudget(t *testing.T) {
 	}
 	if res.Usage.CostUSD != 4 {
 		t.Errorf("usage = %+v", res.Usage)
+	}
+}
+
+func TestGenerateTimeoutIsPerCall(t *testing.T) {
+	a, b := step(invalidPlan, 0.5), step(validPlan, 0.25)
+	a.DelayMS, b.DelayMS = 150, 150
+	f := runner.NewFake(runner.Script{runner.RolePlanner: {a, b}})
+	o := options(t, f)
+	o.Timeout = 250 * time.Millisecond
+	res, err := Generate(context.Background(), o)
+	if err != nil {
+		t.Fatalf("second call was cut short: %v", err)
+	}
+	if res.Calls != 2 {
+		t.Errorf("calls = %d", res.Calls)
+	}
+}
+
+func TestGenerateTimeoutNamesDurationCallAndSetting(t *testing.T) {
+	slow := step(validPlan, 0.25)
+	slow.DelayMS = 5000
+	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(invalidPlan, 0.5), slow}})
+	o := options(t, f)
+	o.Timeout = 100 * time.Millisecond
+	res, err := Generate(context.Background(), o)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	for _, want := range []string{"timed out after 100ms", "call 2", "runner.attempt_timeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	if res.Usage.CostUSD != 0.5 || res.Calls != 2 {
+		t.Errorf("result = %+v", res)
 	}
 }
