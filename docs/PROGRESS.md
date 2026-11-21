@@ -273,3 +273,7 @@ are not inherited by children, so the lock ends exactly when mill does.
 - [ ] `gate-triage`: a failing gate command is re-run once (flaky → passes, verifier told);
       if it still fails it runs on the task's starting point: fails there too → task blocked as
       not caused by it; passes there → finding says the task caused it
+- [ ] `reaper-cwd` (found in review of `reaper-orphans`; the flaw was in my spec): a leaderless
+      group can be an unrelated process group if the worker's group died and its pid was
+      reused before recovery; only kill members whose working directory is inside the task's
+      worktree
