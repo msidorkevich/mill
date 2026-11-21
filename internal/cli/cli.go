@@ -53,6 +53,7 @@ func init() {
 		{"task", "run or show a single task (run, show)", runTask},
 		{"plan", "create, review and approve a plan (show, edit, approve)", runPlan},
 		{"goal", "list or show goals (list, show)", runGoal},
+		{"run", "run an approved goal's tasks in dependency order (--retry-blocked)", runRun},
 		{"version", "print the mill version", runVersion},
 		{"help", "show this help", func(_ context.Context, env Env, _ []string) int {
 			usage(env.Stdout)
@@ -89,7 +90,7 @@ func usage(w io.Writer) {
 		fmt.Fprintf(w, "  %-8s %s\n", c.name, c.summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task not verified.")
+	fmt.Fprintln(w, "Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.")
 }
 
 func newFlags(env Env, name string) *flag.FlagSet {

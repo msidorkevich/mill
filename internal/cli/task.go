@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -98,20 +99,11 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 	}
 	defer s.Close()
 
-	lock, err := runlock.Acquire(paths.RunLock)
+	release, err := lockAndRecover(ctx, env, "task run", paths, s)
 	if err != nil {
 		return fail(err)
 	}
-	defer func() {
-		if err := lock.Release(); err != nil {
-			fmt.Fprintf(env.Stderr, "mill task run: %v\n", err)
-		}
-	}()
-	if tasks, attempts, err := s.RecoverInterrupted(ctx); err != nil {
-		return fail(err)
-	} else if tasks > 0 || attempts > 0 {
-		fmt.Fprintf(env.Stdout, "recovered %d interrupted task(s) and %d running attempt(s) from a previous run\n", tasks, attempts)
-	}
+	defer release()
 
 	existing, err := s.GetTask(ctx, spec.ID)
 	switch {
@@ -137,37 +129,9 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		}
 	}
 
-	h := host.Host(host.NewExec())
-	if cfg.Host.Kind == "herdr" {
-		fmt.Fprintln(env.Stderr, "mill task run: the herdr host is not implemented yet; using exec")
-	}
-	var r runner.Runner
-	var agentEnv []string
-	switch cfg.Runner.Kind {
-	case "claude":
-		r = runner.NewClaude(cfg.Runner.ClaudeBin, h)
-		agentEnv = runner.ClaudeEnvAllow
-	case "fake":
-		sp := cfg.Runner.FakeScript
-		if !filepath.IsAbs(sp) {
-			sp = filepath.Join(paths.Root, sp)
-		}
-		script, err := runner.LoadFakeScript(sp)
-		if err != nil {
-			return fail(err)
-		}
-		r = runner.NewFake(script)
-	}
-	home := env.Home
-	if home == "" {
-		if home, err = os.UserHomeDir(); err != nil {
-			return fail(err)
-		}
-	}
-
-	p := &pipeline.Pipeline{
-		Store: s, Runner: r, Host: h, Cfg: cfg, Paths: paths, Home: home,
-		Out: env.Stdout, AgentEnvAllow: agentEnv,
+	p, err := newPipeline(env, "task run", paths, cfg, s, env.Stdout)
+	if err != nil {
+		return fail(err)
 	}
 	out, err := p.Run(ctx, spec.ID)
 	if err != nil {
@@ -185,6 +149,65 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stdout, "\nReview: git -C %s diff %s..%s\n", br.Worktree, short(from), br.Name)
 	}
 	return ExitOK
+}
+
+// lockAndRecover takes the run lock and repairs what a killed run left behind. Call release
+// when the run ends.
+func lockAndRecover(ctx context.Context, env Env, name string, paths project.Paths, s *store.Store) (release func(), err error) {
+	lock, err := runlock.Acquire(paths.RunLock)
+	if err != nil {
+		return nil, err
+	}
+	release = func() {
+		if err := lock.Release(); err != nil {
+			fmt.Fprintf(env.Stderr, "mill %s: %v\n", name, err)
+		}
+	}
+	tasks, attempts, err := s.RecoverInterrupted(ctx)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	if tasks > 0 || attempts > 0 {
+		fmt.Fprintf(env.Stdout, "recovered %d interrupted task(s) and %d running attempt(s) from a previous run\n", tasks, attempts)
+	}
+	return release, nil
+}
+
+// newPipeline builds the pipeline from the project config: host, runner and agent env.
+func newPipeline(env Env, name string, paths project.Paths, cfg config.Config, s *store.Store, out io.Writer) (*pipeline.Pipeline, error) {
+	h := host.Host(host.NewExec())
+	if cfg.Host.Kind == "herdr" {
+		fmt.Fprintf(env.Stderr, "mill %s: the herdr host is not implemented yet; using exec\n", name)
+	}
+	var r runner.Runner
+	var agentEnv []string
+	switch cfg.Runner.Kind {
+	case "claude":
+		r = runner.NewClaude(cfg.Runner.ClaudeBin, h)
+		agentEnv = runner.ClaudeEnvAllow
+	case "fake":
+		sp := cfg.Runner.FakeScript
+		if !filepath.IsAbs(sp) {
+			sp = filepath.Join(paths.Root, sp)
+		}
+		script, err := runner.LoadFakeScript(sp)
+		if err != nil {
+			return nil, err
+		}
+		r = runner.NewFake(script)
+	}
+	home := env.Home
+	if home == "" {
+		var err error
+		if home, err = os.UserHomeDir(); err != nil {
+			return nil, err
+		}
+	}
+	return &pipeline.Pipeline{
+		Store: s, Runner: r, Host: h, Cfg: cfg, Paths: paths, Home: home,
+		Out: out, AgentEnvAllow: agentEnv,
+	}, nil
 }
 
 type taskView struct {

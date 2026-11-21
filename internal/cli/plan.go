@@ -551,39 +551,9 @@ func runGoalShow(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	defer s.Close()
-	g, err := s.GetGoal(ctx, id)
+	v, err := loadGoalView(ctx, s, id)
 	if err != nil {
 		return fail(err)
-	}
-	tasks, err := s.GoalTasks(ctx, id)
-	if err != nil {
-		return fail(err)
-	}
-	sums, err := s.TaskSummaries(ctx, "")
-	if err != nil {
-		return fail(err)
-	}
-	sumByID := map[string]store.TaskSummary{}
-	for _, x := range sums {
-		sumByID[x.ID] = x
-	}
-	usage, err := s.GoalUsage(ctx, id)
-	if err != nil {
-		return fail(err)
-	}
-	rows := []goalTask{}
-	for _, t := range tasks {
-		deps, err := s.TaskDeps(ctx, t.ID)
-		if err != nil {
-			return fail(err)
-		}
-		local := []string{}
-		for _, d := range deps {
-			_, l := store.SplitTaskID(d)
-			local = append(local, l)
-		}
-		_, l := store.SplitTaskID(t.ID)
-		rows = append(rows, goalTask{TaskSummary: sumByID[t.ID], LocalID: l, DependsOn: local})
 	}
 
 	if *asJSON {
@@ -594,26 +564,76 @@ func runGoalShow(ctx context.Context, env Env, args []string) int {
 			Goal   store.Goal   `json:"goal"`
 			Usage  budget.Usage `json:"usage"`
 			Tasks  []goalTask   `json:"tasks"`
-		}{"mill/goal@1", g, usage, rows}); err != nil {
+		}{"mill/goal@1", v.Goal, v.Usage, v.Tasks}); err != nil {
 			return fail(err)
 		}
 		return ExitOK
 	}
-	w := env.Stdout
-	fmt.Fprintf(w, "%s: %s\n", g.ID, g.Title)
-	fmt.Fprintf(w, "  status    %s\n", g.Status)
-	if g.Reason != "" {
-		fmt.Fprintf(w, "  reason    %s\n", g.Reason)
+	printGoalView(env.Stdout, v)
+	return ExitOK
+}
+
+// goalView is a goal with its spend and tasks, as `mill goal show` prints it.
+type goalView struct {
+	Goal  store.Goal
+	Usage budget.Usage
+	Tasks []goalTask
+}
+
+func loadGoalView(ctx context.Context, s *store.Store, id string) (goalView, error) {
+	var v goalView
+	var err error
+	if v.Goal, err = s.GetGoal(ctx, id); err != nil {
+		return v, err
 	}
-	fmt.Fprintf(w, "  spend     %s tokens (billable), $%.2f\n", fmtInt(usage.Tokens(budget.CountBillable)), usage.CostUSD)
-	if len(rows) == 0 {
-		fmt.Fprintf(w, "\nno tasks yet (the plan is %s)\n", g.Status)
-		return ExitOK
+	tasks, err := s.GoalTasks(ctx, id)
+	if err != nil {
+		return v, err
+	}
+	sums, err := s.TaskSummaries(ctx, "")
+	if err != nil {
+		return v, err
+	}
+	sumByID := map[string]store.TaskSummary{}
+	for _, x := range sums {
+		sumByID[x.ID] = x
+	}
+	if v.Usage, err = s.GoalUsage(ctx, id); err != nil {
+		return v, err
+	}
+	v.Tasks = []goalTask{}
+	for _, t := range tasks {
+		deps, err := s.TaskDeps(ctx, t.ID)
+		if err != nil {
+			return v, err
+		}
+		local := []string{}
+		for _, d := range deps {
+			_, l := store.SplitTaskID(d)
+			local = append(local, l)
+		}
+		_, l := store.SplitTaskID(t.ID)
+		v.Tasks = append(v.Tasks, goalTask{TaskSummary: sumByID[t.ID], LocalID: l, DependsOn: local})
+	}
+	return v, nil
+}
+
+// printGoalView prints a goal's status, spend and task table (`mill goal show`).
+func printGoalView(w io.Writer, v goalView) {
+	fmt.Fprintf(w, "%s: %s\n", v.Goal.ID, v.Goal.Title)
+	fmt.Fprintf(w, "  status    %s\n", v.Goal.Status)
+	if v.Goal.Reason != "" {
+		fmt.Fprintf(w, "  reason    %s\n", v.Goal.Reason)
+	}
+	fmt.Fprintf(w, "  spend     %s tokens (billable), $%.2f\n", fmtInt(v.Usage.Tokens(budget.CountBillable)), v.Usage.CostUSD)
+	if len(v.Tasks) == 0 {
+		fmt.Fprintf(w, "\nno tasks yet (the plan is %s)\n", v.Goal.Status)
+		return
 	}
 	fmt.Fprintln(w)
 	tw := tabwriter.NewWriter(w, 2, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tSTATUS\tDEPENDS ON\tATTEMPTS\tTOKENS\tCOST")
-	for _, r := range rows {
+	for _, r := range v.Tasks {
 		st := r.Status
 		if r.Phase != "" {
 			st += " (" + r.Phase + ")"
@@ -622,5 +642,4 @@ func runGoalShow(ctx context.Context, env Env, args []string) int {
 			r.Attempts, fmtInt(r.Usage.Tokens(budget.CountBillable)), r.Usage.CostUSD)
 	}
 	tw.Flush()
-	return ExitOK
 }

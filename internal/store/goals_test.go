@@ -292,3 +292,48 @@ func TestBranchStartSHASavedAndLoaded(t *testing.T) {
 		t.Fatalf("updated branch = %+v", got)
 	}
 }
+
+func TestResetGoalTasksMatchesStatusAndReason(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	g, err := s.CreateGoal(ctx, "g", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveGoal(ctx, g.ID, goalPlan()); err != nil {
+		t.Fatal(err)
+	}
+	a, b, c := TaskID(g.ID, "a"), TaskID(g.ID, "b"), TaskID(g.ID, "c")
+	for _, x := range []struct{ id, status, reason string }{
+		{a, TaskBlocked, "interrupted"}, {b, TaskFailed, "mill error: boom"}, {c, TaskBlocked, "gate failed"},
+	} {
+		if err := s.SetTaskStatus(ctx, x.id, x.status, PhaseGate, x.reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids, err := s.ResetGoalTasks(ctx, g.ID, []string{TaskBlocked}, "interrupted", "interrupted")
+	if err != nil || !reflect.DeepEqual(ids, []string{a}) {
+		t.Fatalf("interrupted reset = %v, %v", ids, err)
+	}
+	if got, _ := s.GetTask(ctx, a); got.Status != TaskPending || got.Phase != "" || got.Reason != "interrupted" {
+		t.Fatalf("a = %+v", got)
+	}
+	if got, _ := s.GetTask(ctx, c); got.Status != TaskBlocked {
+		t.Fatalf("c should stay blocked: %+v", got)
+	}
+
+	ids, err = s.ResetGoalTasks(ctx, g.ID, []string{TaskBlocked, TaskFailed}, "", "retry requested")
+	if err != nil || !reflect.DeepEqual(ids, []string{b, c}) {
+		t.Fatalf("retry reset = %v, %v", ids, err)
+	}
+	for _, id := range []string{b, c} {
+		if got, _ := s.GetTask(ctx, id); got.Status != TaskPending || got.Reason != "retry requested" {
+			t.Fatalf("%s = %+v", id, got)
+		}
+	}
+	evs, err := s.TaskEvents(ctx, c)
+	if err != nil || evs[len(evs)-1].Kind != "task-status" || !strings.Contains(string(evs[len(evs)-1].Data), "retry requested") {
+		t.Fatalf("events = %+v, %v", evs, err)
+	}
+}

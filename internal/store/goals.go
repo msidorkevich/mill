@@ -339,3 +339,57 @@ func (s *Store) GoalUsage(ctx context.Context, goalID string) (budget.Usage, err
 		Scan(&u.InputTokens, &u.OutputTokens, &u.CacheWriteTokens, &u.CacheReadTokens, &u.CostUSD)
 	return u, err
 }
+
+// ResetGoalTasks puts a goal's tasks back to pending with the given reason, in one
+// transaction, and records a task-status event for each. A task is reset when its status is
+// one of statuses and, if onlyReason is not empty, its reason equals onlyReason. It returns
+// the reset task ids in plan order.
+func (s *Store) ResetGoalTasks(ctx context.Context, goalID string, statuses []string, onlyReason, reason string) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("reset tasks of goal %s: %w", goalID, err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id, status, reason FROM tasks WHERE goal_id = ? ORDER BY rowid`, goalID)
+	if err != nil {
+		return nil, fmt.Errorf("reset tasks of goal %s: %w", goalID, err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id, status, why string
+		if err := rows.Scan(&id, &status, &why); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		match := false
+		for _, st := range statuses {
+			if status == st {
+				match = true
+			}
+		}
+		if match && (onlyReason == "" || why == onlyReason) {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	now := s.ts()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET status = ?, phase = '', reason = ?, updated_at = ? WHERE id = ?`,
+			TaskPending, reason, now, id); err != nil {
+			return nil, fmt.Errorf("reset task %s: %w", id, err)
+		}
+		if err := s.appendEventTx(ctx, tx, "task-status", goalID, id,
+			map[string]string{"status": TaskPending, "phase": "", "reason": reason}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("reset tasks of goal %s: %w", goalID, err)
+	}
+	return ids, nil
+}
