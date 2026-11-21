@@ -164,17 +164,26 @@ Built by mill, one task at a time:
 - [x] `scheduler`: `mill run <goal>`: ready set, `owns` serialization, `max_parallel`, goal
       status, interruption handling, `--retry-blocked` (GR1–GR5) (1 attempt, Opus, $2.11)
 
-Built by mill as a goal (through the scheduler):
-- [ ] `planner`: `mill plan "<goal>"`: repo survey, planner agent, retry once on validation
-      errors (PL1, PL4, PL6)
-- [ ] `crash-test`: kill -9 a running `mill run` and restart; nothing duplicated (TS3)
-- [ ] `stream-message-fix`: found in review: `system/permission_denied` stream events carry
-      `message` as a string, so the claude runner counted them as unparseable lines
-- [ ] `scheduler-once`: found in review: a task that returns still `pending` would be restarted
-      forever; never start a task twice in one run
-- [ ] `workflow-docs`: README walkthrough of plan → approve → run (depends on `planner` and
-      `crash-test`: exercises fan-in)
+Built by mill as a goal (through the scheduler): goal `g1`, done in one `mill run`, 5/5 tasks
+verified on the first attempt, 192.6k tokens, $1.71; two tasks at a time; `workflow-docs`
+waited for both of its dependencies and branched from `crash-test` with `planner` merged in.
+- [x] `planner`: `mill plan "<goal>"`: repo survey, planner agent, retry once on validation
+      errors (PL1, PL4, PL6) (Opus, $1.25)
+- [x] `crash-test`: kill -9 a running `mill run` and restart; nothing duplicated (TS3) ($0.18)
+- [x] `stream-message-fix`: found in review: `system/permission_denied` stream events carry
+      `message` as a string, so the claude runner counted them as unparseable lines ($0.08)
+- [x] `scheduler-once`: found in review: a task that returns still `pending` would be restarted
+      forever; never start a task twice in one run ($0.11)
+- [x] `workflow-docs`: README walkthrough of plan → approve → run (fan-in of `planner` and
+      `crash-test`) ($0.09; two inaccurate sentences corrected by hand in review)
 
 Exit criterion:
 - [ ] A real goal through the real planner becomes 3–8 tasks, all verified
 - [ ] Kill and restart finishes with nothing duplicated
+
+### Follow-ups found in M2 reviews
+
+- [ ] A goal task's spec cannot be changed after approval; a blocked goal task can only be
+      retried as is (`mill run <goal> --retry-blocked`). Add a way to edit a task's spec.
+- [ ] The planner call has no time limit (`runner.attempt_timeout` is only applied in the
+      pipeline); a hung planner is stopped only by its budget.
