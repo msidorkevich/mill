@@ -199,11 +199,8 @@ type resultEvent struct {
 
 func (p *streamParser) line(b []byte) {
 	var ev struct {
-		Type    string `json:"type"`
-		Message struct {
-			ID    string     `json:"id"`
-			Usage *usageJSON `json:"usage"`
-		} `json:"message"`
+		Type    string          `json:"type"`
+		Message json.RawMessage `json:"message"`
 	}
 	if err := json.Unmarshal(b, &ev); err != nil {
 		p.mu.Lock()
@@ -213,15 +210,20 @@ func (p *streamParser) line(b []byte) {
 	}
 	switch ev.Type {
 	case "assistant":
-		if ev.Message.Usage == nil {
+		// message is decoded only here: other event types may carry a string.
+		var msg struct {
+			ID    string     `json:"id"`
+			Usage *usageJSON `json:"usage"`
+		}
+		if err := json.Unmarshal(ev.Message, &msg); err != nil || msg.Usage == nil {
 			return
 		}
 		// One API message can arrive as several assistant events (one per content block)
 		// carrying the same usage; count only the growth per message id.
-		u := ev.Message.Usage.usage()
+		u := msg.Usage.usage()
 		p.mu.Lock()
-		delta := positive(subtract(u, p.seen[ev.Message.ID]))
-		p.seen[ev.Message.ID] = maxUsage(u, p.seen[ev.Message.ID])
+		delta := positive(subtract(u, p.seen[msg.ID]))
+		p.seen[msg.ID] = maxUsage(u, p.seen[msg.ID])
 		p.live = p.live.Add(delta)
 		p.mu.Unlock()
 		if p.onUsage != nil && delta != (budget.Usage{}) {

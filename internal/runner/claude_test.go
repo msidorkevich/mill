@@ -189,6 +189,31 @@ func TestClaudePermissionDenialsWarn(t *testing.T) {
 	}
 }
 
+func TestClaudeStringMessageEventIsNotUnparseable(t *testing.T) {
+	denied := `{"type":"system","subtype":"permission_denied","message":"Permission to use Bash was denied"}`
+	r := `{"type":"result","subtype":"success","is_error":false,"structured_output":{"x":1},"usage":{}}`
+	bin, _, _ := fakeClaude(t, []string{lineInit, denied, r}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusOK || len(res.Warnings) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestClaudeInvalidJSONLineIsUnparseable(t *testing.T) {
+	r := `{"type":"result","subtype":"success","is_error":false,"structured_output":{"x":1},"usage":{}}`
+	bin, _, _ := fakeClaude(t, []string{"not json", r}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "1 unparseable") {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
 // Budget enforcement: the caller cancels from OnUsage and the process is killed.
 func TestClaudeCancelledFromOnUsage(t *testing.T) {
 	bin, _, _ := fakeClaude(t, []string{lineInit, lineAsst1}, "sleep 30")
