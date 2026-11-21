@@ -51,6 +51,8 @@ func init() {
 		{"init", "set up .mill/ in the current git repository", runInit},
 		{"doctor", "check the machine and repository (--json)", runDoctor},
 		{"task", "run or show a single task (run, show)", runTask},
+		{"plan", "create, review and approve a plan (show, edit, approve)", runPlan},
+		{"goal", "list or show goals (list, show)", runGoal},
 		{"version", "print the mill version", runVersion},
 		{"help", "show this help", func(_ context.Context, env Env, _ []string) int {
 			usage(env.Stdout)

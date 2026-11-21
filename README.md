@@ -53,4 +53,24 @@ mill task run --file ../add-reverse.json --retry    # after editing the spec or 
 A verified task is a branch `mill/t/<id>` in a worktree outside your checkout; mill prints the
 command to review its diff. mill never pushes and never touches `main`.
 
+### Plans and goals
+
+A goal is a request broken into tasks with dependencies. Until the planner exists, write the
+plan by hand (see `docs/examples/plan-todos.json`: a `goal`, optional `assumptions`, and
+`tasks` that each have `id`, `title`, `kind`, `spec`, `acceptance`, `checks`, `owns`,
+`depends_on` and `size`):
+
+```sh
+mill plan --file plan.json      # validate, create draft goal g1; prints every problem and creates nothing if invalid
+mill plan show g1               # tasks in dependency order; checks are untrusted until approved (--json)
+mill plan edit g1               # edit in $EDITOR (default vi); or: mill plan edit g1 --file plan.json
+mill plan approve g1            # create the goal's tasks; the plan can no longer be edited
+mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, COST, TITLE (--json)
+mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
+```
+
+If an `$EDITOR` result is invalid, mill prints the problems and keeps the edited file; fix it and
+run `mill plan edit g1 --file <path>`. `mill plan "some text"` is reserved for the planner and
+currently exits 1.
+
 Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task not verified.
