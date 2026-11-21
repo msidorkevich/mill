@@ -237,23 +237,52 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		started := p.now()
-		g := gate.Run(ctx, gate.Options{
+		gopts := gate.Options{
 			Host: p.Host, Dir: br.Worktree, Cmds: gateCmds, LogDir: logDir,
 			Env: p.env(nil), Timeout: p.Cfg.GateTimeout.Duration,
-		})
+		}
+		g := gate.Run(ctx, gopts)
 		if _, err := p.Store.AppendEvent(ctx, "task-gate", "", t.ID, map[string]any{"attempt": n, "head": br.HeadSHA, "result": g}); err != nil {
 			return out, err
 		}
 		if ctx.Err() != nil {
 			return p.block(ctx, t.ID, store.PhaseGate, "interrupted", out, nil)
 		}
-		if !g.Passed {
+		var flaky []string
+		if !g.Passed && len(g.Commands) == 0 {
+			// No checks configured: nothing to triage.
 			p.logf("%s a%d gate      FAIL %s (%s)", t.ID, n, g.Reason, p.since(started))
 			findings = gateFindings(g)
 			if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
 				return out, err
 			}
 			continue
+		}
+		if !g.Passed {
+			tr, err := p.triage(ctx, t, n, startSHA, gopts, g)
+			if err != nil {
+				return out, err
+			}
+			if ctx.Err() != nil {
+				return p.block(ctx, t.ID, store.PhaseGate, "interrupted", out, nil)
+			}
+			if tr.blocked != "" {
+				// Not a failed attempt: no retry, but the findings explain the block.
+				if err := p.recordFindings(ctx, t.ID, n, tr.findings); err != nil {
+					return out, err
+				}
+				p.logf("%s a%d gate      FAIL on the starting point too (%s)", t.ID, n, p.since(started))
+				return p.block(ctx, t.ID, store.PhaseGate, tr.blocked, out, nil)
+			}
+			if !tr.gate.Passed {
+				p.logf("%s a%d gate      FAIL %s (%s)", t.ID, n, tr.gate.Reason, p.since(started))
+				findings = tr.findings
+				if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
+					return out, err
+				}
+				continue
+			}
+			g, flaky = tr.gate, tr.flaky
 		}
 		p.logf("%s a%d gate      ok (%d command(s), %s)", t.ID, n, len(g.Commands), p.since(started))
 
@@ -275,7 +304,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		if err := writeFile(filepath.Join(logDir, "diff.patch"), diff); err != nil {
 			return out, err
 		}
-		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside})
+		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside, Flaky: flaky})
 		vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
 		if err != nil {
 			return out, err
@@ -661,20 +690,24 @@ func gateFindings(g gate.Result) []prompt.Finding {
 	}
 	var f []prompt.Finding
 	for _, c := range g.Commands {
-		if c.Passed() {
-			continue
+		if !c.Passed() {
+			f = append(f, cmdFinding(c))
 		}
-		what := fmt.Sprintf("exit %d", c.Exit)
-		if c.Error != "" {
-			what = c.Error
-		}
-		issue := fmt.Sprintf("`%s` failed (%s)", c.Cmd, what)
-		if c.Tail != "" {
-			issue += ". Output (last lines):\n" + indent(c.Tail)
-		}
-		f = append(f, prompt.Finding{Source: "gate", Issue: issue})
 	}
 	return f
+}
+
+// cmdFinding describes one failed gate command.
+func cmdFinding(c gate.CmdResult) prompt.Finding {
+	what := fmt.Sprintf("exit %d", c.Exit)
+	if c.Error != "" {
+		what = c.Error
+	}
+	issue := fmt.Sprintf("`%s` failed (%s)", c.Cmd, what)
+	if c.Tail != "" {
+		issue += ". Output (last lines):\n" + indent(c.Tail)
+	}
+	return prompt.Finding{Source: "gate", Issue: issue}
 }
 
 func nonEmpty(cmds []string) []string {

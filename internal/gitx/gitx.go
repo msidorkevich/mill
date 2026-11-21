@@ -68,6 +68,13 @@ func AddWorktreeForBranch(ctx context.Context, repo, path, branch string) error 
 	return err
 }
 
+// AddDetachedWorktree checks out sha with a detached HEAD in a new worktree at path (no
+// branch is created). Remove it with RemoveWorktree.
+func AddDetachedWorktree(ctx context.Context, repo, path, sha string) error {
+	_, err := Run(ctx, repo, "worktree", "add", "-q", "--detach", path, sha)
+	return err
+}
+
 // IsWorktreeOn reports whether path is a work tree with branch checked out.
 func IsWorktreeOn(ctx context.Context, path, branch string) bool {
 	if _, err := os.Stat(path); err != nil {
