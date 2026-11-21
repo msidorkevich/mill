@@ -194,6 +194,45 @@ func (s *Store) MaxAttemptN(ctx context.Context, taskID string) (int, error) {
 	return n, err
 }
 
+// TaskStatuses lists every valid task status.
+var TaskStatuses = []string{TaskPending, TaskRunning, TaskVerified, TaskBlocked, TaskFailed}
+
+// TaskSummary is a task with its aggregated attempts and spend.
+type TaskSummary struct {
+	ID       string       `json:"id"`
+	Title    string       `json:"title"`
+	Status   string       `json:"status"`
+	Phase    string       `json:"phase"`
+	Attempts int          `json:"attempts"` // highest attempt number used (0 if none)
+	Usage    budget.Usage `json:"usage"`
+}
+
+// TaskSummaries lists tasks oldest first (created_at, then id) in one query. A non-empty
+// status keeps only tasks with that status.
+func (s *Store) TaskSummaries(ctx context.Context, status string) ([]TaskSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.title, t.status, t.phase,
+		COALESCE(MAX(a.n), 0), COALESCE(SUM(a.input_tokens), 0), COALESCE(SUM(a.output_tokens), 0),
+		COALESCE(SUM(a.cache_write_tokens), 0), COALESCE(SUM(a.cache_read_tokens), 0), COALESCE(SUM(a.cost_usd), 0)
+		FROM tasks t LEFT JOIN attempts a ON a.task_id = t.id
+		WHERE ? = '' OR t.status = ?
+		GROUP BY t.id ORDER BY t.created_at, t.id`, status, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaskSummary
+	for rows.Next() {
+		var t TaskSummary
+		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Phase, &t.Attempts,
+			&t.Usage.InputTokens, &t.Usage.OutputTokens, &t.Usage.CacheWriteTokens, &t.Usage.CacheReadTokens,
+			&t.Usage.CostUSD); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // Branch is a task's git branch and worktree.
 type Branch struct {
 	TaskID       string    `json:"task_id"`

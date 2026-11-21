@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -35,6 +36,7 @@ func runTask(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(w, "Usage:")
 		fmt.Fprintln(w, "  mill task run --file task.json [--retry]   run one task until verified, blocked or failed")
 		fmt.Fprintln(w, "  mill task show <id> [--json]               show a task, its attempts, spend and findings")
+		fmt.Fprintln(w, "  mill task list [--status S] [--json]       list all tasks, oldest first")
 		return code
 	}
 	switch args[0] {
@@ -42,6 +44,8 @@ func runTask(ctx context.Context, env Env, args []string) int {
 		return runTaskRun(ctx, env, args[1:])
 	case "show":
 		return runTaskShow(ctx, env, args[1:])
+	case "list":
+		return runTaskList(ctx, env, args[1:])
 	}
 	fmt.Fprintf(env.Stderr, "mill task: unknown subcommand %q\n", args[0])
 	return ExitUsage
@@ -247,6 +251,64 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 		return ExitOK
 	}
 	printTask(env, v)
+	return ExitOK
+}
+
+func runTaskList(ctx context.Context, env Env, args []string) int {
+	fs := newFlags(env, "task list")
+	asJSON := fs.Bool("json", false, "print one JSON document")
+	status := fs.String("status", "", "only tasks with this status")
+	if code, ok := parse(fs, args); !ok {
+		return code
+	}
+	if *status != "" && !slices.Contains(store.TaskStatuses, *status) {
+		fmt.Fprintf(env.Stderr, "mill task list: unknown status %q (valid: %s)\n", *status, strings.Join(store.TaskStatuses, ", "))
+		return ExitUsage
+	}
+	fail := func(err error) int {
+		fmt.Fprintf(env.Stderr, "mill task list: %v\n", err)
+		return ExitError
+	}
+	_, _, s, err := openProject(ctx, env)
+	if err != nil {
+		return fail(err)
+	}
+	defer s.Close()
+	tasks, err := s.TaskSummaries(ctx, *status)
+	if err != nil {
+		return fail(err)
+	}
+	if tasks == nil {
+		tasks = []store.TaskSummary{}
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(env.Stdout)
+		enc.SetIndent("", "  ")
+		doc := struct {
+			Schema string              `json:"schema"`
+			Tasks  []store.TaskSummary `json:"tasks"`
+		}{"mill/task-list@1", tasks}
+		if err := enc.Encode(doc); err != nil {
+			return fail(err)
+		}
+		return ExitOK
+	}
+	if len(tasks) == 0 {
+		fmt.Fprintln(env.Stdout, "no tasks")
+		return ExitOK
+	}
+	tw := tabwriter.NewWriter(env.Stdout, 2, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tSTATUS\tATTEMPTS\tTOKENS\tCOST\tTITLE")
+	for _, t := range tasks {
+		st := t.Status
+		if t.Phase != "" {
+			st += " (" + t.Phase + ")"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%.2f\t%s\n", t.ID, st, t.Attempts,
+			fmtInt(t.Usage.Tokens(budget.CountBillable)), t.Usage.CostUSD, t.Title)
+	}
+	tw.Flush()
 	return ExitOK
 }
 
