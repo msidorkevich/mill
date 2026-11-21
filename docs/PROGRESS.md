@@ -255,7 +255,7 @@ The M2 follow-ups section above is resolved by this goal:
       was fine, or retry until it passes. The verifier and findings could say when a failing test
       is outside the task's diff.
 
-## g2 review follow-ups: in progress (goal `g3`, on `main`)
+## g2 review follow-ups: done (goal `g3` + task `reaper-cwd`, on `main`)
 
 Plan: `~/prj/mill-tasks/g3-followups.plan.json`, run through mill's scheduler.
 
@@ -265,15 +265,21 @@ killed in that window, the half-started child keeps the lock for a moment after 
 Heavy load (parallel gates, `-race`) widens the window. `fcntl` locks belong to the process and
 are not inherited by children, so the lock ends exactly when mill does.
 
-- [ ] `runlock-fcntl`: run lock on `fcntl` (process-owned); crash test strict again; stress run
-- [ ] `owns-check`: files changed outside `owns` are listed; `owns_policy` = warn (verifier
-      judges) | enforce (finding before the gate) | off
-- [ ] `reaper-orphans`: recovery also kills members of a worker's process group whose leader
-      already exited
-- [ ] `gate-triage`: a failing gate command is re-run once (flaky → passes, verifier told);
+- [x] `runlock-fcntl`: run lock on `fcntl` (process-owned); crash test strict again; stress run
+      ($0.19). Review: 24/24 strict crash-test runs passed, four at a time under `-race`. Caveat:
+      the old failure never reproduced locally either (0/21), so this shows the strict test is
+      reliable, not that the hypothesis was right; it removes the only mechanism found.
+- [x] `owns-check`: files changed outside `owns` are listed; `owns_policy` = warn (verifier
+      judges) | enforce (finding before the gate) | off ($0.29). Changed in review: the enforce
+      finding now says how to revert (`git restore --source <start>`; `git checkout` is denied
+      to implementers).
+- [x] `reaper-orphans`: recovery also kills members of a worker's process group whose leader
+      already exited ($0.16)
+- [x] `gate-triage`: a failing gate command is re-run once (flaky → passes, verifier told);
       if it still fails it runs on the task's starting point: fails there too → task blocked as
-      not caused by it; passes there → finding says the task caused it
-- [ ] `reaper-cwd` (found in review of `reaper-orphans`; the flaw was in my spec): a leaderless
+      not caused by it; passes there → finding says the task caused it (Opus, $1.85)
+- [x] `reaper-cwd` (found in review of `reaper-orphans`; the flaw was in my spec): a leaderless
       group can be an unrelated process group if the worker's group died and its pid was
       reused before recovery; only kill members whose working directory is inside the task's
-      worktree
+      worktree ($0.24). The first run with owns-check and gate triage active: the agent stayed
+      in its owns and the gate passed, so neither path was exercised by a real agent yet.
