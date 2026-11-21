@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"mill/internal/budget"
+	"mill/internal/price"
 )
 
 func TestDefaultTOMLMatchesDefault(t *testing.T) {
@@ -197,5 +198,32 @@ func TestTimeoutAndEnvValidation(t *testing.T) {
 				t.Fatalf("err = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestPricesOverridesParseAndValidate(t *testing.T) {
+	cfg, err := Parse(`
+[prices.opus]
+input = 1.5
+output = 2
+cache_write_5m = 3
+cache_write_1h = 4
+cache_read = 0.5
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := price.Rates{Input: 1.5, Output: 2, CacheWrite5m: 3, CacheWrite1h: 4, CacheRead: 0.5}
+	if cfg.Prices["opus"] != want {
+		t.Fatalf("prices = %+v", cfg.Prices)
+	}
+	if len(Default().Prices) != 0 {
+		t.Fatal("Default() has price overrides")
+	}
+	if _, err := Parse("[prices.opus]\ncache_read = -1\n"); err == nil || !strings.Contains(err.Error(), "prices.opus.cache_read") {
+		t.Fatalf("negative price: %v", err)
+	}
+	if _, err := Parse("[prices.opus]\nbogus = 1\n"); err == nil {
+		t.Fatal("unknown price key accepted")
 	}
 }

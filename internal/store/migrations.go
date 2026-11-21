@@ -108,6 +108,10 @@ ALTER TABLE branches ADD COLUMN start_sha TEXT NOT NULL DEFAULT '';
 ALTER TABLE attempts ADD COLUMN pid INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE attempts ADD COLUMN command TEXT NOT NULL DEFAULT '';
 `,
+	// 6: attempt cost estimated from tokens because claude reported none.
+	`
+ALTER TABLE attempts ADD COLUMN cost_estimated INTEGER NOT NULL DEFAULT 0;
+`,
 }
 
 // LatestVersion is the schema version this build writes.

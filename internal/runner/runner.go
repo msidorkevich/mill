@@ -74,7 +74,10 @@ type Result struct {
 	Status Status
 	Output json.RawMessage // JSON matching Request.Schema when Status is ok
 	Usage  budget.Usage    // total usage for the run
-	Error  string          // human-readable reason when Status is not ok
+	// CostEstimated is true when Usage.CostUSD was estimated from tokens because the agent
+	// reported no cost.
+	CostEstimated bool
+	Error         string // human-readable reason when Status is not ok
 	// Warnings are non-fatal observations, e.g. tool calls the permission rules denied.
 	Warnings []string
 	// RawPath is the file holding the agent's raw output, when there is one.

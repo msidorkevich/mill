@@ -75,11 +75,11 @@ func TestAttemptsAndUsage(t *testing.T) {
 	if _, err := s.StartAttempt(ctx, "t1", 1, "implementer"); err == nil {
 		t.Fatal("duplicate (task, n, role) accepted")
 	}
-	if err := s.FinishAttempt(ctx, a1, "ok", budget.Usage{InputTokens: 100, OutputTokens: 10, CostUSD: 0.5}, "out.json", "log"); err != nil {
+	if err := s.FinishAttempt(ctx, a1, "ok", budget.Usage{InputTokens: 100, OutputTokens: 10, CostUSD: 0.5}, false, "out.json", "log"); err != nil {
 		t.Fatal(err)
 	}
 	a2, _ := s.StartAttempt(ctx, "t1", 1, "verifier")
-	if err := s.FinishAttempt(ctx, a2, "ok", budget.Usage{InputTokens: 50, CacheReadTokens: 7, CostUSD: 0.25}, "", ""); err != nil {
+	if err := s.FinishAttempt(ctx, a2, "ok", budget.Usage{InputTokens: 50, CacheReadTokens: 7, CostUSD: 0.25}, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.StartAttempt(ctx, "t1", 2, "implementer"); err != nil {
@@ -202,9 +202,9 @@ func TestTaskSummaries(t *testing.T) {
 	s.now = func() time.Time { return fixed }
 
 	a1, _ := s.StartAttempt(ctx, "b", 1, "implementer")
-	s.FinishAttempt(ctx, a1, "ok", budget.Usage{InputTokens: 100, OutputTokens: 10, CacheWriteTokens: 5, CacheReadTokens: 900, CostUSD: 0.5}, "", "")
+	s.FinishAttempt(ctx, a1, "ok", budget.Usage{InputTokens: 100, OutputTokens: 10, CacheWriteTokens: 5, CacheReadTokens: 900, CostUSD: 0.5}, false, "", "")
 	a2, _ := s.StartAttempt(ctx, "b", 2, "implementer")
-	s.FinishAttempt(ctx, a2, "ok", budget.Usage{InputTokens: 50, CostUSD: 0.25}, "", "")
+	s.FinishAttempt(ctx, a2, "ok", budget.Usage{InputTokens: 50, CostUSD: 0.25}, false, "", "")
 	if err := s.SetTaskStatus(ctx, "b", TaskRunning, PhaseGate, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestRecoverInterruptedResetsOnlyRunningWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	fin, _ := s.StartAttempt(ctx, "done", 1, "implementer")
-	must(s.FinishAttempt(ctx, fin, "ok", budget.Usage{}, "", ""))
+	must(s.FinishAttempt(ctx, fin, "ok", budget.Usage{}, false, "", ""))
 
 	tasks, attempts, err := s.RecoverInterrupted(ctx)
 	if err != nil || tasks != 2 || attempts != 1 {
@@ -425,7 +425,7 @@ func TestAttemptProcessRecordedAndListed(t *testing.T) {
 	if err := s.SetAttemptProcess(ctx, a1, 4242, "claude", "/tmp/raw.jsonl"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.FinishAttempt(ctx, a2, "ok", budget.Usage{}, "", ""); err != nil {
+	if err := s.FinishAttempt(ctx, a2, "ok", budget.Usage{}, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetAttemptProcess(ctx, a2, 1, "claude", "x"); err == nil {
@@ -461,8 +461,8 @@ func TestMigrateV4AddsAttemptProcessColumns(t *testing.T) {
 	s.Close()
 
 	s2 := open(t, path)
-	if v, _ := s2.SchemaVersion(ctx); v != 5 {
-		t.Fatalf("schema = %d, want 5", v)
+	if v, _ := s2.SchemaVersion(ctx); v != LatestVersion {
+		t.Fatalf("schema = %d, want %d", v, LatestVersion)
 	}
 	got, err := s2.RunningAttempts(ctx)
 	if err != nil || len(got) != 1 || got[0].ID != old || got[0].PID != 0 || got[0].Command != "" {
@@ -470,5 +470,55 @@ func TestMigrateV4AddsAttemptProcessColumns(t *testing.T) {
 	}
 	if err := s2.SetAttemptProcess(ctx, old, 7, "claude", "log"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFinishAttemptRecordsCostEstimated(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	a1, _ := s.StartAttempt(ctx, "t1", 1, "implementer")
+	a2, _ := s.StartAttempt(ctx, "t1", 1, "verifier")
+	if err := s.FinishAttempt(ctx, a1, "error", budget.Usage{InputTokens: 1, CostUSD: 0.02}, true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishAttempt(ctx, a2, "ok", budget.Usage{InputTokens: 1, CostUSD: 0.02}, false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.Attempts(ctx, "t1")
+	if err != nil || len(list) != 2 || !list[0].CostEstimated || list[1].CostEstimated {
+		t.Fatalf("attempts = %+v, %v", list, err)
+	}
+}
+
+// A database at schema v5 upgrades and gains attempts.cost_estimated.
+func TestMigrateFromV5AddsCostEstimated(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mill.db")
+	saved := migrations
+	migrations = saved[:5]
+	LatestVersion = 5
+	s, err := Open(ctx, path, Options{})
+	migrations, LatestVersion = saved, len(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2 := open(t, path)
+	if v, _ := s2.SchemaVersion(ctx); v != LatestVersion || v < 6 {
+		t.Fatalf("schema = %d, want %d", v, LatestVersion)
+	}
+	if err := s2.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s2.StartAttempt(ctx, "t1", 1, "implementer")
+	if err := s2.FinishAttempt(ctx, a, "ok", budget.Usage{}, true, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := s2.Attempts(ctx, "t1"); len(list) != 1 || !list[0].CostEstimated {
+		t.Fatalf("attempts = %+v", list)
 	}
 }
