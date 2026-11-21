@@ -156,8 +156,8 @@ Built by mill, one task at a time:
       creates its tasks and deps in one transaction, `start_sha` on branches (1 attempt, $0.37)
 - [x] `plan-cli`: `mill plan --file`, `plan show`, `plan edit`, `plan approve`, `goal list`,
       `goal show` (1 attempt, $0.50)
-- [ ] `graph-branches`: pipeline for goal tasks: names, base rules with fan-in, `start_sha`
-      diffs, goal budget check (GT2–3, BG2)
+- [x] `graph-branches`: pipeline for goal tasks: names, base rules with fan-in, `start_sha`
+      diffs, goal budget check (GT2–3, BG2) (1 attempt, $0.44)
 - [ ] `scheduler`: `mill run <goal>`: ready set, `owns` serialization, `max_parallel`, goal
       status, run lock, crash recovery (GR1–GR6)
 
