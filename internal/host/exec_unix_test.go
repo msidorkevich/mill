@@ -240,3 +240,31 @@ func TestProcessInfoMissingPidIsNotAlive(t *testing.T) {
 		t.Fatalf("alive=%v err=%v, want not alive and no error", alive, err)
 	}
 }
+
+func TestProcessCwdReportsWorkingDirectory(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "60")
+	cmd.Dir = dir
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	got, err := ProcessCwd(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = filepath.EvalSymlinks(got); got != dir {
+		t.Fatalf("ProcessCwd = %q, want %q", got, dir)
+	}
+
+	gone := exec.Command("true")
+	if err := gone.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProcessCwd(gone.Process.Pid); err == nil {
+		t.Fatal("ProcessCwd of a missing pid succeeded")
+	}
+}

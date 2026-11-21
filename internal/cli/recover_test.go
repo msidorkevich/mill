@@ -158,25 +158,44 @@ func TestRecoveryRecordsUsageFromStreamFiles(t *testing.T) {
 	}
 }
 
-func TestRecoveryKillsChildrenOfExitedAgent(t *testing.T) {
-	s, id := recoverStore(t)
+// startOrphanGroup starts a shell in dir as its own group leader that backgrounds a sleep and
+// exits, leaving the sleep as the only member of a leaderless group. It returns the group id
+// and the sleep's pid.
+func startOrphanGroup(t *testing.T, dir string) (pgid, child int) {
+	t.Helper()
 	cmd := exec.Command("sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!")
+	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	child, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	child, err = strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
 		t.Fatalf("child pid from %q: %v", out, err)
 	}
-	pgid := cmd.Process.Pid
+	pgid = cmd.Process.Pid
 	t.Cleanup(func() { syscall.Kill(-pgid, syscall.SIGKILL) })
-	if err := s.SetAttemptProcess(context.Background(), id, pgid, "sh", "raw"); err != nil {
-		t.Fatal(err)
-	}
 	if m, err := host.GroupMembers(pgid); err != nil || len(m) != 1 || m[0] != child {
 		t.Fatalf("GroupMembers = %v, %v; want [%d]", m, err, child)
+	}
+	return pgid, child
+}
+
+func saveWorktree(t *testing.T, s *store.Store, worktree string) {
+	t.Helper()
+	if err := s.SaveBranch(context.Background(), store.Branch{TaskID: "t1", Name: "mill/t/t1", Base: "main", Worktree: worktree}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRecoveryKillsChildrenOfExitedAgent(t *testing.T) {
+	s, id := recoverStore(t)
+	wt := t.TempDir()
+	saveWorktree(t, s, wt)
+	pgid, _ := startOrphanGroup(t, filepath.Join(wt, "."))
+	if err := s.SetAttemptProcess(context.Background(), id, pgid, "sh", "raw"); err != nil {
+		t.Fatal(err)
 	}
 	var buf bytes.Buffer
 	if err := killLeftoverWorkers(context.Background(), &buf, s); err != nil {
@@ -195,6 +214,44 @@ func TestRecoveryKillsChildrenOfExitedAgent(t *testing.T) {
 	want := "killed 1 leftover process(es) of worker " + strconv.Itoa(pgid) + " (t1 attempt 2 implementer), whose agent had already exited"
 	if !strings.Contains(buf.String(), want) {
 		t.Fatalf("output = %q, want %q", buf.String(), want)
+	}
+}
+
+func TestRecoveryLeavesLeaderlessMemberOutsideWorktreeAlone(t *testing.T) {
+	s, id := recoverStore(t)
+	saveWorktree(t, s, t.TempDir())
+	pgid, child := startOrphanGroup(t, t.TempDir())
+	if err := s.SetAttemptProcess(context.Background(), id, pgid, "sh", "raw"); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := killLeftoverWorkers(context.Background(), &buf, s); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(child, 0); err != nil {
+		t.Fatalf("unrelated member was killed: %v", err)
+	}
+	want := "left 1 process(es) of group " + strconv.Itoa(pgid) + " alone: not running inside the task's worktree"
+	if !strings.Contains(buf.String(), want) || strings.Contains(buf.String(), "killed") {
+		t.Fatalf("output = %q, want %q only", buf.String(), want)
+	}
+}
+
+func TestRecoveryKillsNothingWithoutRecordedWorktree(t *testing.T) {
+	s, id := recoverStore(t)
+	pgid, child := startOrphanGroup(t, t.TempDir())
+	if err := s.SetAttemptProcess(context.Background(), id, pgid, "sh", "raw"); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := killLeftoverWorkers(context.Background(), &buf, s); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(child, 0); err != nil {
+		t.Fatalf("member was killed without a worktree: %v", err)
+	}
+	if strings.Contains(buf.String(), "killed") {
+		t.Fatalf("output = %q", buf.String())
 	}
 }
 
