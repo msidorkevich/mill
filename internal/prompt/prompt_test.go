@@ -110,3 +110,17 @@ func TestFindingString(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifierPromptListsFilesOutsideOwns(t *testing.T) {
+	in := VerifierInput{Task: taskspec.Spec{ID: "t", Title: "T", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
+	if p := Verifier(in); strings.Contains(p, "outside the files the task owns") {
+		t.Fatal("heading shown without outside files")
+	}
+	in.OutsideOwns = []string{"stray.go"}
+	p := Verifier(in)
+	for _, w := range []string{"outside the files the task owns", "- stray.go", "otherwise fail with a finding naming the file"} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+}

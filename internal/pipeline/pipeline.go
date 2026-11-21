@@ -207,6 +207,31 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			continue
 		}
 
+		// owns
+		var outside []string
+		if p.Cfg.OwnsPolicy != "off" {
+			files, err := gitx.ChangedFiles(ctx, br.Worktree, startSHA)
+			if err != nil {
+				return out, fmt.Errorf("list changed files for attempt %d: %w", n, err)
+			}
+			outside = plan.OutsideOwns(t.Owns, files)
+		}
+		if len(outside) > 0 {
+			if _, err := p.Store.AppendEvent(ctx, "owns-outside", "", t.ID, map[string]any{"attempt": n, "files": outside}); err != nil {
+				return out, err
+			}
+			if p.Cfg.OwnsPolicy == "enforce" {
+				for _, f := range outside {
+					findings = append(findings, prompt.Finding{Source: "mill", File: f, Issue: "changed outside the task's owns; revert it, or edit the task to widen its owns"})
+				}
+				p.logf("%s a%d owns      %d file(s) outside owns", t.ID, n, len(outside))
+				if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
+					return out, err
+				}
+				continue
+			}
+		}
+
 		// gate
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseGate, ""); err != nil {
 			return out, err
@@ -250,7 +275,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		if err := writeFile(filepath.Join(logDir, "diff.patch"), diff); err != nil {
 			return out, err
 		}
-		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g})
+		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside})
 		vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
 		if err != nil {
 			return out, err

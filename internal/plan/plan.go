@@ -294,6 +294,51 @@ func (p Plan) Warnings() []string {
 	return out
 }
 
+// MatchOwns reports whether path is matched by an owns pattern: slash-separated, `*` and `?`
+// match within one segment, `**` matches any number of segments including zero.
+func MatchOwns(pattern, p string) bool {
+	return matchSegs(strings.Split(pattern, "/"), strings.Split(p, "/"))
+}
+
+func matchSegs(ps, xs []string) bool {
+	if len(ps) == 0 {
+		return len(xs) == 0
+	}
+	if ps[0] == "**" {
+		if matchSegs(ps[1:], xs) {
+			return true
+		}
+		return len(xs) > 0 && matchSegs(ps, xs[1:])
+	}
+	if len(xs) == 0 {
+		return false
+	}
+	ok, err := path.Match(ps[0], xs[0])
+	return err == nil && ok && matchSegs(ps[1:], xs[1:])
+}
+
+// OutsideOwns returns the files matched by no owns pattern, in input order. Empty owns
+// means no restriction.
+func OutsideOwns(owns, files []string) []string {
+	if len(owns) == 0 {
+		return nil
+	}
+	var out []string
+	for _, f := range files {
+		matched := false
+		for _, o := range owns {
+			if MatchOwns(o, f) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // GlobsOverlap reports whether some path could match both patterns. It may over-report
 // when both patterns have a wildcard in the same segment, but never under-reports.
 func GlobsOverlap(x, y string) bool {

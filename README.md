@@ -85,6 +85,15 @@ is `done` (exit 0). When a task blocks or fails, the others continue; the goal t
 lets running tasks stop, returns them to pending and leaves the goal blocked; run `mill run g1`
 again to continue. `start_children_on = "published"` is not supported yet; use `"verified"`.
 
+`owns_policy` in `.mill/config.toml` sets what happens when an attempt changes files outside the
+task's `owns` (a task with empty `owns` is never restricted):
+
+- `"warn"` (default): mill records an `owns-outside` event and the verifier is given the list; it
+  passes the task only if the spec or acceptance criteria require each file.
+- `"enforce"`: each such file becomes a mill finding for the next attempt and the gate does not run
+  for that attempt.
+- `"off"`: no check.
+
 If an `$EDITOR` result is invalid, mill prints the problems and keeps the edited file; fix it and
 run `mill plan edit g1 --file <path>`.
 

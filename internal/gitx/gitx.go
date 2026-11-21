@@ -113,6 +113,22 @@ func Diff(ctx context.Context, dir, base string) (string, error) {
 	return Run(ctx, dir, "diff", "--no-color", "--no-ext-diff", base+"..HEAD")
 }
 
+// ChangedFiles lists the paths changed from `from` to HEAD, including deletions and the new
+// path of renames.
+func ChangedFiles(ctx context.Context, dir, from string) ([]string, error) {
+	out, err := Run(ctx, dir, "diff", "--name-only", "--no-color", "--no-ext-diff", "-M", "-z", from+"..HEAD")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, f := range strings.Split(out, "\x00") {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	return files, nil
+}
+
 // DiffStat returns `git diff --stat` from base to HEAD.
 func DiffStat(ctx context.Context, dir, base string) (string, error) {
 	return Run(ctx, dir, "diff", "--no-color", "--stat", base+"..HEAD")
