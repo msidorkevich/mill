@@ -103,6 +103,11 @@ UPDATE branches SET updated_at = substr(updated_at,1,19) || '.' || substr(CASE W
 ALTER TABLE goals ADD COLUMN reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE branches ADD COLUMN start_sha TEXT NOT NULL DEFAULT '';
 `,
+	// 5: the worker process behind a running attempt.
+	`
+ALTER TABLE attempts ADD COLUMN pid INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE attempts ADD COLUMN command TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // LatestVersion is the schema version this build writes.

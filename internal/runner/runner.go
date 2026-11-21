@@ -25,6 +25,13 @@ const (
 	RoleFixer       Role = "fixer"
 )
 
+// Started describes the process a runner started for a Request.
+type Started struct {
+	PID     int
+	Command string // base name of the executable, e.g. "claude"
+	RawPath string // file the agent's raw output is written to
+}
+
 // Request is one unit of agent work.
 type Request struct {
 	Role Role
@@ -39,6 +46,8 @@ type Request struct {
 	Count  budget.Count
 	// OnUsage, when set, receives each usage increment as the runner observes it.
 	OnUsage func(delta budget.Usage)
+	// OnStart, when set, is called right after a runner starts an agent process.
+	OnStart func(Started)
 	// Name labels the run (log lines, pane titles), e.g. "add-reverse a1 implementer".
 	Name string
 	// LogDir receives the run's files: prompt, raw agent output, stderr, settings.

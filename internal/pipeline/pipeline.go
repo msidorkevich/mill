@@ -468,12 +468,20 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	var mu sync.Mutex
 	var spent budget.Usage
 	var over string
+	var startErr error
 	started := p.now()
 	res, runErr := p.Runner.Run(rctx, runner.Request{
 		Role: role, TaskID: t.ID, Prompt: promptText, Dir: dir, Schema: schema, Tools: tools,
 		Model: p.Cfg.Model(t.Size), Budget: limits, Count: p.Cfg.Budget.Count,
 		Name:   fmt.Sprintf("%s a%d %s", t.ID, n, role),
 		LogDir: logDir, ProtectedPaths: []string{p.Paths.MillDir}, Env: p.env(p.AgentEnvAllow),
+		OnStart: func(st runner.Started) {
+			if err := p.Store.SetAttemptProcess(context.WithoutCancel(ctx), id, st.PID, st.Command, st.RawPath); err != nil {
+				mu.Lock()
+				startErr = err
+				mu.Unlock()
+			}
+		},
 		OnUsage: func(d budget.Usage) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -486,6 +494,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	})
 	mu.Lock()
 	overReason := over
+	recErr := startErr
 	mu.Unlock()
 
 	status := string(res.Status)
@@ -530,6 +539,9 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	p.logf("%s a%d %-9s %s %s (%s)%s", t.ID, n, role, status, fmtUsage(res.Usage), p.since(started), detail)
 	if runErr != nil {
 		return ar, fmt.Errorf("%s run: %w", role, runErr)
+	}
+	if recErr != nil {
+		return ar, fmt.Errorf("%s run: %w", role, recErr)
 	}
 	return ar, nil
 }

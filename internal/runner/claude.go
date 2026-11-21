@@ -77,6 +77,10 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, fmt.Errorf("claude runner: %w", err)
 	}
 
+	if req.OnStart != nil {
+		req.OnStart(Started{PID: h.PID(), Command: filepath.Base(c.argv0()), RawPath: streamPath})
+	}
+
 	p := &streamParser{onUsage: req.OnUsage, seen: map[string]budget.Usage{}}
 	done := make(chan struct{})
 	var tailErr error
@@ -106,6 +110,13 @@ func (c *Claude) poll() time.Duration {
 		return 100 * time.Millisecond
 	}
 	return c.Poll
+}
+
+func (c *Claude) argv0() string {
+	if c.Bin == "" {
+		return "claude"
+	}
+	return c.Bin
 }
 
 func (c *Claude) argv(req Request, settingsPath string) []string {

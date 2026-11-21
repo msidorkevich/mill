@@ -298,3 +298,20 @@ func TestClaudeFinishedRunSurvivesLateCancel(t *testing.T) {
 		t.Fatal("test did not exercise the late cancel")
 	}
 }
+
+func TestClaudeReportsStartedProcess(t *testing.T) {
+	bin, _, _ := fakeClaude(t, []string{lineResult}, "")
+	req := baseReq(t)
+	var got []Started
+	req.OnStart = func(s Started) { got = append(got, s) }
+	res, err := newClaude(bin).Run(context.Background(), req)
+	if err != nil || res.Status != StatusOK {
+		t.Fatalf("run = %+v, %v", res, err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("OnStart called %d times", len(got))
+	}
+	if got[0].PID <= 0 || got[0].Command != filepath.Base(bin) || got[0].RawPath != res.RawPath || got[0].RawPath == "" {
+		t.Fatalf("started = %+v (bin %s, raw %s)", got[0], bin, res.RawPath)
+	}
+}
