@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -602,5 +603,92 @@ func TestRetryWithoutStartSHAUsesBaseSHA(t *testing.T) {
 	}
 	if vp := prompts(e.fake, runner.RoleVerifier)[0]; !strings.Contains(vp, "+x") {
 		t.Fatalf("verifier prompt:\n%s", vp)
+	}
+}
+
+func TestRequestsCarryTaskID(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
+		runner.RoleVerifier:    {verdict("pass")},
+	}, nil)
+	e.task(t, "ident")
+	e.run(t, "ident")
+	calls := e.fake.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(calls))
+	}
+	for _, c := range calls {
+		if c.TaskID != "ident" {
+			t.Errorf("%s request TaskID = %q, want ident", c.Role, c.TaskID)
+		}
+	}
+}
+
+func TestParallelGoalTasksShareOnePipeline(t *testing.T) {
+	step := func(file string) []runner.Step {
+		return []runner.Step{{DelayMS: 50, Files: map[string]string{file: "x\n"},
+			Output: json.RawMessage(`{"summary":"s","files_changed":[],"notes":""}`)}}
+	}
+	pass := []runner.Step{verdict("pass")}
+	e := setup(t, `true`, runner.Script{}, nil)
+	e.fake = runner.NewFake(runner.FakeScript{Tasks: map[string]runner.Script{
+		"g1/a": {runner.RoleImplementer: step("a.txt"), runner.RoleVerifier: pass},
+		"g1/b": {runner.RoleImplementer: step("b.txt"), runner.RoleVerifier: pass},
+	}})
+	e.p.Runner = e.fake
+	e.goal(t, []string{}, []string{})
+	ids := []string{"g1/a", "g1/b"}
+	outs := make([]Outcome, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outs[i], errs[i] = e.p.Run(context.Background(), id)
+		}()
+	}
+	wg.Wait()
+	for i := range ids {
+		if errs[i] != nil || outs[i].Status != store.TaskVerified {
+			t.Fatalf("%s: %+v, %v\n%s", ids[i], outs[i], errs[i], e.out)
+		}
+	}
+	for _, line := range strings.Split(strings.TrimSpace(e.out.String()), "\n") {
+		if !strings.HasPrefix(line, "g1/") {
+			t.Errorf("progress line is not whole: %q", line)
+		}
+	}
+}
+
+func TestReattachCommitsInterruptedWork(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
+		runner.RoleVerifier:    {verdict("fail", "nope")},
+	}, func(c *config.Config) { c.MaxAttempts = 1 })
+	e.task(t, "crash")
+	e.run(t, "crash")
+	ctx := context.Background()
+	br, _ := e.p.Store.GetBranch(ctx, "crash")
+	if err := os.WriteFile(filepath.Join(br.Worktree, "partial.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.Store.SetTaskStatus(ctx, "crash", store.TaskPending, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.fake = runner.NewFake(runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"b": "2"})},
+		runner.RoleVerifier:    {verdict("pass")},
+	})
+	e.p.Runner = e.fake
+	if out := e.run(t, "crash"); out.Status != store.TaskVerified {
+		t.Fatalf("outcome = %+v\n%s", out, e.out)
+	}
+	log, _ := gitx.Run(ctx, br.Worktree, "log", "--format=%B")
+	if !strings.Contains(log, "mill: crash interrupted attempt") || !strings.Contains(log, "Mill-Task: crash") {
+		t.Fatalf("no interrupted-attempt commit:\n%s", log)
+	}
+	if out, _ := gitx.Run(ctx, br.Worktree, "show", "HEAD~1:partial.txt"); strings.TrimSpace(out) != "wip" {
+		t.Fatalf("partial.txt not committed before the next attempt: %q", out)
 	}
 }

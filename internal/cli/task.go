@@ -18,6 +18,7 @@ import (
 	"mill/internal/pipeline"
 	"mill/internal/project"
 	"mill/internal/prompt"
+	"mill/internal/runlock"
 	"mill/internal/runner"
 	"mill/internal/store"
 	"mill/internal/taskspec"
@@ -96,6 +97,21 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	defer s.Close()
+
+	lock, err := runlock.Acquire(paths.RunLock)
+	if err != nil {
+		return fail(err)
+	}
+	defer func() {
+		if err := lock.Release(); err != nil {
+			fmt.Fprintf(env.Stderr, "mill task run: %v\n", err)
+		}
+	}()
+	if tasks, attempts, err := s.RecoverInterrupted(ctx); err != nil {
+		return fail(err)
+	} else if tasks > 0 || attempts > 0 {
+		fmt.Fprintf(env.Stdout, "recovered %d interrupted task(s) and %d running attempt(s) from a previous run\n", tasks, attempts)
+	}
 
 	existing, err := s.GetTask(ctx, spec.ID)
 	switch {

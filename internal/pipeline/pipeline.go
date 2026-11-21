@@ -47,6 +47,11 @@ type Pipeline struct {
 	AgentEnvAllow []string
 	// Now is the clock for durations in progress lines; defaults to time.Now.
 	Now func() time.Time
+
+	// A Pipeline may run several tasks from different goroutines. gitMu serializes the git
+	// operations that touch the shared repository; outMu keeps progress lines whole.
+	gitMu sync.Mutex
+	outMu sync.Mutex
 }
 
 // Outcome is how a run ended.
@@ -75,7 +80,10 @@ func (e *blockedError) Error() string { return e.reason }
 
 func (p *Pipeline) logf(format string, a ...any) {
 	if p.Out != nil {
-		fmt.Fprintf(p.Out, format+"\n", a...)
+		line := fmt.Sprintf(format+"\n", a...)
+		p.outMu.Lock()
+		defer p.outMu.Unlock()
+		io.WriteString(p.Out, line)
 	}
 }
 
@@ -287,6 +295,8 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 
 // prepare creates (or reattaches) the task's branch and worktree (TP1).
 func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, error) {
+	p.gitMu.Lock()
+	defer p.gitMu.Unlock()
 	name := BranchName(t.ID)
 	wt := filepath.Join(p.Cfg.Worktrees(p.Paths.Root, p.Home), t.ID)
 
@@ -312,6 +322,18 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 			}
 		}
 		br.Worktree = wt
+		// A killed run may have left uncommitted work; keep it so the next attempt builds on it.
+		changed, err := gitx.HasChanges(ctx, wt)
+		if err != nil {
+			return br, err
+		}
+		if changed {
+			msg := fmt.Sprintf("mill: %s interrupted attempt\n\nMill-Task: %s\n", t.ID, t.ID)
+			if _, err := gitx.CommitAll(ctx, wt, msg); err != nil {
+				return br, fmt.Errorf("commit interrupted work in %s: %w", wt, err)
+			}
+			p.logf("%s: committed uncommitted work from an interrupted attempt", t.ID)
+		}
 		if head, err := gitx.RevParse(ctx, wt, "HEAD"); err == nil {
 			br.HeadSHA = head
 		}
@@ -448,7 +470,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	var over string
 	started := p.now()
 	res, runErr := p.Runner.Run(rctx, runner.Request{
-		Role: role, Prompt: promptText, Dir: dir, Schema: schema, Tools: tools,
+		Role: role, TaskID: t.ID, Prompt: promptText, Dir: dir, Schema: schema, Tools: tools,
 		Model: p.Cfg.Model(t.Size), Budget: limits, Count: p.Cfg.Budget.Count,
 		Name:   fmt.Sprintf("%s a%d %s", t.ID, n, role),
 		LogDir: logDir, ProtectedPaths: []string{p.Paths.MillDir}, Env: p.env(p.AgentEnvAllow),

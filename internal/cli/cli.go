@@ -125,7 +125,7 @@ func runVersion(_ context.Context, env Env, args []string) int {
 }
 
 // gitignoreText keeps machine-local state out of git; config.toml stays committed.
-const gitignoreText = "# machine-local mill state\nruns/\nmill.db\nmill.db-*\n"
+const gitignoreText = "# machine-local mill state\nruns/\nmill.db\nmill.db-*\nrun.lock\n"
 
 func runInit(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "init")

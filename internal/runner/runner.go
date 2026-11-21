@@ -27,7 +27,9 @@ const (
 
 // Request is one unit of agent work.
 type Request struct {
-	Role   Role
+	Role Role
+	// TaskID is the task this run works for ("" outside a task, e.g. planning).
+	TaskID string
 	Prompt string
 	Dir    string          // working directory (the task's worktree)
 	Schema json.RawMessage // JSON Schema the output must match; nil = free-form JSON

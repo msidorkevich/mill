@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"mill/internal/budget"
 )
@@ -129,7 +130,7 @@ func TestLoadFakeScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	steps := s[RoleImplementer]
+	steps := s.Roles[RoleImplementer]
 	if len(steps) != 1 || steps[0].Usage[0].InputTokens != 5 || string(steps[0].Output) != `{"summary":"ok"}` {
 		t.Fatalf("script = %+v", s)
 	}
@@ -138,5 +139,44 @@ func TestLoadFakeScript(t *testing.T) {
 	}
 	if _, err := LoadFakeScript(p); err == nil {
 		t.Fatal("invalid JSON accepted")
+	}
+}
+
+func TestLoadFakeScriptTasksKey(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "script.json")
+	data := `{"implementer":[{"output":{"summary":"role"}}],"tasks":{"g/a":{"implementer":[{"output":{"summary":"a"}}]}}}`
+	if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadFakeScript(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := NewFake(s)
+	ctx := context.Background()
+	for _, c := range []struct{ task, want string }{{"g/a", `{"summary":"a"}`}, {"g/b", `{"summary":"role"}`}} {
+		res, err := f.Run(ctx, Request{Role: RoleImplementer, TaskID: c.task})
+		if err != nil || string(res.Output) != c.want {
+			t.Fatalf("task %s: %s, %v; want %s", c.task, res.Output, err, c.want)
+		}
+	}
+	// the task script is exhausted independently of the role script
+	if _, err := f.Run(ctx, Request{Role: RoleImplementer, TaskID: "g/a"}); !errors.Is(err, ErrScriptExhausted) {
+		t.Fatalf("err = %v, want ErrScriptExhausted", err)
+	}
+}
+
+func TestFakeDelayHonoursCancellation(t *testing.T) {
+	f := NewFake(Script{RoleImplementer: {{DelayMS: 60000}, {DelayMS: 20}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start := time.Now()
+	res, err := f.Run(ctx, Request{Role: RoleImplementer})
+	if err != nil || res.Status != StatusCancelled || time.Since(start) > 5*time.Second {
+		t.Fatalf("res = %+v err = %v after %s, want prompt StatusCancelled", res, err, time.Since(start))
+	}
+	res, err = f.Run(context.Background(), Request{Role: RoleImplementer})
+	if err != nil || res.Status != StatusOK {
+		t.Fatalf("delayed step: %+v %v", res, err)
 	}
 }

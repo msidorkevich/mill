@@ -28,6 +28,7 @@ type Paths struct {
 	DB        string // <root>/.mill/mill.db
 	Runs      string // <root>/.mill/runs (ST3: logs, diffs, agent results)
 	GitIgnore string // <root>/.mill/.gitignore
+	RunLock   string // <root>/.mill/run.lock (held while a run is active)
 }
 
 // PathsAt returns the paths for a repository root.
@@ -40,6 +41,7 @@ func PathsAt(root string) Paths {
 		DB:        filepath.Join(m, "mill.db"),
 		Runs:      filepath.Join(m, "runs"),
 		GitIgnore: filepath.Join(m, ".gitignore"),
+		RunLock:   filepath.Join(m, "run.lock"),
 	}
 }
 

@@ -122,6 +122,9 @@ func TestInitCreatesLayoutFromSubdirectory(t *testing.T) {
 			t.Errorf("%s not created: %v", f, err)
 		}
 	}
+	if got, _ := os.ReadFile(p.GitIgnore); !strings.Contains(string(got), "run.lock") {
+		t.Errorf(".mill/.gitignore does not ignore run.lock: %q", got)
+	}
 	if fi, err := os.Stat(p.Runs); err != nil || !fi.IsDir() {
 		t.Errorf("runs/ not created: %v", err)
 	}
