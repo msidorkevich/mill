@@ -91,4 +91,35 @@ An invalid plan goes back to the planner once with its problems. If the second p
 too, mill prints the problems, saves the plan to `.mill/runs/plans/<timestamp>/plan.json`,
 creates no goal and exits 1: fix the file and run `mill plan --file <that path>`.
 
+### Goal workflow: from plan to verified branches
+
+The commands are listed above; this is the order to use them in.
+
+1. **Plan.** `mill plan "<goal>"` (or `mill plan --file plan.json` for a hand-written plan)
+   creates a draft goal, say `g1`.
+2. **Review.** `mill plan show g1` lists the tasks in dependency order. Read the `checks`: they
+   are commands mill will run, and are untrusted until you approve.
+3. **Edit.** `mill plan edit g1` changes the draft. Repeat show and edit until the plan is right.
+4. **Approve.** `mill plan approve g1` creates the tasks and freezes the plan.
+5. **Run.** `mill run g1` runs the tasks in dependency order. Check progress any time, from
+   another terminal, with `mill goal show g1`.
+6. **Review the branches.** Each verified task is a branch `mill/g1/<task>`. Inspect it with git
+   (for example `git log main..mill/g1/<task>` and `git diff main...mill/g1/<task>`), then merge
+   it in your forge. mill never pushes and never touches `main`.
+
+**Base branches.** A task with no dependency is based on the base branch. With one dependency it
+is based on that dependency's branch. With several, it is based on the deepest dependency's
+branch and the others are merged in, so its diff against that base is only its own work.
+
+**Blocked tasks.** When a task blocks or fails, independent tasks still run and the goal ends
+`blocked` (exit 4); `mill goal show g1` names the stopped tasks and the ones waiting on them.
+Fix the cause (the spec with `mill task show`, a budget or `check_cmd` in `.mill/config.toml`),
+then `mill run g1 --retry-blocked` puts blocked and failed tasks back to pending and continues.
+Verified tasks are not run again.
+
+**Interrupted or killed runs.** After Ctrl-C, a crash or `kill -9`, nothing is lost. The next
+`mill run g1` recovers the half-finished tasks and continues where it stopped. Only one
+`mill run` can work on a repository at a time; a second one fails and says so. Wait for the
+first to finish or stop it, then run again.
+
 Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.
