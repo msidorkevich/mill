@@ -427,3 +427,41 @@ func TestRetryBlockedRequeuesBlockedAndFailedTasks(t *testing.T) {
 		t.Fatalf("no retry requested event for a: %+v", evs)
 	}
 }
+
+func TestTaskLeftPendingIsStartedOnceAndReportedStuck(t *testing.T) {
+	s, g := newGoal(t, task{id: "a"}, task{id: "b"}, task{id: "c", deps: []string{"a"}})
+	a, b, c := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c")
+	f := newFake(s)
+	var mu sync.Mutex
+	calls := map[string]int{}
+	run := func(ctx context.Context, id string) (pipeline.Outcome, error) {
+		if id == a {
+			mu.Lock()
+			calls[id]++
+			mu.Unlock()
+			return pipeline.Outcome{}, nil // returns without leaving pending
+		}
+		return f.run(ctx, id)
+	}
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: run}
+	ch := runAsync(context.Background(), sch, g, Options{})
+	r := wait(t, ch)
+	if r.err != nil || r.res.Status != store.GoalBlocked {
+		t.Fatalf("RunGoal = %+v, %v", r.res, r.err)
+	}
+	mu.Lock()
+	n := calls[a]
+	mu.Unlock()
+	if n != 1 {
+		t.Errorf("RunTask called %d times for %s, want 1", n, a)
+	}
+	if !strings.Contains(r.res.Reason, a+" stuck") {
+		t.Errorf("reason %q does not name %s as stuck", r.res.Reason, a)
+	}
+	if got := status(t, s, b).Status; got != store.TaskVerified {
+		t.Errorf("%s = %s, want verified", b, got)
+	}
+	if got := status(t, s, c).Status; got != store.TaskPending {
+		t.Errorf("%s = %s, want pending", c, got)
+	}
+}
