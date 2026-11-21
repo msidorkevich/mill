@@ -12,6 +12,7 @@ import (
 
 	"mill/internal/budget"
 	"mill/internal/plan"
+	"mill/internal/taskspec"
 )
 
 // Goal statuses.
@@ -392,4 +393,70 @@ func (s *Store) ResetGoalTasks(ctx context.Context, goalID string, statuses []st
 		return nil, fmt.Errorf("reset tasks of goal %s: %w", goalID, err)
 	}
 	return ids, nil
+}
+
+// UpdateGoalTaskSpec replaces a goal task's spec in the task row and in the goal's stored plan,
+// and records task-spec-updated, all in one transaction. The id and the dependencies of the
+// task are not changed: the plan's depends_on for the task is kept as stored.
+func (s *Store) UpdateGoalTaskSpec(ctx context.Context, taskID string, spec taskspec.Spec) error {
+	goalID, local := SplitTaskID(taskID)
+	if goalID == "" {
+		return fmt.Errorf("task %s is not a goal task: use UpdateTaskSpec", taskID)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var raw string
+	err = tx.QueryRowContext(ctx, `SELECT plan FROM goals WHERE id = ?`, goalID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("goal %s: %w", goalID, ErrNotFound)
+	}
+	if err != nil {
+		return err
+	}
+	p, err := plan.Parse([]byte(raw))
+	if err != nil {
+		return fmt.Errorf("stored plan of %s is unreadable: %w", goalID, err)
+	}
+	found := false
+	for i := range p.Tasks {
+		if p.Tasks[i].ID != local {
+			continue
+		}
+		spec.ID = local
+		spec.DependsOn = p.Tasks[i].DependsOn
+		p.Tasks[i] = spec
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("task %s is not in the stored plan of %s: %w", taskID, goalID, ErrNotFound)
+	}
+	planJSON, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("marshal plan: %w", err)
+	}
+	now := s.ts()
+	acc, _ := json.Marshal(spec.Acceptance)
+	chk, _ := json.Marshal(spec.Checks)
+	own, _ := json.Marshal(spec.Owns)
+	res, err := tx.ExecContext(ctx, `UPDATE tasks SET title = ?, kind = ?, spec = ?, acceptance = ?,
+		checks = ?, owns = ?, size = ?, updated_at = ? WHERE id = ?`,
+		spec.Title, spec.Kind, spec.Spec, string(acc), string(chk), string(own), spec.Size, now, taskID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %s: %w", taskID, ErrNotFound)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE goals SET plan = ?, updated_at = ? WHERE id = ?`,
+		string(planJSON), now, goalID); err != nil {
+		return err
+	}
+	if err := s.appendEventTx(ctx, tx, "task-spec-updated", goalID, taskID, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -437,31 +437,11 @@ func runPlanEdit(ctx context.Context, env Env, args []string) int {
 		if err != nil {
 			return fail(err)
 		}
-		f, err := os.CreateTemp("", "mill-plan-"+id+"-*.json")
+		path, err = editTemp(ctx, env, "mill-plan-"+id, data)
 		if err != nil {
-			return fail(err)
+			return fail(fmt.Errorf("%w; the plan was not changed", err))
 		}
-		path, temp = f.Name(), true
-		if _, err := f.Write(append(data, '\n')); err != nil {
-			f.Close()
-			os.Remove(path)
-			return fail(err)
-		}
-		if err := f.Close(); err != nil {
-			os.Remove(path)
-			return fail(err)
-		}
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = "vi"
-		}
-		cmd := exec.CommandContext(ctx, "sh", "-c", editor+` "$1"`, "sh", path)
-		cmd.Dir = env.Dir
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			os.Remove(path)
-			return fail(fmt.Errorf("editor %q failed: %w; the plan was not changed", editor, err))
-		}
+		temp = true
 	} else {
 		path = absPath(env, path)
 	}
@@ -738,4 +718,36 @@ func printGoalView(w io.Writer, v goalView) {
 			r.Attempts, fmtInt(r.Usage.Tokens(budget.CountBillable)), r.Usage.CostUSD)
 	}
 	tw.Flush()
+}
+
+// editTemp writes data to a new temporary file named after prefix, runs $EDITOR (default vi)
+// on it and returns the file's path. The file is kept when the editor succeeds, so the caller
+// can report it or remove it; when the editor fails the file is removed.
+func editTemp(ctx context.Context, env Env, prefix string, data []byte) (string, error) {
+	f, err := os.CreateTemp("", prefix+"-*.json")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		f.Close()
+		os.Remove(path)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return "", err
+	}
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = "vi"
+	}
+	cmd := exec.CommandContext(ctx, "sh", "-c", editor+` "$1"`, "sh", path)
+	cmd.Dir = env.Dir
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("editor %q failed: %w", editor, err)
+	}
+	return path, nil
 }

@@ -337,3 +337,38 @@ func TestResetGoalTasksMatchesStatusAndReason(t *testing.T) {
 		t.Fatalf("events = %+v, %v", evs, err)
 	}
 }
+
+func TestUpdateGoalTaskSpecChangesRowPlanAndRecordsEvent(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	g, _ := s.CreateGoal(ctx, "g", nil)
+	if err := s.ApproveGoal(ctx, g.ID, goalPlan()); err != nil {
+		t.Fatal(err)
+	}
+	upd := spec("b")
+	upd.Spec = "new body"
+	upd.DependsOn = []string{"zzz"} // ignored: dependencies are fixed
+	id := TaskID(g.ID, "b")
+	if err := s.UpdateGoalTaskSpec(ctx, id, upd); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ := s.GetTask(ctx, id)
+	if tk.Spec.Spec != "new body" {
+		t.Errorf("task = %+v", tk)
+	}
+	got, _ := s.GetGoal(ctx, g.ID)
+	p, err := plan.Parse(got.Plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Tasks[1].Spec != "new body" || !reflect.DeepEqual(p.Tasks[1].DependsOn, []string{"a"}) || p.Tasks[0].Spec == "new body" {
+		t.Errorf("plan = %+v", p.Tasks)
+	}
+	evs, _ := s.TaskEvents(ctx, id)
+	if last := evs[len(evs)-1]; last.Kind != "task-spec-updated" {
+		t.Errorf("events = %+v", evs)
+	}
+	if err := s.UpdateGoalTaskSpec(ctx, TaskID(g.ID, "nope"), upd); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v", err)
+	}
+}
