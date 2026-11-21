@@ -43,7 +43,7 @@ type Task struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func (s *Store) ts() string { return s.now().UTC().Format(time.RFC3339Nano) }
+func (s *Store) ts() string { return s.now().UTC().Format(timeLayout) }
 
 // CreateTask stores a new pending task and records a task-created event.
 func (s *Store) CreateTask(ctx context.Context, spec taskspec.Spec) error {
@@ -87,8 +87,8 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 			return Task{}, fmt.Errorf("task %s: corrupt list: %w", id, err)
 		}
 	}
-	t.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	t.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	t.CreatedAt, _ = parseTime(created)
+	t.UpdatedAt, _ = parseTime(updated)
 	return t, nil
 }
 
@@ -167,9 +167,9 @@ func (s *Store) Attempts(ctx context.Context, taskID string) ([]Attempt, error) 
 			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath); err != nil {
 			return nil, err
 		}
-		a.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+		a.StartedAt, _ = parseTime(started)
 		if ended.Valid {
-			t, _ := time.Parse(time.RFC3339Nano, ended.String)
+			t, _ := parseTime(ended.String)
 			a.EndedAt = &t
 		}
 		out = append(out, a)
@@ -267,7 +267,7 @@ func (s *Store) GetBranch(ctx context.Context, taskID string) (Branch, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return Branch{}, fmt.Errorf("branch for %s: %w", taskID, ErrNotFound)
 	}
-	b.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	b.UpdatedAt, _ = parseTime(updated)
 	return b, err
 }
 

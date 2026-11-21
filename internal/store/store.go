@@ -103,7 +103,7 @@ func (s *Store) AppendEvent(ctx context.Context, kind, goalID, taskID string, da
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO events (at, kind, goal_id, task_id, data) VALUES (?, ?, ?, ?, ?)`,
-		s.now().UTC().Format(time.RFC3339Nano), kind, nullable(goalID), nullable(taskID), string(payload))
+		s.ts(), kind, nullable(goalID), nullable(taskID), string(payload))
 	if err != nil {
 		return 0, fmt.Errorf("append event %s: %w", kind, err)
 	}
@@ -135,7 +135,7 @@ func (s *Store) queryEvents(ctx context.Context, q string, args ...any) ([]Event
 		if err := rows.Scan(&e.Seq, &at, &e.Kind, &e.GoalID, &e.TaskID, &data); err != nil {
 			return nil, err
 		}
-		t, err := time.Parse(time.RFC3339Nano, at)
+		t, err := parseTime(at)
 		if err != nil {
 			return nil, fmt.Errorf("event %d: bad timestamp %q: %w", e.Seq, at, err)
 		}
@@ -151,4 +151,16 @@ func nullable(s string) any {
 		return nil
 	}
 	return s
+}
+
+// timeLayout is the one layout the store writes timestamps in: UTC with a 9-digit fraction that
+// is never trimmed, so text order equals chronological order.
+const timeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// parseTime reads a stored timestamp in timeLayout or the older RFC3339Nano form.
+func parseTime(s string) (time.Time, error) {
+	if t, err := time.Parse(timeLayout, s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339Nano, s)
 }
