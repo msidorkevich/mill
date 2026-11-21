@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -72,16 +74,79 @@ func TestKilledHolderFreesLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd.Wait()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		l, err := Acquire(path)
-		if err == nil {
-			l.Release()
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("lock still held after the holder was killed: %v", err)
-		}
-		time.Sleep(10 * time.Millisecond)
+	l, err := Acquire(path)
+	if err != nil {
+		t.Fatalf("lock still held right after the holder was killed: %v", err)
 	}
+	l.Release()
+}
+
+func TestSecondAcquireInSameProcessFailsAndKeepsLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.lock")
+	l, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	if _, err := Acquire(path); err == nil || !strings.Contains(err.Error(), "already holds run lock") {
+		t.Fatalf("second Acquire err = %v, want already-held error", err)
+	}
+	// A different process must still see the lock held.
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLock$")
+	cmd.Env = append(os.Environ(), "RUNLOCK_TEST_PATH="+path)
+	out, err := cmd.Output()
+	if err == nil || !strings.Contains(string(out), "ERR") || !strings.Contains(string(out), fmt.Sprint(os.Getpid())) {
+		t.Fatalf("child Acquire = %q, %v; want failure naming pid %d", out, err, os.Getpid())
+	}
+}
+
+// TestHelperHoldLockWithChild locks, starts a long-running child, then waits to be killed.
+func TestHelperHoldLockWithChild(t *testing.T) {
+	path := os.Getenv("RUNLOCK_TEST_PATH")
+	if path == "" {
+		t.Skip("helper process only")
+	}
+	if _, err := Acquire(path); err != nil {
+		fmt.Println("ERR", err)
+		os.Exit(1)
+	}
+	sleeper := exec.Command("sleep", "60")
+	if err := sleeper.Start(); err != nil {
+		fmt.Println("ERR", err)
+		os.Exit(1)
+	}
+	fmt.Println("LOCKED", sleeper.Process.Pid)
+	time.Sleep(time.Minute)
+}
+
+func TestChildOfKilledHolderDoesNotKeepLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.lock")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLockWithChild$")
+	cmd.Env = append(os.Environ(), "RUNLOCK_TEST_PATH="+path)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	f := strings.Fields(line)
+	if err != nil || len(f) != 2 || f[0] != "LOCKED" {
+		cmd.Process.Kill()
+		cmd.Wait()
+		t.Fatalf("child did not lock: %q %v", line, err)
+	}
+	sleeperPid, _ := strconv.Atoi(f[1])
+	defer syscall.Kill(sleeperPid, syscall.SIGKILL)
+	cmd.Process.Kill()
+	cmd.Wait()
+	if err := syscall.Kill(sleeperPid, 0); err != nil {
+		t.Fatalf("sleep child not running: %v", err)
+	}
+	l, err := Acquire(path)
+	if err != nil {
+		t.Fatalf("Acquire while holder's child still runs: %v", err)
+	}
+	l.Release()
 }
