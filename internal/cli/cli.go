@@ -33,6 +33,7 @@ type Env struct {
 	Stdout io.Writer
 	Stderr io.Writer
 	Dir    string // working directory
+	Home   string // user home; "" = os.UserHomeDir()
 	// Doctor overrides doctor options (tool lookup) in tests; nil uses the real machine.
 	Doctor *doctor.Options
 }
@@ -49,6 +50,7 @@ func init() {
 	commands = []command{
 		{"init", "set up .mill/ in the current git repository", runInit},
 		{"doctor", "check the machine and repository (--json)", runDoctor},
+		{"task", "run or show a single task (run, show)", runTask},
 		{"version", "print the mill version", runVersion},
 		{"help", "show this help", func(_ context.Context, env Env, _ []string) int {
 			usage(env.Stdout)
@@ -85,7 +87,7 @@ func usage(w io.Writer) {
 		fmt.Fprintf(w, "  %-8s %s\n", c.name, c.summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed.")
+	fmt.Fprintln(w, "Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task not verified.")
 }
 
 func newFlags(env Env, name string) *flag.FlagSet {
@@ -93,6 +95,8 @@ func newFlags(env Env, name string) *flag.FlagSet {
 	fs.SetOutput(env.Stderr)
 	return fs
 }
+
+var flagErrHelp = flag.ErrHelp
 
 // parse handles -h (exit 0) and bad flags (exit 2). ok=false means return code.
 func parse(fs *flag.FlagSet, args []string) (code int, ok bool) {

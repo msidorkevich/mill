@@ -86,6 +86,11 @@ BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 CREATE TRIGGER events_no_delete BEFORE DELETE ON events
 BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 `,
+	// 2: task phase and worktree path.
+	`
+ALTER TABLE tasks ADD COLUMN phase TEXT NOT NULL DEFAULT '';
+ALTER TABLE branches ADD COLUMN worktree TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // LatestVersion is the schema version this build writes.

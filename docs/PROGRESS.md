@@ -40,11 +40,56 @@ Tracks finished subtasks per milestone. Milestones and requirement IDs:
 - No queries for tasks, attempts or branches yet: the tables exist, their APIs come with M1/M2.
 - No `claude` runner, worktrees or pipeline: dogfood cut / M1.
 
-## Dogfood cut (next)
+## M1. Single-task pipeline: in progress (branch `m1-pipeline`)
 
-- [ ] Worktree and branch per task
-- [ ] implement → gate → verify → retry with findings, capped at `max_attempts`
-- [ ] `claude` runner with `--json-schema` and `--max-budget-usd`
-- [ ] Settings file per role (verifier read-only, no `git push`, no `.mill/` access)
-- [ ] `mill task run --file task.json`, `mill task show <id>`
-- [ ] Done when: a hand-written task on mill's own repo produces a verified branch worth merging
+Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–6.
+
+- [x] Probe `claude -p` stream-json: usage per `assistant` event, final `result` with
+      `structured_output`, `total_cost_usd`; `--json-schema` works with stream-json
+- [x] Config: `worktree_root`, `gate_timeout`, `env_allow`, `runner.claude_bin`,
+      `runner.attempt_timeout`
+- [x] `internal/taskspec`: task file format (one task of a plan), strict validation
+- [x] Store: migration 2 (task phase, worktree path); tasks, attempts, branches, per-task usage
+- [x] `internal/gitx`: worktrees, commit (mill identity fallback, no hooks), diff; ignores
+      inherited `GIT_*` env
+- [x] `internal/gate`: run `check_cmd` + task checks in the worktree, per-command logs (TP3)
+- [x] Prompts and output schemas for implementer and verifier (TP2, TP4)
+- [x] `claude` runner: stream-json parsing, live usage, structured output (RN3)
+- [x] Role settings: implementer and verifier permissions, no `git push`, no `.mill/` (SE1, SE3)
+- [x] `internal/pipeline`: prepare → implement → commit → gate → verify → retry (TP1–6)
+- [x] Budgets: per-attempt USD/token limits with kill, task budget check, `budget_exceeded`
+      → blocked (BG1, BG3, BG5)
+- [x] CLI: `mill task run --file F [--retry]`, `mill task show ID [--json]`
+- [x] Exit criterion: real task on a toy repo reaches verified; low token limit blocks the task
+      (2026-11-21, toy Go repo, Sonnet: `add-reverse` verified in 1 attempt, 18.2k tokens,
+      $0.08; `budget-probe` with a 1k-token limit killed after 2.3s and blocked)
+- [x] Fix found by the real run: a finished run whose final usage correction crossed the limit
+      was reported as killed; a `result` event now wins over a late cancel
+- [ ] Dogfood: a hand-written task on mill's own repo produces a verified branch worth merging
+
+### Notes and decisions
+
+- **Workers run with** `--setting-sources project --strict-mcp-config --no-session-persistence
+  --permission-mode dontAsk --permission-prompts none`: the operator's user plugins, hooks and
+  MCP servers stay out, and anything the role settings don't allow is denied, never prompted.
+- **Tools:** implementer `Bash, Read, Edit, Write, Glob, Grep`; verifier `Read, Glob, Grep`
+  (the diff and gate results are in its prompt). No subagents, no web.
+- **Deny rules** (a tripwire, SE4): git commit/push/reset/checkout/switch/rebase/merge/branch/
+  worktree/tag/remote/config, sudo, mill, and any access to the repo's `.mill/`.
+- **Worktrees** live outside the repo: `~/.cache/mill/worktrees/<repo>-<hash>/<task>` by default
+  (`worktree_root`). Branch `mill/t/<task>` until goals exist.
+- **mill commits** after every implement attempt (trailers `Mill-Task`, `Mill-Attempt`), even
+  after a failed run, so the next attempt builds on it. Squashing comes with publishing (M3).
+- **Usage:** live token counts come from `assistant` events (deduplicated per message id); the
+  final `result` event is authoritative and corrects them. Cost only arrives in the `result`
+  event, so live USD enforcement is claude's own `--max-budget-usd`.
+- **Known limitation:** a run killed for its token limit has no `result` event, so its cost is
+  recorded as $0 (tokens are exact). USD totals under-count killed runs. A price table could
+  estimate them later.
+- **Budget stop rules:** limit crossed while running → killed, `budget_exceeded`, task blocked,
+  no automatic retry (BG5). Limit crossed only by the final correction of a finished run → the
+  work is kept and a warning is logged.
+- **Retry:** `mill task run --file F --retry` reruns a blocked/failed task with the (possibly
+  edited) spec, on the same branch and base, continuing attempt numbers, starting from the last
+  findings.
+- **Exit codes:** 4 = task ran but ended blocked or failed.

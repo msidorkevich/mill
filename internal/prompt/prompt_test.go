@@ -1,0 +1,112 @@
+package prompt
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"mill/internal/gate"
+	"mill/internal/taskspec"
+)
+
+var task = taskspec.Spec{
+	ID: "add-reverse", Title: "Add Reverse", Kind: "implement",
+	Spec:       "Add func Reverse(s string) string.",
+	Acceptance: []string{"Reverse(\"abc\") == \"cba\"", "handles UTF-8"},
+	Owns:       []string{"reverse.go"},
+	Size:       "S",
+}
+
+func TestSchemasAreValidJSON(t *testing.T) {
+	for name, s := range map[string]json.RawMessage{"implementer": ImplementerSchema, "verifier": VerifierSchema} {
+		var v map[string]any
+		if err := json.Unmarshal(s, &v); err != nil {
+			t.Errorf("%s schema: %v", name, err)
+		}
+	}
+}
+
+func TestImplementerPrompt(t *testing.T) {
+	p := Implementer(ImplementerInput{Task: task, GateCmds: []string{"go test ./..."}, Attempt: 1, MaxAttempts: 3})
+	for _, want := range []string{"Attempt 1 of 3", "Add func Reverse", "handles UTF-8", "reverse.go", "`go test ./...`", "mill commits"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+	if strings.Contains(p, "Findings from the previous attempt") {
+		t.Error("first attempt mentions findings")
+	}
+
+	p = Implementer(ImplementerInput{Task: task, Attempt: 2, MaxAttempts: 3, Findings: []Finding{
+		{Source: "gate", Issue: "`go test` failed: FAIL TestReverse"},
+		{Source: "verifier", File: "reverse.go", Line: 7, Issue: "breaks multi-byte runes"},
+	}})
+	for _, want := range []string{"Findings from the previous attempt", "[gate] `go test` failed", "[verifier] reverse.go:7: breaks multi-byte runes"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("retry prompt missing %q", want)
+		}
+	}
+}
+
+func TestVerifierPrompt(t *testing.T) {
+	g := gate.Result{Passed: true, Commands: []gate.CmdResult{{Cmd: "go test ./...", Exit: 0}}}
+	p := Verifier(VerifierInput{Task: task, BaseSHA: "0123456789abcdef0123", Diff: "+func Reverse", DiffStat: "reverse.go | 1 +", Gate: g})
+	for _, want := range []string{"independent reviewer", "1. Reverse", "2. handles UTF-8", "`go test ./...`: passed", "0123456789ab", "+func Reverse"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+
+	big := strings.Repeat("x", MaxDiffBytes+1)
+	p = Verifier(VerifierInput{Task: task, Diff: big, DiffStat: "huge.go | 9999 +", Gate: g})
+	if strings.Contains(p, big) || !strings.Contains(p, "huge.go | 9999 +") {
+		t.Error("large diff not replaced by the stat")
+	}
+}
+
+func TestParseImplementer(t *testing.T) {
+	if _, err := ParseImplementer([]byte(`{"summary":"did it","files_changed":["a.go"],"notes":""}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseImplementer([]byte(`{"summary":" "}`)); err == nil {
+		t.Fatal("empty summary accepted")
+	}
+	if _, err := ParseImplementer([]byte(`nope`)); err == nil {
+		t.Fatal("invalid JSON accepted")
+	}
+}
+
+func TestParseVerifier(t *testing.T) {
+	o, err := ParseVerifier([]byte(`{"verdict":"fail","summary":"s","findings":[{"file":"a.go","line":3,"issue":"bug"}]}`))
+	if err != nil || o.Findings[0].Source != "verifier" {
+		t.Fatalf("ParseVerifier = %+v, %v", o, err)
+	}
+	if _, err := ParseVerifier([]byte(`{"verdict":"pass","summary":"ok","findings":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	bad := []string{
+		`{"verdict":"maybe","summary":"s","findings":[]}`,
+		`{"verdict":"fail","summary":"s","findings":[]}`,
+		`{"verdict":"fail","summary":"s","findings":[{"file":"","line":1,"issue":"x"}]}`,
+		`{"verdict":"fail","summary":"s","findings":[{"file":"a","line":1,"issue":""}]}`,
+		`[]`,
+	}
+	for _, b := range bad {
+		if _, err := ParseVerifier([]byte(b)); err == nil {
+			t.Errorf("accepted %s", b)
+		}
+	}
+}
+
+func TestFindingString(t *testing.T) {
+	cases := map[Finding]string{
+		{Source: "verifier", File: "a.go", Line: 3, Issue: "x"}: "[verifier] a.go:3: x",
+		{Source: "verifier", File: "a.go", Issue: "x"}:          "[verifier] a.go: x",
+		{Source: "gate", Issue: "x"}:                            "[gate] x",
+	}
+	for f, want := range cases {
+		if got := f.String(); got != want {
+			t.Errorf("%+v = %q, want %q", f, got, want)
+		}
+	}
+}

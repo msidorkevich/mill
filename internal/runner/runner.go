@@ -37,6 +37,15 @@ type Request struct {
 	Count  budget.Count
 	// OnUsage, when set, receives each usage increment as the runner observes it.
 	OnUsage func(delta budget.Usage)
+	// Name labels the run (log lines, pane titles), e.g. "add-reverse a1 implementer".
+	Name string
+	// LogDir receives the run's files: prompt, raw agent output, stderr, settings.
+	LogDir string
+	// ProtectedPaths are absolute directories the agent must not read or write, such as the
+	// repository's .mill/ (SE1).
+	ProtectedPaths []string
+	// Env is the agent process's complete environment (SE3).
+	Env []string
 }
 
 // Status is how a run ended.
@@ -55,6 +64,10 @@ type Result struct {
 	Output json.RawMessage // JSON matching Request.Schema when Status is ok
 	Usage  budget.Usage    // total usage for the run
 	Error  string          // human-readable reason when Status is not ok
+	// Warnings are non-fatal observations, e.g. tool calls the permission rules denied.
+	Warnings []string
+	// RawPath is the file holding the agent's raw output, when there is one.
+	RawPath string
 }
 
 // Runner executes Requests. Implementations must honour ctx cancellation and must report

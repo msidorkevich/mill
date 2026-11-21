@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 
@@ -17,22 +20,48 @@ import (
 type Config struct {
 	// CheckCmd is the project gate, run with `sh -c` in a task's worktree. Empty means
 	// every gate fails (P3: a gate with no checks is not a pass).
-	CheckCmd        string          `toml:"check_cmd"`
-	BaseBranch      string          `toml:"base_branch"`
-	Remote          string          `toml:"remote"`
-	MaxParallel     int             `toml:"max_parallel"`
-	MaxAttempts     int             `toml:"max_attempts"`
-	StartChildrenOn string          `toml:"start_children_on"`
-	Runner          RunnerConfig    `toml:"runner"`
-	Host            HostConfig      `toml:"host"`
-	Sizes           map[string]Size `toml:"sizes"`
-	Budget          Budget          `toml:"budget"`
+	CheckCmd        string `toml:"check_cmd"`
+	BaseBranch      string `toml:"base_branch"`
+	Remote          string `toml:"remote"`
+	MaxParallel     int    `toml:"max_parallel"`
+	MaxAttempts     int    `toml:"max_attempts"`
+	StartChildrenOn string `toml:"start_children_on"`
+	// WorktreeRoot holds task worktrees, outside the repository so that workers never
+	// write inside it. "" means ~/.cache/mill/worktrees.
+	WorktreeRoot string `toml:"worktree_root"`
+	// GateTimeout bounds each gate command.
+	GateTimeout Duration `toml:"gate_timeout"`
+	// EnvAllow lists extra environment variables passed to workers and gate commands, on top
+	// of the built-in allowlist (SE3).
+	EnvAllow []string        `toml:"env_allow"`
+	Runner   RunnerConfig    `toml:"runner"`
+	Host     HostConfig      `toml:"host"`
+	Sizes    map[string]Size `toml:"sizes"`
+	Budget   Budget          `toml:"budget"`
 }
+
+// Duration is a time.Duration written as a string such as "20m" in TOML.
+type Duration struct{ time.Duration }
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (d *Duration) UnmarshalText(b []byte) error {
+	v, err := time.ParseDuration(string(b))
+	if err != nil {
+		return err
+	}
+	d.Duration = v
+	return nil
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (d Duration) MarshalText() ([]byte, error) { return []byte(d.String()), nil }
 
 // RunnerConfig selects the agent runner.
 type RunnerConfig struct {
-	Kind       string `toml:"kind"`        // "claude" or "fake"
-	FakeScript string `toml:"fake_script"` // path to a fake-runner script, relative to the repo root
+	Kind           string   `toml:"kind"`            // "claude" or "fake"
+	FakeScript     string   `toml:"fake_script"`     // path to a fake-runner script, relative to the repo root
+	ClaudeBin      string   `toml:"claude_bin"`      // claude executable, looked up on PATH
+	AttemptTimeout Duration `toml:"attempt_timeout"` // bounds one agent run
 }
 
 // HostConfig selects where worker processes run.
@@ -76,8 +105,15 @@ func Default() Config {
 		MaxParallel:     2,
 		MaxAttempts:     3,
 		StartChildrenOn: "verified",
-		Runner:          RunnerConfig{Kind: "claude"},
-		Host:            HostConfig{Kind: "auto"},
+		WorktreeRoot:    "",
+		GateTimeout:     Duration{20 * time.Minute},
+		EnvAllow:        []string{},
+		Runner: RunnerConfig{
+			Kind:           "claude",
+			ClaudeBin:      "claude",
+			AttemptTimeout: Duration{30 * time.Minute},
+		},
+		Host: HostConfig{Kind: "auto"},
 		Sizes: map[string]Size{
 			"S": {Model: "sonnet"},
 			"M": {Model: "opus"},
@@ -107,8 +143,14 @@ max_parallel = 2          # tasks running at the same time
 max_attempts = 3          # implement attempts per task before it is blocked
 start_children_on = "verified"   # or "published"
 
+worktree_root = ""        # where task worktrees live; "" = ~/.cache/mill/worktrees
+gate_timeout = "20m"      # per gate command
+env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
+
 [runner]
 kind = "claude"           # or "fake" (scripted, zero tokens; set fake_script)
+claude_bin = "claude"
+attempt_timeout = "30m"   # per agent run
 
 [host]
 kind = "auto"             # "auto" (herdr if available, else exec), "exec" or "herdr"
@@ -204,6 +246,20 @@ func (c Config) Validate() error {
 	if c.Runner.Kind == "fake" && c.Runner.FakeScript == "" {
 		add("runner.fake_script is required when runner.kind = \"fake\"")
 	}
+	if c.Runner.Kind == "claude" && c.Runner.ClaudeBin == "" {
+		add("runner.claude_bin must not be empty")
+	}
+	if c.Runner.AttemptTimeout.Duration <= 0 {
+		add("runner.attempt_timeout must be > 0")
+	}
+	if c.GateTimeout.Duration <= 0 {
+		add("gate_timeout must be > 0")
+	}
+	for _, k := range c.EnvAllow {
+		if !envKeyRe.MatchString(k) {
+			add("env_allow: %q is not a valid environment variable name", k)
+		}
+	}
 	if !oneOf(c.Host.Kind, HostKinds) {
 		add("host.kind must be one of %v, got %q", HostKinds, c.Host.Kind)
 	}
@@ -241,6 +297,20 @@ func (c Config) AttemptBudget(size string) budget.Limits {
 	return c.Budget.Attempt.Override(c.Budget.Size[size].Attempt)
 }
 
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// Worktrees returns the directory holding task worktrees for the repository at root:
+// <worktree_root>/<repo name>-<short hash of root>. home is the user's home directory.
+func (c Config) Worktrees(root, home string) string {
+	base := c.WorktreeRoot
+	if base == "" {
+		base = filepath.Join(home, ".cache", "mill", "worktrees")
+	} else if strings.HasPrefix(base, "~/") {
+		base = filepath.Join(home, base[2:])
+	}
+	return filepath.Join(base, repoKey(root))
+}
+
 // Model returns the model for a task size, or "" if the size has no mapping.
 func (c Config) Model(size string) string { return c.Sizes[size].Model }
 
@@ -251,4 +321,15 @@ func oneOf(v string, set []string) bool {
 		}
 	}
 	return false
+}
+
+// repoKey names a repository's worktree directory: its base name plus a short FNV hash of
+// the full path, so two repositories with the same name never share a directory.
+func repoKey(root string) string {
+	var h uint32 = 2166136261
+	for i := 0; i < len(root); i++ {
+		h ^= uint32(root[i])
+		h *= 16777619
+	}
+	return fmt.Sprintf("%s-%08x", filepath.Base(root), h)
 }

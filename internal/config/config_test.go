@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"mill/internal/budget"
 )
@@ -140,5 +141,61 @@ func TestLoad(t *testing.T) {
 	}
 	if _, err := Load(filepath.Join(dir, "missing.toml")); err == nil {
 		t.Fatal("missing file accepted")
+	}
+}
+
+func TestWorktreeTimeoutAndEnvSettings(t *testing.T) {
+	cfg, err := Parse(`
+worktree_root = "~/wt"
+gate_timeout = "90s"
+env_allow = ["GOPROXY", "NPM_TOKEN"]
+[runner]
+claude_bin = "/opt/claude"
+attempt_timeout = "1h"
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GateTimeout.Duration != 90*time.Second || cfg.Runner.AttemptTimeout.Duration != time.Hour {
+		t.Fatalf("durations = %v, %v", cfg.GateTimeout, cfg.Runner.AttemptTimeout)
+	}
+	if cfg.Runner.ClaudeBin != "/opt/claude" || len(cfg.EnvAllow) != 2 {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	got := cfg.Worktrees("/src/myrepo", "/home/u")
+	if filepath.Dir(got) != "/home/u/wt" || !strings.HasPrefix(filepath.Base(got), "myrepo-") {
+		t.Fatalf("Worktrees = %q", got)
+	}
+}
+
+func TestWorktreesDefaultAndUnique(t *testing.T) {
+	cfg := Default()
+	a := cfg.Worktrees("/src/a/repo", "/home/u")
+	b := cfg.Worktrees("/src/b/repo", "/home/u")
+	if filepath.Dir(a) != "/home/u/.cache/mill/worktrees" {
+		t.Fatalf("default worktree root = %q", a)
+	}
+	if a == b {
+		t.Fatal("two repos with the same name share a worktree directory")
+	}
+	if a != cfg.Worktrees("/src/a/repo", "/home/u") {
+		t.Fatal("worktree directory is not stable")
+	}
+}
+
+func TestTimeoutAndEnvValidation(t *testing.T) {
+	tests := []struct{ name, toml, want string }{
+		{"bad duration", `gate_timeout = "soon"`, "parse config"},
+		{"zero gate timeout", `gate_timeout = "0s"`, "gate_timeout"},
+		{"zero attempt timeout", "[runner]\nattempt_timeout = \"0s\"", "attempt_timeout"},
+		{"empty claude bin", "[runner]\nclaude_bin = \"\"", "claude_bin"},
+		{"bad env key", `env_allow = ["NOT-VALID"]`, "env_allow"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse(tt.toml); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }

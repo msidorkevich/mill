@@ -119,6 +119,10 @@ func (s *Store) Events(ctx context.Context, afterSeq int64, limit int) ([]Event,
 		q += " LIMIT ?"
 		args = append(args, limit)
 	}
+	return s.queryEvents(ctx, q, args...)
+}
+
+func (s *Store) queryEvents(ctx context.Context, q string, args ...any) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

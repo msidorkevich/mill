@@ -92,8 +92,10 @@ agent, and delivers each task as its own branch for a human to review and merge 
   budget limits can be tested.
 - **RN3.** A `claude` runner:
   `claude -p --output-format stream-json --json-schema … --max-budget-usd … --settings <role settings>`.
-  mill reads usage from the stream as it arrives, which enables the token limit. (To confirm in
-  M1: the exact usage fields in the stream and whether `--json-schema` works with stream-json.)
+  mill reads usage from the stream as it arrives, which enables the token limit. Confirmed in M1:
+  each `assistant` event carries `message.usage` (deduplicated per message id), the final
+  `result` event carries the authoritative usage, `total_cost_usd` and `structured_output`, and
+  `--json-schema` works with stream-json.
 - **RN4.** Later: a `codex` runner, e.g. so the verifier uses a different provider than the
   implementer.
 
