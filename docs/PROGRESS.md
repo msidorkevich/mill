@@ -110,7 +110,7 @@ Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–
       determinism, but consider `-count=1` in `check_cmd` if a cached pass ever hides a problem.
       (Done: the gate runs `make check GOTESTFLAGS=-count=1`.)
 
-## M2. Planner and graph: in progress (branch `m2-graph`)
+## M2. Planner and graph: done (2026-11-21, branch `m2-graph`)
 
 Requirements: PL1–6, GR1–6, GT2–3, BG2, TS3. Exit criterion: a goal becomes 3–8 tasks, all
 verified as local branches; killing and restarting mill finishes with nothing duplicated.
@@ -177,9 +177,14 @@ waited for both of its dependencies and branched from `crash-test` with `planner
 - [x] `workflow-docs`: README walkthrough of plan → approve → run (fan-in of `planner` and
       `crash-test`) ($0.09; two inaccurate sentences corrected by hand in review)
 
-Exit criterion:
-- [ ] A real goal through the real planner becomes 3–8 tasks, all verified
-- [ ] Kill and restart finishes with nothing duplicated
+Exit criterion (toy Go repo, real agents):
+- [x] A real goal through the real planner becomes 3–8 tasks, all verified: `mill plan` made 5
+      tasks in one call ($0.13): three independent `strutil` helpers, a three-way fan-in
+      `cmd-toy` CLI and a README. All verified; the delivered CLI works.
+- [x] Kill and restart finishes with nothing duplicated: `kill -9` while two implementers were
+      running; the restart recovered 2 tasks and 2 attempts, committed their finished work as
+      interrupted attempts, continued with attempt 2, verified everything, one branch per task,
+      nothing verified ran again. Goal total $0.36 (excluding the killed attempts, see below).
 
 ### Follow-ups found in M2 reviews
 
@@ -191,3 +196,6 @@ Exit criterion:
       real kill test no `claude` process was left 3s later, but that relies on Claude Code
       exiting by itself. Record each worker's process group and kill any survivors during
       crash recovery.
+- [ ] Attempts abandoned by a killed run record no usage (mill never saw their final result),
+      so goal and task spend under-count killed runs. Recovery could read the attempt's
+      stream file and record the usage it reports.
