@@ -11,9 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"mill/internal/budget"
+	"mill/internal/host"
 	"mill/internal/plan"
+	"mill/internal/planner"
 	"mill/internal/store"
 )
 
@@ -38,6 +41,7 @@ func runPlan(ctx context.Context, env Env, args []string) int {
 
 func planUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  mill plan \"<goal>\"                        let the planner agent write a plan; create a draft goal")
 	fmt.Fprintln(w, "  mill plan --file plan.json                 create a draft goal from a written plan")
 	fmt.Fprintln(w, "  mill plan show <goal> [--json]             show a goal's plan")
 	fmt.Fprintln(w, "  mill plan edit <goal> [--file plan.json]   replace a draft plan (opens $EDITOR without --file)")
@@ -100,7 +104,7 @@ func runPlanCreate(ctx context.Context, env Env, args []string) int {
 			planUsage(env.Stderr)
 			return ExitUsage
 		}
-		return fail(errors.New("the planner is not available yet: write a plan by hand and run `mill plan --file plan.json` (see docs/examples/plan-todos.json)"))
+		return runPlanGoal(ctx, env, strings.Join(fs.Args(), " "))
 	}
 	if fs.NArg() > 0 {
 		fmt.Fprintf(env.Stderr, "mill plan: unexpected arguments: %s (use either --file or a goal text)\n", strings.Join(fs.Args(), " "))
@@ -117,24 +121,116 @@ func runPlanCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Fix the problems and run `mill plan --file` again. No goal was created.")
 		return ExitError
 	}
-	raw, err := json.Marshal(p)
-	if err != nil {
-		return fail(err)
-	}
 	_, _, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
 	defer s.Close()
-	g, err := s.CreateGoal(ctx, p.Goal, raw)
+	g, err := createDraftGoal(ctx, s, p)
 	if err != nil {
 		return fail(err)
 	}
+	printDraftGoal(env, g, p)
+	return ExitOK
+}
+
+// createDraftGoal stores a valid plan as a new draft goal.
+func createDraftGoal(ctx context.Context, s *store.Store, p plan.Plan) (store.Goal, error) {
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return store.Goal{}, err
+	}
+	return s.CreateGoal(ctx, p.Goal, raw)
+}
+
+func printDraftGoal(env Env, g store.Goal, p plan.Plan) {
 	fmt.Fprintf(env.Stdout, "Created goal %s (draft): %s\n", g.ID, p.Goal)
 	fmt.Fprintf(env.Stdout, "%d tasks\n", len(p.Tasks))
 	printWarnings(env, p)
 	fmt.Fprintf(env.Stdout, "\nNext: review with `mill plan show %s`, then `mill plan approve %s`.\n", g.ID, g.ID)
+}
+
+// runPlanGoal asks the planner agent for a plan of goal and creates a draft goal from it.
+func runPlanGoal(ctx context.Context, env Env, goal string) int {
+	fail := func(err error) int {
+		fmt.Fprintf(env.Stderr, "mill plan: %v\n", err)
+		return ExitError
+	}
+	if strings.TrimSpace(goal) == "" {
+		return fail(errors.New("the goal text is empty: describe what you want built"))
+	}
+	paths, cfg, s, err := openProject(ctx, env)
+	if err != nil {
+		return fail(err)
+	}
+	defer s.Close()
+	p, err := newPipeline(env, "plan", paths, cfg, s, env.Stdout)
+	if err != nil {
+		return fail(err)
+	}
+	logDir, err := newPlanLogDir(paths.Runs)
+	if err != nil {
+		return fail(err)
+	}
+	allow := append(append(append([]string{}, host.DefaultEnvAllow...), cfg.EnvAllow...), p.AgentEnvAllow...)
+
+	fmt.Fprintf(env.Stdout, "Planning (model %s, logs in %s)...\n", cfg.Model("M"), logDir)
+	rctx, cancel := context.WithTimeout(ctx, cfg.Runner.AttemptTimeout.Duration)
+	defer cancel()
+	res, err := planner.Generate(rctx, planner.Options{
+		Runner: p.Runner, Goal: goal, Root: paths.Root, CheckCmd: cfg.CheckCmd,
+		Model: cfg.Model("M"), Budget: cfg.AttemptBudget("M"), Count: cfg.Budget.Count,
+		LogDir: logDir, ProtectedPaths: []string{paths.MillDir}, Env: host.AllowEnv(os.Environ(), allow),
+	})
+	cost := fmt.Sprintf("planning cost: %s tokens (billable), $%.2f in %d agent call(s)",
+		fmtInt(res.Usage.Tokens(budget.CountBillable)), res.Usage.CostUSD, res.Calls)
+	var invalid *planner.InvalidPlanError
+	if errors.As(err, &invalid) {
+		path := filepath.Join(logDir, "plan.json")
+		if werr := os.WriteFile(path, append([]byte(res.Raw), '\n'), 0o644); werr != nil {
+			fmt.Fprintf(env.Stderr, "mill plan: could not save the last plan: %v\n", werr)
+			path = ""
+		}
+		fmt.Fprintln(env.Stderr, "mill plan: the planner's plan is still invalid after one retry:")
+		for _, pr := range invalid.Problems {
+			fmt.Fprintf(env.Stderr, "  - %s\n", pr)
+		}
+		if path != "" {
+			fmt.Fprintf(env.Stderr, "The last plan is saved in %s\nFix it and run `mill plan --file %s`.\n", path, path)
+		}
+		fmt.Fprintf(env.Stderr, "No goal was created (%s).\n", cost)
+		return ExitError
+	}
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "mill plan: %v\nNo goal was created (%s); logs are in %s.\n", err, cost, logDir)
+		return ExitError
+	}
+	g, err := createDraftGoal(ctx, s, res.Plan)
+	if err != nil {
+		return fail(err)
+	}
+	printDraftGoal(env, g, res.Plan)
+	fmt.Fprintf(env.Stdout, "%s\n", strings.ToUpper(cost[:1])+cost[1:])
 	return ExitOK
+}
+
+// newPlanLogDir creates .mill/runs/plans/<timestamp>/, adding a suffix if it exists.
+func newPlanLogDir(runs string) (string, error) {
+	base := filepath.Join(runs, "plans", time.Now().UTC().Format("20060102-150405"))
+	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
+		return "", err
+	}
+	dir := base
+	for i := 2; ; i++ {
+		err := os.Mkdir(dir, 0o755)
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		dir = fmt.Sprintf("%s-%d", base, i)
+	}
 }
 
 // goalArg parses "<goal> [flags]" with the id before or after the flags.
