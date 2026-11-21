@@ -55,12 +55,13 @@ command to review its diff. mill never pushes and never touches `main`.
 
 ### Plans and goals
 
-A goal is a request broken into tasks with dependencies. Until the planner exists, write the
-plan by hand (see `docs/examples/plan-todos.json`: a `goal`, optional `assumptions`, and
-`tasks` that each have `id`, `title`, `kind`, `spec`, `acceptance`, `checks`, `owns`,
-`depends_on` and `size`):
+A goal is a request broken into tasks with dependencies. Let the planner agent write the plan
+from a goal text, or write it by hand (see `docs/examples/plan-todos.json`: a `goal`, optional
+`assumptions`, and `tasks` that each have `id`, `title`, `kind`, `spec`, `acceptance`,
+`checks`, `owns`, `depends_on` and `size`):
 
 ```sh
+mill plan "add a --json flag to list"   # the planner writes a plan; creates draft goal g1, prints the planning cost
 mill plan --file plan.json      # validate, create draft goal g1; prints every problem and creates nothing if invalid
 mill plan show g1               # tasks in dependency order; checks are untrusted until approved (--json)
 mill plan edit g1               # edit in $EDITOR (default vi); or: mill plan edit g1 --file plan.json
@@ -80,7 +81,14 @@ lets running tasks stop, returns them to pending and leaves the goal blocked; ru
 again to continue. `start_children_on = "published"` is not supported yet; use `"verified"`.
 
 If an `$EDITOR` result is invalid, mill prints the problems and keeps the edited file; fix it and
-run `mill plan edit g1 --file <path>`. `mill plan "some text"` is reserved for the planner and
-currently exits 1.
+run `mill plan edit g1 --file <path>`.
+
+`mill plan "<goal>"` gives the planner agent a short survey of the repository (tracked files,
+the head of README.md, build files, `check_cmd`) and read-only tools (Read, Glob, Grep). It uses
+the model and per-attempt budget of size M from `.mill/config.toml`, the same agent
+environment as `mill run`, cannot touch `.mill/`, and logs under `.mill/runs/plans/<timestamp>/`.
+An invalid plan goes back to the planner once with its problems. If the second plan is invalid
+too, mill prints the problems, saves the plan to `.mill/runs/plans/<timestamp>/plan.json`,
+creates no goal and exits 1: fix the file and run `mill plan --file <that path>`.
 
 Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.
