@@ -21,6 +21,7 @@ import (
 	"mill/internal/gate"
 	"mill/internal/gitx"
 	"mill/internal/host"
+	"mill/internal/plan"
 	"mill/internal/project"
 	"mill/internal/prompt"
 	"mill/internal/runner"
@@ -57,8 +58,20 @@ type Outcome struct {
 	Usage    budget.Usage `json:"usage"`    // total task usage, all runs
 }
 
-// BranchName is the git branch for a task without a goal.
-func BranchName(taskID string) string { return "mill/t/" + taskID }
+// BranchName is the git branch for a task: mill/<goal>/<task> for a goal's task,
+// mill/t/<id> for a single task.
+func BranchName(taskID string) string {
+	if goal, _ := store.SplitTaskID(taskID); goal != "" {
+		return "mill/" + taskID
+	}
+	return "mill/t/" + taskID
+}
+
+// blockedError is returned by prepare when the task cannot start for a reason that is not a
+// mill failure (an unverified dependency, conflicting dependencies); the run loop blocks it.
+type blockedError struct{ reason string }
+
+func (e *blockedError) Error() string { return e.reason }
 
 func (p *Pipeline) logf(format string, a ...any) {
 	if p.Out != nil {
@@ -103,8 +116,16 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		return Outcome{}, err
 	}
 	br, err := p.prepare(ctx, t)
+	var be *blockedError
+	if errors.As(err, &be) {
+		return p.block(ctx, t.ID, store.PhasePrepare, be.reason, Outcome{}, nil)
+	}
 	if err != nil {
 		return Outcome{}, fmt.Errorf("prepare worktree: %w", err)
+	}
+	startSHA := br.StartSHA
+	if startSHA == "" {
+		startSHA = br.BaseSHA
 	}
 	p.logf("%s: worktree %s on %s (base %s @%s)", t.ID, br.Worktree, br.Name, br.Base, short(br.BaseSHA))
 
@@ -125,7 +146,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
 
 		// implement
-		if blocked, reason, err := p.checkTaskBudget(ctx, t.ID, limits); err != nil || blocked {
+		if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
 			return p.block(ctx, t.ID, store.PhaseImplement, reason, out, err)
 		}
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseImplement, ""); err != nil {
@@ -168,8 +189,8 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 				return out, err
 			}
 		}
-		if br.HeadSHA == "" || br.HeadSHA == br.BaseSHA {
-			findings = append(findings, prompt.Finding{Source: "mill", Issue: "no changes were made: the worktree is identical to the base"})
+		if br.HeadSHA == "" || br.HeadSHA == startSHA {
+			findings = append(findings, prompt.Finding{Source: "mill", Issue: "no changes were made: the worktree is identical to its starting point"})
 		}
 		if len(findings) > 0 {
 			if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
@@ -204,24 +225,24 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		p.logf("%s a%d gate      ok (%d command(s), %s)", t.ID, n, len(g.Commands), p.since(started))
 
 		// verify
-		if blocked, reason, err := p.checkTaskBudget(ctx, t.ID, limits); err != nil || blocked {
+		if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
 			return p.block(ctx, t.ID, store.PhaseVerify, reason, out, err)
 		}
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseVerify, ""); err != nil {
 			return out, err
 		}
-		diff, err := gitx.Diff(ctx, br.Worktree, br.BaseSHA)
+		diff, err := gitx.Diff(ctx, br.Worktree, startSHA)
 		if err != nil {
 			return out, err
 		}
-		stat, err := gitx.DiffStat(ctx, br.Worktree, br.BaseSHA)
+		stat, err := gitx.DiffStat(ctx, br.Worktree, startSHA)
 		if err != nil {
 			return out, err
 		}
 		if err := writeFile(filepath.Join(logDir, "diff.patch"), diff); err != nil {
 			return out, err
 		}
-		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: br.BaseSHA, Diff: diff, DiffStat: stat, Gate: g})
+		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g})
 		vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
 		if err != nil {
 			return out, err
@@ -301,9 +322,9 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 		if _, statErr := os.Stat(wt); statErr == nil {
 			return br, fmt.Errorf("worktree path %s already exists; move it away and retry", wt)
 		}
-		baseSHA, err := gitx.RevParse(ctx, p.Paths.Root, p.Cfg.BaseBranch)
+		base, baseSHA, merges, err := p.baseFor(ctx, t)
 		if err != nil {
-			return br, fmt.Errorf("base branch %q: %w", p.Cfg.BaseBranch, err)
+			return br, err
 		}
 		if err := os.MkdirAll(filepath.Dir(wt), 0o755); err != nil {
 			return br, err
@@ -311,11 +332,99 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 		if err := gitx.AddWorktree(ctx, p.Paths.Root, wt, name, baseSHA); err != nil {
 			return br, err
 		}
-		br = store.Branch{TaskID: t.ID, Name: name, Base: p.Cfg.BaseBranch, BaseSHA: baseSHA, HeadSHA: baseSHA, Worktree: wt}
+		for _, m := range merges {
+			err := gitx.Merge(ctx, wt, m.branch, fmt.Sprintf("mill: merge %s (dependency %s) into %s", m.branch, m.id, name))
+			if err == nil {
+				continue
+			}
+			var ce *gitx.ConflictError
+			if !errors.As(err, &ce) {
+				return br, fmt.Errorf("merge dependency %s: %w", m.id, err)
+			}
+			// Leave nothing behind so a retry starts clean.
+			if rmErr := gitx.RemoveWorktree(ctx, p.Paths.Root, wt); rmErr != nil {
+				return br, fmt.Errorf("dependency %s conflicts in %s; removing the worktree %s failed: %w", m.id, strings.Join(ce.Files, ", "), wt, rmErr)
+			}
+			if delErr := gitx.DeleteBranch(ctx, p.Paths.Root, name); delErr != nil {
+				return br, fmt.Errorf("dependency %s conflicts in %s; deleting branch %s failed: %w", m.id, strings.Join(ce.Files, ", "), name, delErr)
+			}
+			return br, &blockedError{fmt.Sprintf("dependency %s (branch %s) conflicts with the other dependencies in %s; resolve the conflict in the plan or by hand",
+				m.id, m.branch, strings.Join(ce.Files, ", "))}
+		}
+		startSHA, err := gitx.RevParse(ctx, wt, "HEAD")
+		if err != nil {
+			return br, err
+		}
+		br = store.Branch{TaskID: t.ID, Name: name, Base: base, BaseSHA: baseSHA, StartSHA: startSHA, HeadSHA: startSHA, Worktree: wt}
 	default:
 		return br, err
 	}
 	return br, p.Store.SaveBranch(ctx, br)
+}
+
+type mergeDep struct{ id, branch string }
+
+// baseFor decides what a new task branch starts from (see the goal base rules) and which
+// dependency branches must be merged into it afterwards.
+func (p *Pipeline) baseFor(ctx context.Context, t store.Task) (base, baseSHA string, merges []mergeDep, err error) {
+	deps, err := p.Store.TaskDeps(ctx, t.ID)
+	if err != nil {
+		return "", "", nil, err
+	}
+	branches := map[string]string{}
+	for _, d := range deps {
+		dt, err := p.Store.GetTask(ctx, d)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if dt.Status != store.TaskVerified {
+			return "", "", nil, &blockedError{fmt.Sprintf("dependency %s is %s, not verified; run it first", d, dt.Status)}
+		}
+		db, err := p.Store.GetBranch(ctx, d)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("dependency %s is verified but has no branch: %w", d, err)
+		}
+		branches[d] = db.Name
+	}
+	switch len(deps) {
+	case 0:
+		baseSHA, err = gitx.RevParse(ctx, p.Paths.Root, p.Cfg.BaseBranch)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("base branch %q: %w", p.Cfg.BaseBranch, err)
+		}
+		return p.Cfg.BaseBranch, baseSHA, nil, nil
+	default:
+		parent := deps[0]
+		if len(deps) > 1 {
+			goalID, local := store.SplitTaskID(t.ID)
+			g, err := p.Store.GetGoal(ctx, goalID)
+			if err != nil {
+				return "", "", nil, err
+			}
+			var pl plan.Plan
+			if err := json.Unmarshal(g.Plan, &pl); err != nil {
+				return "", "", nil, fmt.Errorf("goal %s has an unreadable plan: %w", goalID, err)
+			}
+			deepest := pl.DeepestParent(local)
+			if deepest == "" {
+				return "", "", nil, fmt.Errorf("goal %s plan has no task %s", goalID, local)
+			}
+			parent = store.TaskID(goalID, deepest)
+			if _, ok := branches[parent]; !ok {
+				return "", "", nil, fmt.Errorf("plan parent %s of %s is not among its stored dependencies", parent, t.ID)
+			}
+		}
+		baseSHA, err = gitx.RevParse(ctx, p.Paths.Root, branches[parent])
+		if err != nil {
+			return "", "", nil, fmt.Errorf("head of dependency branch %q: %w", branches[parent], err)
+		}
+		for _, d := range deps {
+			if d != parent {
+				merges = append(merges, mergeDep{d, branches[d]})
+			}
+		}
+		return branches[parent], baseSHA, merges, nil
+	}
 }
 
 // agentRun is the outcome of one agent run.
@@ -401,6 +510,27 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 		return ar, fmt.Errorf("%s run: %w", role, runErr)
 	}
 	return ar, nil
+}
+
+// checkBudgets blocks when the task budget, or for a goal task the goal budget, cannot cover
+// another attempt (BG2).
+func (p *Pipeline) checkBudgets(ctx context.Context, t store.Task, need budget.Limits) (bool, string, error) {
+	if blocked, reason, err := p.checkTaskBudget(ctx, t.ID, need); err != nil || blocked {
+		return blocked, reason, err
+	}
+	goal, _ := store.SplitTaskID(t.ID)
+	if goal == "" {
+		return false, "", nil
+	}
+	spent, err := p.Store.GoalUsage(ctx, goal)
+	if err != nil {
+		return false, "", err
+	}
+	if !budget.Covers(p.Cfg.Budget.Goal, spent, need, p.Cfg.Budget.Count) {
+		return true, fmt.Sprintf("goal budget exhausted for %s: spent %s of %s, an attempt may use %s",
+			goal, fmtUsage(spent), fmtLimits(p.Cfg.Budget.Goal), fmtLimits(need)), nil
+	}
+	return false, "", nil
 }
 
 func (p *Pipeline) checkTaskBudget(ctx context.Context, taskID string, need budget.Limits) (bool, string, error) {

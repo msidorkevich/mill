@@ -2,6 +2,7 @@ package gitx
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,5 +133,49 @@ func TestErrorsIncludeStderr(t *testing.T) {
 	_, err := Run(context.Background(), r, "rev-parse", "--verify", "no-such-ref")
 	if err == nil || !strings.Contains(err.Error(), "git rev-parse") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestMergeCreatesMergeCommitAndReportsConflicts(t *testing.T) {
+	ctx := context.Background()
+	dir := repo(t)
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustRun(t, ctx, dir, "checkout", "-q", "-b", "one")
+	write("a.txt", "one\n")
+	write("shared.txt", "one\n")
+	if _, err := CommitAll(ctx, dir, "one"); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, ctx, dir, "checkout", "-q", "-b", "two", "main")
+	write("b.txt", "two\n")
+	if _, err := CommitAll(ctx, dir, "two"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Merge(ctx, dir, "one", "merge one"); err != nil {
+		t.Fatal(err)
+	}
+	if parents := mustRun(t, ctx, dir, "log", "-1", "--format=%P"); len(strings.Fields(parents)) != 2 {
+		t.Fatalf("not a merge commit, parents = %q", parents)
+	}
+
+	mustRun(t, ctx, dir, "checkout", "-q", "-b", "three", "main")
+	write("shared.txt", "three\n")
+	if _, err := CommitAll(ctx, dir, "three"); err != nil {
+		t.Fatal(err)
+	}
+	err := Merge(ctx, dir, "one", "merge one")
+	var ce *ConflictError
+	if !errors.As(err, &ce) || len(ce.Files) != 1 || ce.Files[0] != "shared.txt" {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := Run(ctx, dir, "rev-parse", "-q", "--verify", "MERGE_HEAD"); err == nil {
+		t.Fatal("merge still in progress")
+	}
+	if has, _ := HasChanges(ctx, dir); has {
+		t.Fatal("worktree dirty after abort")
 	}
 }
