@@ -154,8 +154,8 @@ Built by mill, one task at a time:
       `owns` overlap warnings, topological order, deepest parent (1 attempt, $0.22)
 - [x] `goals-store`: goals in the store (create, get, list, status, plan), approving a plan
       creates its tasks and deps in one transaction, `start_sha` on branches (1 attempt, $0.37)
-- [ ] `plan-cli`: `mill plan --file`, `plan show`, `plan edit`, `plan approve`, `goal list`,
-      `goal show`
+- [x] `plan-cli`: `mill plan --file`, `plan show`, `plan edit`, `plan approve`, `goal list`,
+      `goal show` (1 attempt, $0.50)
 - [ ] `graph-branches`: pipeline for goal tasks: names, base rules with fan-in, `start_sha`
       diffs, goal budget check (GT2–3, BG2)
 - [ ] `scheduler`: `mill run <goal>`: ready set, `owns` serialization, `max_parallel`, goal
