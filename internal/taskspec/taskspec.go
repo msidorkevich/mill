@@ -52,6 +52,12 @@ func Parse(data []byte) (Spec, error) {
 	if dec.More() {
 		return Spec{}, errors.New("parse task: trailing data after the task object")
 	}
+	s.ApplyDefaults()
+	return s, s.Validate()
+}
+
+// ApplyDefaults sets size S when empty and turns nil lists into empty lists.
+func (s *Spec) ApplyDefaults() {
 	if s.Size == "" {
 		s.Size = "S"
 	}
@@ -64,11 +70,25 @@ func Parse(data []byte) (Spec, error) {
 	if s.Owns == nil {
 		s.Owns = []string{}
 	}
-	return s, s.Validate()
+	if s.DependsOn == nil {
+		s.DependsOn = []string{}
+	}
 }
 
-// Validate reports every problem at once.
+// Validate reports every problem at once, including depends_on, which single tasks reject.
 func (s Spec) Validate() error {
+	var errs []error
+	if err := s.ValidateFields(); err != nil {
+		errs = append(errs, err)
+	}
+	if len(s.DependsOn) > 0 {
+		errs = append(errs, errors.New("depends_on is not supported for single tasks: run dependent tasks one after another"))
+	}
+	return errors.Join(errs...)
+}
+
+// ValidateFields checks every field rule except depends_on.
+func (s Spec) ValidateFields() error {
 	var errs []error
 	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
@@ -103,9 +123,6 @@ func (s Spec) Validate() error {
 		} else {
 			add("size must be one of %v, got %q", Sizes, s.Size)
 		}
-	}
-	if len(s.DependsOn) > 0 {
-		add("depends_on is not supported for single tasks: run dependent tasks one after another")
 	}
 	return errors.Join(errs...)
 }
