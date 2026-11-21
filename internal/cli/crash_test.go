@@ -90,17 +90,9 @@ func TestCrashKilledRunRecoversWithoutDuplicates(t *testing.T) {
 	first.Wait()
 	waited = true
 
-	var lock *runlock.Lock
-	lockDeadline := time.Now().Add(10 * time.Second)
-	for {
-		lock, err = runlock.Acquire(paths.RunLock)
-		if err == nil {
-			break
-		}
-		if time.Now().After(lockDeadline) {
-			t.Fatalf("run lock still held after SIGKILL: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
+	lock, err := runlock.Acquire(paths.RunLock)
+	if err != nil {
+		t.Fatalf("run lock still held right after the killed mill was reaped: %v", err)
 	}
 	if err := lock.Release(); err != nil {
 		t.Fatal(err)
