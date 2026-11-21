@@ -3,7 +3,7 @@
 # The gate: run with "sh -c" in each task's worktree. Required: an empty gate fails every task.
 check_cmd = "make check GOTESTFLAGS=-count=1"
 
-base_branch = "m2-graph"
+base_branch = "main"
 remote = "origin"
 max_parallel = 2          # tasks running at the same time
 max_attempts = 3          # implement attempts per task before it is blocked
