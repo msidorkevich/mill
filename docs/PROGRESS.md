@@ -158,8 +158,11 @@ Built by mill, one task at a time:
       `goal show` (1 attempt, $0.50)
 - [x] `graph-branches`: pipeline for goal tasks: names, base rules with fan-in, `start_sha`
       diffs, goal budget check (GT2–3, BG2) (1 attempt, $0.44)
+- [x] `run-safety`: run lock (`flock`), crash recovery in the store, pipeline safe for
+      parallel use, interrupted work committed, fake runner per-task scripts and delays
+      (1 attempt, $0.55)
 - [ ] `scheduler`: `mill run <goal>`: ready set, `owns` serialization, `max_parallel`, goal
-      status, run lock, crash recovery (GR1–GR6)
+      status, interruption handling, `--retry-blocked` (GR1–GR5)
 
 Built by mill as a goal (through the scheduler):
 - [ ] `planner`: `mill plan "<goal>"`: repo survey, planner agent, retry once on validation
