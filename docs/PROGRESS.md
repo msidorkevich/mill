@@ -40,7 +40,7 @@ Tracks finished subtasks per milestone. Milestones and requirement IDs:
 - No queries for tasks, attempts or branches yet: the tables exist, their APIs come with M1/M2.
 - No `claude` runner, worktrees or pipeline: dogfood cut / M1.
 
-## M1. Single-task pipeline: in progress (branch `m1-pipeline`)
+## M1. Single-task pipeline: done (2026-11-21, branch `m1-pipeline`)
 
 Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–6.
 
@@ -65,7 +65,10 @@ Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–
       $0.08; `budget-probe` with a 1k-token limit killed after 2.3s and blocked)
 - [x] Fix found by the real run: a finished run whose final usage correction crossed the limit
       was reported as killed; a `result` event now wins over a late cancel
-- [ ] Dogfood: a hand-written task on mill's own repo produces a verified branch worth merging
+- [x] Dogfood: a hand-written task on mill's own repo produces a verified branch worth merging
+      (`task-list`: adds `mill task list`; verified in 1 attempt, 44.8k tokens, $0.24; reviewed:
+      one aggregate SQL query, tests for ordering, aggregation, filters, empty and invalid status;
+      branch `mill/t/task-list`, waiting to be merged)
 
 ### Notes and decisions
 
@@ -93,3 +96,14 @@ Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–
   edited) spec, on the same branch and base, continuing attempt numbers, starting from the last
   findings.
 - **Exit codes:** 4 = task ran but ended blocked or failed.
+- **mill on mill:** `.mill/config.toml` is committed with `check_cmd = "make check"` and
+  `base_branch = "m1-pipeline"` (switch to `main` once M1 is merged). Task files live outside the
+  repo, in `~/prj/mill-tasks/`.
+
+### Follow-ups found while dogfooding
+
+- [ ] Timestamps are stored with RFC3339Nano, which trims trailing zeros, so text ordering by
+      `created_at` is wrong for whole-second times (`12:00:00Z` sorts after `12:00:00.1Z`).
+      Store a fixed-width format.
+- [ ] The gate reuses Go's test cache (it ran in 0.8s after the implementer's own run). Fine for
+      determinism, but consider `-count=1` in `check_cmd` if a cached pass ever hides a problem.
