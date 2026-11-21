@@ -98,6 +98,11 @@ UPDATE tasks SET created_at = substr(created_at,1,19) || '.' || substr(CASE WHEN
 UPDATE attempts SET started_at = substr(started_at,1,19) || '.' || substr(CASE WHEN length(started_at) > 20 THEN substr(started_at,21,length(started_at)-21) ELSE '' END || '000000000',1,9) || 'Z', ended_at = substr(ended_at,1,19) || '.' || substr(CASE WHEN length(ended_at) > 20 THEN substr(ended_at,21,length(ended_at)-21) ELSE '' END || '000000000',1,9) || 'Z' WHERE (started_at IS NULL OR started_at LIKE '____-__-__T__:__:__%Z') AND (ended_at IS NULL OR ended_at LIKE '____-__-__T__:__:__%Z');
 UPDATE branches SET updated_at = substr(updated_at,1,19) || '.' || substr(CASE WHEN length(updated_at) > 20 THEN substr(updated_at,21,length(updated_at)-21) ELSE '' END || '000000000',1,9) || 'Z' WHERE (updated_at IS NULL OR updated_at LIKE '____-__-__T__:__:__%Z');
 `,
+	// 4: why a goal is blocked; the tip a task branch started from.
+	`
+ALTER TABLE goals ADD COLUMN reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE branches ADD COLUMN start_sha TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // LatestVersion is the schema version this build writes.
