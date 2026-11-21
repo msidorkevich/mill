@@ -161,13 +161,19 @@ Built by mill, one task at a time:
 - [x] `run-safety`: run lock (`flock`), crash recovery in the store, pipeline safe for
       parallel use, interrupted work committed, fake runner per-task scripts and delays
       (1 attempt, $0.55)
-- [ ] `scheduler`: `mill run <goal>`: ready set, `owns` serialization, `max_parallel`, goal
-      status, interruption handling, `--retry-blocked` (GR1–GR5)
+- [x] `scheduler`: `mill run <goal>`: ready set, `owns` serialization, `max_parallel`, goal
+      status, interruption handling, `--retry-blocked` (GR1–GR5) (1 attempt, Opus, $2.11)
 
 Built by mill as a goal (through the scheduler):
 - [ ] `planner`: `mill plan "<goal>"`: repo survey, planner agent, retry once on validation
       errors (PL1, PL4, PL6)
 - [ ] `crash-test`: kill -9 a running `mill run` and restart; nothing duplicated (TS3)
+- [ ] `stream-message-fix`: found in review: `system/permission_denied` stream events carry
+      `message` as a string, so the claude runner counted them as unparseable lines
+- [ ] `scheduler-once`: found in review: a task that returns still `pending` would be restarted
+      forever; never start a task twice in one run
+- [ ] `workflow-docs`: README walkthrough of plan → approve → run (depends on `planner` and
+      `crash-test`: exercises fan-in)
 
 Exit criterion:
 - [ ] A real goal through the real planner becomes 3–8 tasks, all verified
