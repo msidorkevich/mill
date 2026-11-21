@@ -36,3 +36,34 @@ func ProcessInfo(pid int) (pgid int, command string, alive bool, err error) {
 	}
 	return pgid, strings.TrimSpace(strings.TrimPrefix(line, f[0])), true, nil
 }
+
+// GroupMembers returns the pids of live processes whose process group id is pgid. A group
+// that does not exist has no members and is not an error; a failure to ask is an error.
+func GroupMembers(pgid int) ([]int, error) {
+	if pgid <= 0 {
+		return nil, nil
+	}
+	out, err := exec.Command("ps", "-ax", "-o", "pid=,pgid=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("ps -ax: %w", err)
+	}
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 0 {
+			continue
+		}
+		if len(f) != 2 {
+			return nil, fmt.Errorf("ps -ax: unexpected output %q", line)
+		}
+		pid, err1 := strconv.Atoi(f[0])
+		g, err2 := strconv.Atoi(f[1])
+		if err1 != nil || err2 != nil {
+			return nil, fmt.Errorf("ps -ax: unexpected output %q", line)
+		}
+		if g == pgid {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}

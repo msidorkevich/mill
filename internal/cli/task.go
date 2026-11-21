@@ -509,7 +509,26 @@ func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store) err
 		if err != nil {
 			return fmt.Errorf("check leftover worker %d (%s attempt %d %s): %w; stop it by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
 		}
-		if !alive || pgid != a.PID || a.Command == "" || !strings.Contains(command, a.Command) {
+		if !alive {
+			// The recorded leader is gone, but the agent may have left children running in
+			// its group (e.g. a test run started from its Bash tool). A process group id
+			// cannot be reused while the group has members, and no new process can get that
+			// pid while the group exists, so any member of group a.PID must descend from the
+			// recorded worker; no command-line check is needed.
+			members, err := host.GroupMembers(a.PID)
+			if err != nil {
+				return fmt.Errorf("check leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+			}
+			if len(members) == 0 {
+				continue
+			}
+			if err := host.KillGroup(a.PID); err != nil {
+				return fmt.Errorf("kill leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+			}
+			fmt.Fprintf(out, "killed %d leftover process(es) of worker %d (%s attempt %d %s), whose agent had already exited\n", len(members), a.PID, a.TaskID, a.N, a.Role)
+			continue
+		}
+		if pgid != a.PID || a.Command == "" || !strings.Contains(command, a.Command) {
 			continue
 		}
 		if err := host.KillGroup(pgid); err != nil {

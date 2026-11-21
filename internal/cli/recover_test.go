@@ -157,3 +157,55 @@ func TestRecoveryRecordsUsageFromStreamFiles(t *testing.T) {
 		t.Errorf("TaskUsage = %+v", tu)
 	}
 }
+
+func TestRecoveryKillsChildrenOfExitedAgent(t *testing.T) {
+	s, id := recoverStore(t)
+	cmd := exec.Command("sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("child pid from %q: %v", out, err)
+	}
+	pgid := cmd.Process.Pid
+	t.Cleanup(func() { syscall.Kill(-pgid, syscall.SIGKILL) })
+	if err := s.SetAttemptProcess(context.Background(), id, pgid, "sh", "raw"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := host.GroupMembers(pgid); err != nil || len(m) != 1 || m[0] != child {
+		t.Fatalf("GroupMembers = %v, %v; want [%d]", m, err, child)
+	}
+	var buf bytes.Buffer
+	if err := killLeftoverWorkers(context.Background(), &buf, s); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if m, _ := host.GroupMembers(pgid); len(m) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child of exited agent still running")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	want := "killed 1 leftover process(es) of worker " + strconv.Itoa(pgid) + " (t1 attempt 2 implementer), whose agent had already exited"
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("output = %q, want %q", buf.String(), want)
+	}
+}
+
+func TestGroupMembersEmptyForMissingGroup(t *testing.T) {
+	gone := exec.Command("true")
+	gone.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := gone.Run(); err != nil {
+		t.Fatal(err)
+	}
+	m, err := host.GroupMembers(gone.Process.Pid)
+	if err != nil || len(m) != 0 {
+		t.Fatalf("GroupMembers = %v, %v; want none", m, err)
+	}
+}
