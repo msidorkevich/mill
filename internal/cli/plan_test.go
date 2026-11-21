@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"mill/internal/project"
 )
 
 const validPlan = `{
@@ -82,11 +85,72 @@ func TestPlanFileInvalidReportsEveryProblemAndCreatesNoGoal(t *testing.T) {
 	}
 }
 
-func TestPlanWithoutFileExplainsPlannerMissing(t *testing.T) {
+// plannerRepo is an initialized repo whose fake runner answers the planner with outputs.
+func plannerRepo(t *testing.T, outputs ...string) string {
+	t.Helper()
 	root := planRepo(t)
-	r := run(t, root, nil, "plan", "some text")
-	if r.code != ExitError || !strings.Contains(r.stderr, "not available yet") || !strings.Contains(r.stderr, "--file") {
-		t.Errorf("plan text: %+v", r)
+	var steps []string
+	for _, o := range outputs {
+		steps = append(steps, `{"output": `+o+`, "usage": [{"input_tokens": 1000, "output_tokens": 234, "cost_usd": 0.5}]}`)
+	}
+	script := `{"planner": [` + strings.Join(steps, ",") + `]}`
+	if err := os.WriteFile(filepath.Join(root, "script.json"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "check_cmd = \"true\"\n[runner]\nkind = \"fake\"\nfake_script = \"script.json\"\n"
+	if err := os.WriteFile(project.PathsAt(root).Config, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestPlanGoalTextCreatesDraftGoalWithPlanningCost(t *testing.T) {
+	root := plannerRepo(t, invalidPlan, validPlan)
+	r := run(t, root, nil, "plan", "add a greeting")
+	if r.code != ExitOK {
+		t.Fatalf("plan: %+v", r)
+	}
+	for _, want := range []string{"Created goal g1 (draft): Add greeting", "2 tasks", "mill plan approve g1",
+		"Planning cost: 2,468 tokens (billable), $1.00 in 2 agent call(s)"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
+	}
+	if s := run(t, root, nil, "plan", "show", "g1"); !strings.Contains(s.stdout, "First") || !strings.Contains(s.stdout, "draft") {
+		t.Errorf("plan show:\n%s", s.stdout)
+	}
+	plans, err := filepath.Glob(filepath.Join(project.PathsAt(root).Runs, "plans", "*", "call2"))
+	if err != nil || len(plans) != 1 {
+		t.Errorf("planner logs not under .mill/runs/plans/<timestamp>/: %v %v", plans, err)
+	}
+}
+
+func TestPlanGoalTextInvalidTwiceSavesPlanAndCreatesNoGoal(t *testing.T) {
+	root := plannerRepo(t, invalidPlan, invalidPlan)
+	r := run(t, root, nil, "plan", "add a greeting")
+	if r.code != ExitError {
+		t.Fatalf("code = %d: %+v", r.code, r)
+	}
+	for _, want := range []string{"goal must not be empty", "zzz", "No goal was created", "mill plan --file "} {
+		if !strings.Contains(r.stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, r.stderr)
+		}
+	}
+	i := strings.Index(r.stderr, "mill plan --file ")
+	path := strings.TrimSuffix(strings.Fields(r.stderr[i+len("mill plan --file "):])[0], "`.")
+	if !strings.HasPrefix(path, filepath.Join(project.PathsAt(root).Runs, "plans")) || filepath.Base(path) != "plan.json" {
+		t.Errorf("plan path %q", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("saved plan: %v", err)
+	}
+	var got, want any
+	if json.Unmarshal(data, &got) != nil || json.Unmarshal([]byte(invalidPlan), &want) != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("saved plan = %s", data)
+	}
+	if l := run(t, root, nil, "goal", "list"); !strings.Contains(l.stdout, "no goals") {
+		t.Errorf("a goal was created:\n%s", l.stdout)
 	}
 	if r := run(t, root, nil, "plan"); r.code != ExitUsage {
 		t.Errorf("plan alone: %+v", r)
