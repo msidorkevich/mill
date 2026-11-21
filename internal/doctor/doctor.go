@@ -1,0 +1,232 @@
+// Package doctor checks that the machine and the repository are ready for mill.
+// It spends no tokens: agent CLIs are only located and asked for their version.
+package doctor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"mill/internal/config"
+	"mill/internal/project"
+	"mill/internal/store"
+)
+
+// Status of one check.
+type Status string
+
+const (
+	OK   Status = "ok"
+	Warn Status = "warn"
+	Fail Status = "fail"
+	Skip Status = "skip"
+)
+
+// Check is the result of one check.
+type Check struct {
+	Name   string `json:"name"`
+	Status Status `json:"status"`
+	Detail string `json:"detail"`
+}
+
+// Report is the result of all checks.
+type Report struct {
+	Checks []Check `json:"checks"`
+	OK     bool    `json:"ok"` // false if any check failed
+}
+
+// MinGit is the oldest git mill supports (merge-tree --write-tree, GT1).
+var MinGit = [3]int{2, 38, 0}
+
+// Options configure Run. Zero values use the real environment.
+type Options struct {
+	Dir      string                                            // directory to check from
+	LookPath func(string) (string, error)                      // defaults to exec.LookPath
+	Output   func(name string, args ...string) (string, error) // runs a command, returns stdout
+	Getenv   func(string) string                               // defaults to os.Getenv
+}
+
+func (o *Options) defaults() {
+	if o.LookPath == nil {
+		o.LookPath = exec.LookPath
+	}
+	if o.Output == nil {
+		o.Output = func(name string, args ...string) (string, error) {
+			out, err := exec.Command(name, args...).Output()
+			return string(out), err
+		}
+	}
+	if o.Getenv == nil {
+		o.Getenv = os.Getenv
+	}
+}
+
+// Run performs every check. Later checks are skipped when the ones they depend on fail.
+func Run(ctx context.Context, opts Options) Report {
+	opts.defaults()
+	var r Report
+	add := func(name string, st Status, format string, a ...any) {
+		r.Checks = append(r.Checks, Check{Name: name, Status: st, Detail: fmt.Sprintf(format, a...)})
+	}
+
+	// git
+	gitOK := false
+	if _, err := opts.LookPath("git"); err != nil {
+		add("git", Fail, "git not found on PATH")
+	} else if out, err := opts.Output("git", "--version"); err != nil {
+		add("git", Fail, "git --version failed: %v", err)
+	} else if v, err := ParseGitVersion(out); err != nil {
+		add("git", Fail, "%v", err)
+	} else if !atLeast(v, MinGit) {
+		add("git", Fail, "git %s is too old; need >= %s", fmtVer(v), fmtVer(MinGit))
+	} else {
+		add("git", OK, "git %s (>= %s)", fmtVer(v), fmtVer(MinGit))
+		gitOK = true
+	}
+
+	// repository and .mill/
+	var paths project.Paths
+	repoOK, initOK := false, false
+	if !gitOK {
+		add("repo", Skip, "needs git")
+	} else if root, err := project.GitRoot(opts.Dir); err != nil {
+		add("repo", Fail, "%v", err)
+	} else {
+		add("repo", OK, "%s", root)
+		repoOK = true
+		paths = project.PathsAt(root)
+	}
+	if !repoOK {
+		add("init", Skip, "needs a git repository")
+	} else if _, err := os.Stat(paths.Config); err != nil {
+		add("init", Fail, "%v", project.ErrNotInitialized)
+	} else {
+		add("init", OK, "%s", paths.MillDir)
+		initOK = true
+	}
+
+	// config
+	var cfg config.Config
+	cfgOK := false
+	if !initOK {
+		add("config", Skip, "needs mill init")
+	} else if c, err := config.Load(paths.Config); err != nil {
+		add("config", Fail, "%v", err)
+	} else {
+		cfg, cfgOK = c, true
+		if strings.TrimSpace(c.CheckCmd) == "" {
+			add("config", Warn, "check_cmd is empty: every gate will fail until it is set")
+		} else {
+			add("config", OK, "check_cmd = %q", c.CheckCmd)
+		}
+	}
+
+	// database
+	if !initOK {
+		add("database", Skip, "needs mill init")
+	} else if _, err := os.Stat(paths.DB); err != nil {
+		add("database", Fail, "%s missing (run `mill init`)", paths.DB)
+	} else if s, err := store.Open(ctx, paths.DB, store.Options{}); err != nil {
+		add("database", Fail, "%v", err)
+	} else {
+		v, verr := s.SchemaVersion(ctx)
+		mode, merr := s.JournalMode(ctx)
+		s.Close()
+		switch {
+		case verr != nil || merr != nil:
+			add("database", Fail, "read database state: %v", errors.Join(verr, merr))
+		case mode != "wal":
+			add("database", Fail, "journal mode is %q, want wal", mode)
+		default:
+			add("database", OK, "schema v%d, %s mode", v, mode)
+		}
+	}
+
+	// runner
+	if !cfgOK {
+		add("runner", Skip, "needs a valid config")
+	} else {
+		switch cfg.Runner.Kind {
+		case "claude":
+			if _, err := opts.LookPath("claude"); err != nil {
+				add("runner", Fail, "runner.kind = claude but `claude` is not on PATH")
+			} else if out, err := opts.Output("claude", "--version"); err != nil {
+				add("runner", Fail, "claude --version failed: %v", err)
+			} else {
+				add("runner", OK, "claude %s (login not checked: that would spend tokens)", strings.TrimSpace(out))
+			}
+		case "fake":
+			p := cfg.Runner.FakeScript
+			if !filepath.IsAbs(p) {
+				p = filepath.Join(paths.Root, p)
+			}
+			if _, err := os.Stat(p); err != nil {
+				add("runner", Fail, "fake script %s: %v", p, err)
+			} else {
+				add("runner", OK, "fake runner, script %s", p)
+			}
+		}
+	}
+
+	// host
+	_, herdrErr := opts.LookPath("herdr")
+	inHerdr := opts.Getenv("HERDR_PANE_ID") != ""
+	if !cfgOK {
+		add("host", Skip, "needs a valid config")
+	} else {
+		switch cfg.Host.Kind {
+		case "exec":
+			add("host", OK, "exec")
+		case "auto":
+			if herdrErr == nil && inHerdr {
+				add("host", Warn, "auto would pick herdr, but the herdr host is not implemented yet; using exec")
+			} else {
+				add("host", OK, "auto → exec")
+			}
+		case "herdr":
+			add("host", Warn, "host.kind = herdr is not implemented yet; exec will be used")
+		}
+	}
+
+	r.OK = true
+	for _, c := range r.Checks {
+		if c.Status == Fail {
+			r.OK = false
+		}
+	}
+	return r
+}
+
+var gitVersionRe = regexp.MustCompile(`git version (\d+)\.(\d+)(?:\.(\d+))?`)
+
+// ParseGitVersion extracts major.minor.patch from `git --version` output.
+func ParseGitVersion(out string) ([3]int, error) {
+	m := gitVersionRe.FindStringSubmatch(out)
+	if m == nil {
+		return [3]int{}, fmt.Errorf("cannot parse git version from %q", strings.TrimSpace(out))
+	}
+	var v [3]int
+	for i := 0; i < 3; i++ {
+		if m[i+1] != "" {
+			v[i], _ = strconv.Atoi(m[i+1])
+		}
+	}
+	return v, nil
+}
+
+func atLeast(v, min [3]int) bool {
+	for i := 0; i < 3; i++ {
+		if v[i] != min[i] {
+			return v[i] > min[i]
+		}
+	}
+	return true
+}
+
+func fmtVer(v [3]int) string { return fmt.Sprintf("%d.%d.%d", v[0], v[1], v[2]) }

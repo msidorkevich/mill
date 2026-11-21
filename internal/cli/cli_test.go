@@ -1,0 +1,241 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"mill/internal/config"
+	"mill/internal/doctor"
+	"mill/internal/project"
+	"mill/internal/store"
+)
+
+type result struct {
+	code           int
+	stdout, stderr string
+}
+
+func run(t *testing.T, dir string, d *doctor.Options, args ...string) result {
+	t.Helper()
+	var out, errb bytes.Buffer
+	code := Run(context.Background(), Env{Stdout: &out, Stderr: &errb, Dir: dir, Doctor: d}, args)
+	return result{code, out.String(), errb.String()}
+}
+
+func gitRepo(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+// tools simulates agent CLIs on PATH, so tests never depend on the machine's claude/herdr.
+func tools(have map[string]string) *doctor.Options {
+	return &doctor.Options{
+		LookPath: func(name string) (string, error) {
+			if _, ok := have[name]; ok {
+				return "/fake/" + name, nil
+			}
+			return "", exec.ErrNotFound
+		},
+		Output: func(name string, _ ...string) (string, error) {
+			if out, ok := have[name]; ok {
+				return out, nil
+			}
+			return "", errors.New("missing")
+		},
+		Getenv: func(string) string { return "" },
+	}
+}
+
+var machine = map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)"}
+
+func TestUsageAndUnknownCommand(t *testing.T) {
+	if r := run(t, t.TempDir(), nil); r.code != ExitUsage || !strings.Contains(r.stderr, "Usage") {
+		t.Fatalf("no args: %+v", r)
+	}
+	if r := run(t, t.TempDir(), nil, "frobnicate"); r.code != ExitUsage || !strings.Contains(r.stderr, `unknown command "frobnicate"`) {
+		t.Fatalf("unknown: %+v", r)
+	}
+	if r := run(t, t.TempDir(), nil, "help"); r.code != ExitOK || !strings.Contains(r.stdout, "doctor") {
+		t.Fatalf("help: %+v", r)
+	}
+	if r := run(t, t.TempDir(), nil, "--help"); r.code != ExitOK {
+		t.Fatalf("--help: %+v", r)
+	}
+}
+
+func TestVersion(t *testing.T) {
+	r := run(t, t.TempDir(), nil, "version")
+	if r.code != ExitOK || r.stdout != "mill dev\n" {
+		t.Fatalf("version: %+v", r)
+	}
+	if r := run(t, t.TempDir(), nil, "version", "extra"); r.code != ExitUsage {
+		t.Fatalf("version extra: %+v", r)
+	}
+	if r := run(t, t.TempDir(), nil, "version", "--bogus"); r.code != ExitUsage {
+		t.Fatalf("bad flag: %+v", r)
+	}
+}
+
+func TestInitOutsideGitRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+	r := run(t, dir, nil, "init")
+	if r.code != ExitError || !strings.Contains(r.stderr, "not inside a git repository") {
+		t.Fatalf("init outside repo: %+v", r)
+	}
+}
+
+func TestInitCreatesLayoutFromSubdirectory(t *testing.T) {
+	root := gitRepo(t)
+	sub := filepath.Join(root, "pkg", "x")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, sub, nil, "init")
+	if r.code != ExitOK {
+		t.Fatalf("init: %+v", r)
+	}
+	p := project.PathsAt(root)
+	for _, f := range []string{p.Config, p.GitIgnore, p.DB} {
+		if _, err := os.Stat(f); err != nil {
+			t.Errorf("%s not created: %v", f, err)
+		}
+	}
+	if fi, err := os.Stat(p.Runs); err != nil || !fi.IsDir() {
+		t.Errorf("runs/ not created: %v", err)
+	}
+	if got, _ := os.ReadFile(p.Config); string(got) != config.DefaultTOML {
+		t.Error("config.toml is not the default template")
+	}
+
+	// The init event is in the log.
+	s, err := store.Open(context.Background(), p.DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	evs, err := s.Events(context.Background(), 0, 0)
+	if err != nil || len(evs) != 1 || evs[0].Kind != "init" {
+		t.Fatalf("events = %+v, %v", evs, err)
+	}
+}
+
+func TestInitGitignoreKeepsStateOutOfGit(t *testing.T) {
+	root := gitRepo(t)
+	if r := run(t, root, nil, "init"); r.code != ExitOK {
+		t.Fatalf("init: %+v", r)
+	}
+	p := project.PathsAt(root)
+	if err := os.WriteFile(filepath.Join(p.Runs, "log.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("git", "-C", root, "status", "--porcelain", "--untracked-files=all").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Fields(string(out))
+	want := map[string]bool{"??": true, ".mill/.gitignore": true, ".mill/config.toml": true}
+	for _, f := range got {
+		if !want[f] {
+			t.Errorf("git sees %q; only config.toml and .gitignore should be visible:\n%s", f, out)
+		}
+	}
+}
+
+func TestInitIsIdempotentAndKeepsConfig(t *testing.T) {
+	root := gitRepo(t)
+	if r := run(t, root, nil, "init"); r.code != ExitOK {
+		t.Fatalf("first init: %+v", r)
+	}
+	p := project.PathsAt(root)
+	custom := `check_cmd = "make check"` + "\n"
+	if err := os.WriteFile(p.Config, []byte(custom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "init")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "kept") {
+		t.Fatalf("second init: %+v", r)
+	}
+	if got, _ := os.ReadFile(p.Config); string(got) != custom {
+		t.Fatalf("init overwrote config: %q", got)
+	}
+}
+
+func TestInitRefusesInvalidExistingConfig(t *testing.T) {
+	root := gitRepo(t)
+	p := project.PathsAt(root)
+	if err := os.MkdirAll(p.MillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Config, []byte("max_parallel = 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "init")
+	if r.code != ExitError || !strings.Contains(r.stderr, "invalid") {
+		t.Fatalf("init with bad config: %+v", r)
+	}
+}
+
+func TestDoctorAfterInit(t *testing.T) {
+	root := gitRepo(t)
+	if r := run(t, root, nil, "init"); r.code != ExitOK {
+		t.Fatalf("init: %+v", r)
+	}
+	// Default config: check_cmd empty → warning, but the report passes.
+	r := run(t, root, tools(machine), "doctor")
+	if r.code != ExitOK {
+		t.Fatalf("doctor: %+v", r)
+	}
+	if !strings.Contains(r.stdout, "warn  config") || !strings.Contains(r.stdout, "ok    database") {
+		t.Fatalf("doctor output:\n%s", r.stdout)
+	}
+}
+
+func TestDoctorFailsWithExitCode3(t *testing.T) {
+	root := gitRepo(t) // not initialized
+	r := run(t, root, tools(machine), "doctor")
+	if r.code != ExitCheckFailed || !strings.Contains(r.stdout, "FAIL  init") {
+		t.Fatalf("doctor: %+v", r)
+	}
+}
+
+func TestDoctorJSON(t *testing.T) {
+	root := gitRepo(t)
+	run(t, root, nil, "init")
+	r := run(t, root, tools(machine), "doctor", "--json")
+	if r.code != ExitOK {
+		t.Fatalf("doctor --json: %+v", r)
+	}
+	var doc struct {
+		Schema string         `json:"schema"`
+		OK     bool           `json:"ok"`
+		Checks []doctor.Check `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("not one JSON document: %v\n%s", err, r.stdout)
+	}
+	if doc.Schema != "mill/doctor@1" || !doc.OK || len(doc.Checks) == 0 {
+		t.Fatalf("doc = %+v", doc)
+	}
+}

@@ -1,0 +1,92 @@
+{
+  "goal": "Add a /todos REST API with SQLite storage and pagination",
+  "assumptions": [
+    "Use modernc.org/sqlite (pure Go, no CGO)",
+    "Router is the existing chi router in internal/http"
+  ],
+  "tasks": [
+    {
+      "id": "db-migrations",
+      "title": "Add SQLite connection and todos migration",
+      "kind": "implement",
+      "spec": "Create internal/store/db.go with Open(path) that opens SQLite and applies embedded migrations. Add migration 001_todos.sql: todos(id INTEGER PK, title TEXT NOT NULL, done BOOL NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL).",
+      "acceptance": [
+        "Open(':memory:') succeeds and the todos table exists",
+        "Running migrations twice does not fail"
+      ],
+      "checks": ["go test ./internal/store/..."],
+      "owns": ["internal/store/db.go", "internal/store/migrations/**", "go.mod", "go.sum"],
+      "depends_on": [],
+      "size": "S"
+    },
+    {
+      "id": "config",
+      "title": "Add DB_PATH to config",
+      "kind": "implement",
+      "spec": "Extend internal/config with DBPath read from env DB_PATH, default './data.db'.",
+      "acceptance": [
+        "Config.DBPath defaults to ./data.db",
+        "DB_PATH env overrides it"
+      ],
+      "checks": ["go test ./internal/config/..."],
+      "owns": ["internal/config/**"],
+      "depends_on": [],
+      "size": "S"
+    },
+    {
+      "id": "todo-repo",
+      "title": "Todo repository (CRUD)",
+      "kind": "implement",
+      "spec": "internal/store/todos.go: type TodoRepo with Create, Get, List(limit, offset), Update, Delete. Return ErrNotFound for missing ids.",
+      "acceptance": [
+        "Each method has a table-driven test against :memory:",
+        "Get on a missing id returns ErrNotFound"
+      ],
+      "checks": ["go test ./internal/store/..."],
+      "owns": ["internal/store/todos.go", "internal/store/todos_test.go"],
+      "depends_on": ["db-migrations"],
+      "size": "M"
+    },
+    {
+      "id": "http-handlers",
+      "title": "REST handlers for /todos",
+      "kind": "implement",
+      "spec": "internal/http/todos.go: GET /todos, POST /todos, GET/PATCH/DELETE /todos/{id}. JSON in/out, 404 on ErrNotFound, 400 on invalid body. Wire into the router and main using config.DBPath.",
+      "acceptance": [
+        "httptest covers each route, including the 400 and 404 cases",
+        "The server starts with `go run ./cmd/server` and POST then GET round-trips"
+      ],
+      "checks": ["go test ./internal/http/..."],
+      "owns": ["internal/http/todos.go", "internal/http/todos_test.go", "internal/http/router.go", "cmd/server/main.go"],
+      "depends_on": ["todo-repo", "config"],
+      "size": "M"
+    },
+    {
+      "id": "pagination",
+      "title": "Offset pagination on GET /todos",
+      "kind": "implement",
+      "spec": "Support ?limit (default 20, max 100) and ?offset. Response: {items, total, limit, offset}. Invalid values → 400.",
+      "acceptance": [
+        "limit=0, limit=101 and offset=-1 return 400",
+        "total is correct when there are more items than fit on a page"
+      ],
+      "checks": ["go test ./internal/http/... ./internal/store/..."],
+      "owns": ["internal/http/todos.go", "internal/http/todos_test.go", "internal/store/todos.go"],
+      "depends_on": ["http-handlers"],
+      "size": "S"
+    },
+    {
+      "id": "api-docs",
+      "title": "Document the /todos API",
+      "kind": "docs",
+      "spec": "Add docs/api/todos.md with each endpoint, request/response examples and error codes.",
+      "acceptance": [
+        "Every route in internal/http/todos.go is documented with an example"
+      ],
+      "checks": [],
+      "owns": ["docs/api/todos.md"],
+      "depends_on": ["http-handlers"],
+      "size": "S"
+    }
+  ]
+}
