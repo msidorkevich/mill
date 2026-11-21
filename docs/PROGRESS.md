@@ -254,3 +254,22 @@ The M2 follow-ups section above is resolved by this goal:
 - [ ] A gate failure caused by a flaky or unrelated test makes the implementer "fix" code that
       was fine, or retry until it passes. The verifier and findings could say when a failing test
       is outside the task's diff.
+
+## g2 review follow-ups: in progress (goal `g3`, on `main`)
+
+Plan: `~/prj/mill-tasks/g3-followups.plan.json`, run through mill's scheduler.
+
+Hypothesis for the "run lock still held" flake: `flock` belongs to the open file, and a child
+mill is starting (git, a gate command) shares mill's open files until it execs. If mill is
+killed in that window, the half-started child keeps the lock for a moment after mill is gone.
+Heavy load (parallel gates, `-race`) widens the window. `fcntl` locks belong to the process and
+are not inherited by children, so the lock ends exactly when mill does.
+
+- [ ] `runlock-fcntl`: run lock on `fcntl` (process-owned); crash test strict again; stress run
+- [ ] `owns-check`: files changed outside `owns` are listed; `owns_policy` = warn (verifier
+      judges) | enforce (finding before the gate) | off
+- [ ] `reaper-orphans`: recovery also kills members of a worker's process group whose leader
+      already exited
+- [ ] `gate-triage`: a failing gate command is re-run once (flaky → passes, verifier told);
+      if it still fails it runs on the task's starting point: fails there too → task blocked as
+      not caused by it; passes there → finding says the task caused it
