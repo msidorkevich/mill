@@ -150,8 +150,8 @@ Built by me (setup):
 - [x] Gate runs tests uncached (`make check GOTESTFLAGS=-count=1`)
 
 Built by mill, one task at a time:
-- [ ] `plan-validate`: `internal/plan`: plan format, validation (PL2–PL3), cycle detection,
-      `owns` overlap warnings, topological order, deepest parent
+- [x] `plan-validate`: `internal/plan`: plan format, validation (PL2–PL3), cycle detection,
+      `owns` overlap warnings, topological order, deepest parent (1 attempt, $0.22)
 - [ ] `goals-store`: goals in the store (create, get, list, status, plan), approving a plan
       creates its tasks and deps in one transaction, `start_sha` on branches
 - [ ] `plan-cli`: `mill plan --file`, `plan show`, `plan edit`, `plan approve`, `goal list`,
