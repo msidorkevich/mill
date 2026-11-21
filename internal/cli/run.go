@@ -43,7 +43,7 @@ func runRun(ctx context.Context, env Env, args []string) int {
 		return fail(errors.New(`start_children_on = "published" is not supported yet (publishing does not exist); set start_children_on = "verified" in .mill/config.toml`))
 	}
 
-	release, err := lockAndRecover(ctx, env, "run", paths, s)
+	release, err := lockAndRecover(ctx, env, "run", paths, s, cfg.Prices)
 	if err != nil {
 		return fail(err)
 	}

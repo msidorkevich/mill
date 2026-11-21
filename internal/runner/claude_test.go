@@ -379,3 +379,42 @@ func TestClaudeReportedCostIsNotEstimated(t *testing.T) {
 		t.Fatalf("result = %+v, want reported cost 0.0125", res)
 	}
 }
+
+func writeStream(t *testing.T, lines ...string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "implementer.stream.jsonl")
+	if err := os.WriteFile(p, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestUsageFromStreamDeduplicatesAssistantUsageWithoutResult(t *testing.T) {
+	p := writeStream(t, lineInit, lineAsst1, lineAsst1b, lineAsst2)
+	u, model, finished, err := UsageFromStream(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := budget.Usage{InputTokens: 6, OutputTokens: 30, CacheWriteTokens: 5100, CacheReadTokens: 5000}
+	if u != want || model != "claude-haiku" || finished {
+		t.Fatalf("got %+v, %q, finished=%v; want %+v, claude-haiku, false", u, model, finished, want)
+	}
+}
+
+func TestUsageFromStreamResultIsAuthoritative(t *testing.T) {
+	p := writeStream(t, lineInit, lineAsst1, lineAsst2, lineResult)
+	u, model, finished, err := UsageFromStream(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := budget.Usage{InputTokens: 6, OutputTokens: 90, CacheWriteTokens: 5100, CacheReadTokens: 5000, CostUSD: 0.0125}
+	if u != want || model != "claude-haiku" || !finished {
+		t.Fatalf("got %+v, %q, finished=%v; want %+v, claude-haiku, true", u, model, finished, want)
+	}
+}
+
+func TestUsageFromStreamMissingFileFails(t *testing.T) {
+	if _, _, _, err := UsageFromStream(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("missing stream accepted")
+	}
+}

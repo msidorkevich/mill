@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"mill/internal/config"
 	"mill/internal/host"
 	"mill/internal/pipeline"
+	"mill/internal/price"
 	"mill/internal/project"
 	"mill/internal/prompt"
 	"mill/internal/runlock"
@@ -99,7 +101,7 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 	}
 	defer s.Close()
 
-	release, err := lockAndRecover(ctx, env, "task run", paths, s)
+	release, err := lockAndRecover(ctx, env, "task run", paths, s, cfg.Prices)
 	if err != nil {
 		return fail(err)
 	}
@@ -153,7 +155,7 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 
 // lockAndRecover takes the run lock and repairs what a killed run left behind. Call release
 // when the run ends.
-func lockAndRecover(ctx context.Context, env Env, name string, paths project.Paths, s *store.Store) (release func(), err error) {
+func lockAndRecover(ctx context.Context, env Env, name string, paths project.Paths, s *store.Store, prices map[string]price.Rates) (release func(), err error) {
 	lock, err := runlock.Acquire(paths.RunLock)
 	if err != nil {
 		return nil, err
@@ -167,7 +169,12 @@ func lockAndRecover(ctx context.Context, env Env, name string, paths project.Pat
 		release()
 		return nil, err
 	}
-	tasks, attempts, err := s.RecoverInterrupted(ctx)
+	usage, err := interruptedUsage(ctx, env.Stdout, s, prices)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	tasks, attempts, err := s.RecoverInterrupted(ctx, usage)
 	if err != nil {
 		release()
 		return nil, err
@@ -176,6 +183,57 @@ func lockAndRecover(ctx context.Context, env Env, name string, paths project.Pat
 		fmt.Fprintf(env.Stdout, "recovered %d interrupted task(s) and %d running attempt(s) from a previous run\n", tasks, attempts)
 	}
 	return release, nil
+}
+
+// interruptedUsage reads the raw stream of every running attempt that has one and returns the
+// usage to record when the attempts are abandoned. Streams without a result event get an
+// estimated cost. It prints what was recovered.
+func interruptedUsage(ctx context.Context, out io.Writer, s *store.Store, prices map[string]price.Rates) (map[int64]store.AbandonedUsage, error) {
+	running, err := s.RunningAttempts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	usage := map[int64]store.AbandonedUsage{}
+	var total budget.Usage
+	for _, a := range running {
+		if a.LogPath == "" {
+			continue
+		}
+		if _, err := os.Stat(a.LogPath); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("recover usage of %s attempt %d: %w", a.TaskID, a.N, err)
+		}
+		u, model, finished, err := runner.UsageFromStream(a.LogPath)
+		if err != nil {
+			return nil, fmt.Errorf("recover usage of %s attempt %d: %w", a.TaskID, a.N, err)
+		}
+		if u == (budget.Usage{}) {
+			continue
+		}
+		estimated := false
+		if !finished {
+			if usd, ok := price.Estimate(model, u, prices); ok {
+				u.CostUSD, estimated = usd, true
+			}
+		}
+		usage[a.ID] = store.AbandonedUsage{Usage: u, CostEstimated: estimated}
+		total = total.Add(u)
+	}
+	if len(usage) > 0 {
+		tokens := total.InputTokens + total.OutputTokens + total.CacheWriteTokens + total.CacheReadTokens
+		fmt.Fprintf(out, "recorded %s tokens (~$%.2f) from %d interrupted attempt(s)\n", commaInt(tokens), total.CostUSD, len(usage))
+	}
+	return usage, nil
+}
+
+func commaInt(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // newPipeline builds the pipeline from the project config: host, runner and agent env.
