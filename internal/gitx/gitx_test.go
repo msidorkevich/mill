@@ -179,3 +179,41 @@ func TestMergeCreatesMergeCommitAndReportsConflicts(t *testing.T) {
 		t.Fatal("worktree dirty after abort")
 	}
 }
+
+func TestChangedFilesListsAddedModifiedDeletedRenamed(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(r, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("gone.txt", "to delete\n")
+	write("old.txt", "some content that is long enough to detect a rename\nline2\nline3\n")
+	if _, err := CommitAll(ctx, r, "more"); err != nil {
+		t.Fatal(err)
+	}
+	from, _ := RevParse(ctx, r, "HEAD")
+	write("README", "changed\n")
+	write("added.txt", "new\n")
+	if err := os.Remove(filepath.Join(r, "gone.txt")); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, ctx, r, "mv", "old.txt", "new name.txt")
+	if _, err := CommitAll(ctx, r, "change"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ChangedFiles(ctx, r, from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"README": true, "added.txt": true, "gone.txt": true, "new name.txt": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for _, f := range got {
+		if !want[f] {
+			t.Fatalf("unexpected %q in %v", f, got)
+		}
+	}
+}

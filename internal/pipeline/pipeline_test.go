@@ -759,3 +759,89 @@ func TestEstimatedCostIsShownWithTildeAndStored(t *testing.T) {
 		t.Fatalf("attempts = %+v", atts)
 	}
 }
+
+func (e *env) ownedTask(t *testing.T, id string, owns ...string) {
+	t.Helper()
+	spec := taskspec.Spec{ID: id, Title: "Task " + id, Kind: "implement", Spec: "create hello.txt",
+		Acceptance: []string{"hello.txt says hello"}, Owns: owns, Size: "S"}
+	if err := e.p.Store.CreateTask(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (e *env) ownsEvents(t *testing.T, id string) int {
+	t.Helper()
+	evs, err := e.p.Store.TaskEvents(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, ev := range evs {
+		if ev.Kind == "owns-outside" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestOwnsWarnRecordsEventAndShowsVerifier(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello", "stray.txt": "x"})},
+		runner.RoleVerifier:    {verdict("pass")},
+	}, nil)
+	e.ownedTask(t, "w", "hello.txt")
+	if out := e.run(t, "w"); out.Status != store.TaskVerified {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if n := e.ownsEvents(t, "w"); n != 1 {
+		t.Fatalf("owns-outside events = %d", n)
+	}
+	ps := prompts(e.fake, runner.RoleVerifier)
+	if len(ps) != 1 || !strings.Contains(ps[0], "- stray.txt") || strings.Contains(ps[0], "- hello.txt\n") {
+		t.Fatalf("verifier prompt:\n%v", ps)
+	}
+}
+
+func TestOwnsEnforceFindingSkipsGate(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "gate-ran")
+	e := setup(t, `touch `+marker, runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello", "stray.txt": "x"})},
+	}, func(c *config.Config) { c.OwnsPolicy = "enforce"; c.MaxAttempts = 1 })
+	e.ownedTask(t, "e", "hello.txt")
+	out := e.run(t, "e")
+	if out.Status != store.TaskBlocked {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("gate ran despite enforce finding")
+	}
+	f, _ := LastFindings(context.Background(), e.p.Store, "e")
+	if len(f) != 1 || f[0].Source != "mill" || f[0].File != "stray.txt" || !strings.Contains(f[0].Issue, "outside the task's owns") {
+		t.Fatalf("findings = %+v", f)
+	}
+	if e.ownsEvents(t, "e") != 1 {
+		t.Fatal("owns-outside event missing")
+	}
+}
+
+func TestOwnsOffAndEmptyOwnsRecordNothing(t *testing.T) {
+	files := map[string]string{"hello.txt": "hello", "stray.txt": "x"}
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(files)},
+		runner.RoleVerifier:    {verdict("pass")},
+	}, func(c *config.Config) { c.OwnsPolicy = "off" })
+	e.ownedTask(t, "o", "hello.txt")
+	e.run(t, "o")
+	if e.ownsEvents(t, "o") != 0 || strings.Contains(prompts(e.fake, runner.RoleVerifier)[0], "stray.txt\n\nThese") {
+		t.Fatal("off policy recorded or showed owns")
+	}
+
+	e2 := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(files)},
+		runner.RoleVerifier:    {verdict("pass")},
+	}, func(c *config.Config) { c.OwnsPolicy = "enforce" })
+	e2.ownedTask(t, "n")
+	if out := e2.run(t, "n"); out.Status != store.TaskVerified || e2.ownsEvents(t, "n") != 0 {
+		t.Fatalf("empty owns restricted: %+v", out)
+	}
+}

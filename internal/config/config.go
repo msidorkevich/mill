@@ -21,11 +21,13 @@ import (
 type Config struct {
 	// CheckCmd is the project gate, run with `sh -c` in a task's worktree. Empty means
 	// every gate fails (P3: a gate with no checks is not a pass).
-	CheckCmd        string `toml:"check_cmd"`
-	BaseBranch      string `toml:"base_branch"`
-	Remote          string `toml:"remote"`
-	MaxParallel     int    `toml:"max_parallel"`
-	MaxAttempts     int    `toml:"max_attempts"`
+	CheckCmd    string `toml:"check_cmd"`
+	BaseBranch  string `toml:"base_branch"`
+	Remote      string `toml:"remote"`
+	MaxParallel int    `toml:"max_parallel"`
+	MaxAttempts int    `toml:"max_attempts"`
+	// OwnsPolicy says what happens to changes outside a task's owns: "warn", "enforce" or "off".
+	OwnsPolicy      string `toml:"owns_policy"`
 	StartChildrenOn string `toml:"start_children_on"`
 	// WorktreeRoot holds task worktrees, outside the repository so that workers never
 	// write inside it. "" means ~/.cache/mill/worktrees.
@@ -96,6 +98,7 @@ type SizeBudget struct {
 var (
 	RunnerKinds     = []string{"claude", "fake"}
 	HostKinds       = []string{"auto", "exec", "herdr"}
+	OwnsPolicies    = []string{"warn", "enforce", "off"}
 	ChildrenOnModes = []string{"verified", "published"}
 	SizeNames       = []string{"S", "M", "L"}
 )
@@ -108,6 +111,7 @@ func Default() Config {
 		Remote:          "origin",
 		MaxParallel:     2,
 		MaxAttempts:     3,
+		OwnsPolicy:      "warn",
 		StartChildrenOn: "verified",
 		WorktreeRoot:    "",
 		GateTimeout:     Duration{20 * time.Minute},
@@ -146,6 +150,7 @@ remote = "origin"
 max_parallel = 2          # tasks running at the same time
 max_attempts = 3          # implement attempts per task before it is blocked
 start_children_on = "verified"   # or "published"
+owns_policy = "warn"      # changes outside a task's owns: "warn" (verifier must justify them), "enforce" (finding, no gate) or "off"
 
 worktree_root = ""        # where task worktrees live; "" = ~/.cache/mill/worktrees
 gate_timeout = "20m"      # per gate command
@@ -253,6 +258,9 @@ func (c Config) Validate() error {
 	}
 	if !oneOf(c.StartChildrenOn, ChildrenOnModes) {
 		add("start_children_on must be one of %v, got %q", ChildrenOnModes, c.StartChildrenOn)
+	}
+	if !oneOf(c.OwnsPolicy, OwnsPolicies) {
+		add("owns_policy must be one of %v, got %q", OwnsPolicies, c.OwnsPolicy)
 	}
 	if !oneOf(c.Runner.Kind, RunnerKinds) {
 		add("runner.kind must be one of %v, got %q", RunnerKinds, c.Runner.Kind)

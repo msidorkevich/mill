@@ -211,3 +211,42 @@ func TestGlobsOverlap(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchOwnsGlobSemantics(t *testing.T) {
+	cases := []struct {
+		pat, path string
+		want      bool
+	}{
+		{"a/b.go", "a/b.go", true},
+		{"a/b.go", "a/c.go", false},
+		{"a/*.go", "a/b.go", true},
+		{"a/*.go", "a/x/b.go", false},
+		{"a/?.go", "a/b.go", true},
+		{"a/?.go", "a/bc.go", false},
+		{"**/b.go", "b.go", true},
+		{"**/b.go", "x/y/b.go", true},
+		{"**/b.go", "x/c.go", false},
+		{"a/**/b.go", "a/b.go", true},
+		{"a/**/b.go", "a/x/y/b.go", true},
+		{"a/**/b.go", "c/x/b.go", false},
+		{"a/**", "a/x/y.go", true},
+		{"a/**", "a", true},
+		{"a/**", "b/x.go", false},
+		{"*", "a/b", false},
+	}
+	for _, c := range cases {
+		if got := MatchOwns(c.pat, c.path); got != c.want {
+			t.Errorf("MatchOwns(%q,%q)=%v want %v", c.pat, c.path, got, c.want)
+		}
+	}
+}
+
+func TestOutsideOwnsKeepsInputOrder(t *testing.T) {
+	got := OutsideOwns([]string{"a/**", "x.go"}, []string{"z.go", "a/b.go", "x.go", "m/n.go"})
+	if !reflect.DeepEqual(got, []string{"z.go", "m/n.go"}) {
+		t.Fatalf("got %v", got)
+	}
+	if got := OutsideOwns(nil, []string{"z.go"}); got != nil {
+		t.Fatalf("empty owns restricted: %v", got)
+	}
+}

@@ -182,6 +182,8 @@ type VerifierInput struct {
 	Diff     string
 	DiffStat string
 	Gate     gate.Result
+	// OutsideOwns lists changed files that no pattern in the task's owns matches.
+	OutsideOwns []string
 }
 
 // Verifier builds the verifier prompt.
@@ -214,6 +216,13 @@ func Verifier(in VerifierInput) string {
 		fmt.Fprintf(&b, "The diff is too large to include (%d bytes). Files changed:\n```\n%s\n```\nRead the changed files to review them.\n\n", len(in.Diff), in.DiffStat)
 	} else {
 		fmt.Fprintf(&b, "```diff\n%s\n```\n\n", in.Diff)
+	}
+	if len(in.OutsideOwns) > 0 {
+		b.WriteString("## Files changed outside the files the task owns\n")
+		for _, f := range in.OutsideOwns {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+		b.WriteString("\nThese files are outside the files the task owns. Pass only if the spec or the acceptance criteria require each of them; otherwise fail with a finding naming the file.\n\n")
 	}
 	b.WriteString(`## How to review
 - You may read any file in this directory for context. Do not modify anything.

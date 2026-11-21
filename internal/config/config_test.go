@@ -227,3 +227,19 @@ cache_read = 0.5
 		t.Fatal("unknown price key accepted")
 	}
 }
+
+func TestOwnsPolicyDefaultsToWarnAndIsValidated(t *testing.T) {
+	cfg, err := Parse("")
+	if err != nil || cfg.OwnsPolicy != "warn" {
+		t.Fatalf("default = %q, %v", cfg.OwnsPolicy, err)
+	}
+	for _, v := range []string{"enforce", "off"} {
+		cfg, err := Parse(`owns_policy = "` + v + `"`)
+		if err != nil || cfg.OwnsPolicy != v {
+			t.Fatalf("%s: %q, %v", v, cfg.OwnsPolicy, err)
+		}
+	}
+	if _, err := Parse(`owns_policy = "strict"`); err == nil || !strings.Contains(err.Error(), "owns_policy") {
+		t.Fatalf("err = %v", err)
+	}
+}
