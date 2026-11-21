@@ -355,3 +355,61 @@ func TestMigrateV2NormalizesTimestamps(t *testing.T) {
 		}
 	}
 }
+
+func TestRecoverInterruptedResetsOnlyRunningWork(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	for _, id := range []string{"run1", "run2", "done", "idle"} {
+		if err := s.CreateTask(ctx, spec(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(s.SetTaskStatus(ctx, "run1", TaskRunning, PhaseGate, ""))
+	must(s.SetTaskStatus(ctx, "run2", TaskRunning, PhaseImplement, ""))
+	must(s.SetTaskStatus(ctx, "done", TaskVerified, "", ""))
+	if _, err := s.StartAttempt(ctx, "run1", 1, "implementer"); err != nil {
+		t.Fatal(err)
+	}
+	fin, _ := s.StartAttempt(ctx, "done", 1, "implementer")
+	must(s.FinishAttempt(ctx, fin, "ok", budget.Usage{}, "", ""))
+
+	tasks, attempts, err := s.RecoverInterrupted(ctx)
+	if err != nil || tasks != 2 || attempts != 1 {
+		t.Fatalf("RecoverInterrupted = %d, %d, %v; want 2, 1, nil", tasks, attempts, err)
+	}
+	for id, want := range map[string]string{"run1": TaskPending, "run2": TaskPending, "done": TaskVerified, "idle": TaskPending} {
+		got, _ := s.GetTask(ctx, id)
+		if got.Status != want {
+			t.Errorf("%s status = %s, want %s", id, got.Status, want)
+		}
+	}
+	got, _ := s.GetTask(ctx, "run1")
+	if got.Phase != "" || got.Reason != "recovered after an interrupted run" {
+		t.Errorf("run1 phase %q reason %q", got.Phase, got.Reason)
+	}
+	atts, _ := s.Attempts(ctx, "run1")
+	if len(atts) != 1 || atts[0].Status != "abandoned" || atts[0].EndedAt == nil {
+		t.Errorf("run1 attempts = %+v", atts)
+	}
+	atts, _ = s.Attempts(ctx, "done")
+	if atts[0].Status != "ok" {
+		t.Errorf("finished attempt touched: %+v", atts)
+	}
+	evs, _ := s.TaskEvents(ctx, "run2")
+	found := false
+	for _, e := range evs {
+		found = found || e.Kind == "task-recovered"
+	}
+	if !found {
+		t.Error("no task-recovered event for run2")
+	}
+	if tasks, attempts, err := s.RecoverInterrupted(ctx); err != nil || tasks != 0 || attempts != 0 {
+		t.Fatalf("second RecoverInterrupted = %d, %d, %v; want 0, 0, nil", tasks, attempts, err)
+	}
+}

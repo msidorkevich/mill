@@ -124,7 +124,8 @@ type Attempt struct {
 
 // Attempt statuses.
 const (
-	AttemptRunning = "running"
+	AttemptRunning   = "running"
+	AttemptAbandoned = "abandoned"
 )
 
 // StartAttempt records the start of an agent run and returns its id.
@@ -295,4 +296,60 @@ func (s *Store) UpdateTaskSpec(ctx context.Context, spec taskspec.Spec) error {
 	}
 	_, err = s.AppendEvent(ctx, "task-spec-updated", "", spec.ID, nil)
 	return err
+}
+
+// RecoverInterrupted repairs the state a killed run left behind: running tasks go back to
+// pending and running attempts become abandoned, in one transaction. It records a
+// task-recovered event per task. Only call it while holding the run lock.
+func (s *Store) RecoverInterrupted(ctx context.Context) (tasks int, attempts int, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, fmt.Errorf("recover interrupted run: %w", err)
+	}
+	defer tx.Rollback()
+	const reason = "recovered after an interrupted run"
+
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM tasks WHERE status = ? ORDER BY id`, TaskRunning)
+	if err != nil {
+		return 0, 0, fmt.Errorf("recover interrupted run: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, 0, err
+	}
+	rows.Close()
+
+	now := s.ts()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE tasks SET status = ?, phase = '', reason = ?, updated_at = ? WHERE id = ?`,
+			TaskPending, reason, now, id); err != nil {
+			return 0, 0, fmt.Errorf("recover task %s: %w", id, err)
+		}
+		payload, _ := json.Marshal(map[string]string{"status": TaskPending, "reason": reason})
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO events (at, kind, goal_id, task_id, data) VALUES (?, ?, NULL, ?, ?)`,
+			now, "task-recovered", id, string(payload)); err != nil {
+			return 0, 0, fmt.Errorf("record recovery of %s: %w", id, err)
+		}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE attempts SET status = ?, ended_at = ? WHERE status = ?`,
+		AttemptAbandoned, now, AttemptRunning)
+	if err != nil {
+		return 0, 0, fmt.Errorf("recover attempts: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, 0, fmt.Errorf("recover interrupted run: %w", err)
+	}
+	return len(ids), int(n), nil
 }

@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"mill/internal/gitx"
 	"mill/internal/plan"
 	"mill/internal/project"
+	"mill/internal/runlock"
 	"mill/internal/store"
 	"mill/internal/taskspec"
 )
@@ -286,5 +288,47 @@ func TestTaskShowAcceptsGoalTaskID(t *testing.T) {
 	r := run(t, root, nil, "task", "show", g.ID+"/config")
 	if r.code != ExitOK || !strings.Contains(r.stdout, g.ID+"/config") || !strings.Contains(r.stdout, "pending") {
 		t.Fatalf("show: %+v", r)
+	}
+}
+
+func TestTaskRunRefusedWhileRunLockHeld(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "task", "run", "--file", tf)
+	if r.code != ExitError || !strings.Contains(r.stderr, "another mill run is active") || !strings.Contains(r.stderr, strconv.Itoa(os.Getpid())) {
+		t.Fatalf("run while locked: %+v", r)
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+		t.Fatalf("run after release: %+v", r)
+	}
+}
+
+func TestTaskRunRecoversInterruptedTasks(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := taskspec.Load(tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "hello", store.TaskRunning, store.PhaseImplement, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	r := run(t, root, nil, "task", "run", "--file", tf, "--retry")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "recovered 1 interrupted task") {
+		t.Fatalf("run: %+v", r)
 	}
 }

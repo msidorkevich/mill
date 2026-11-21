@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"mill/internal/budget"
 )
@@ -21,35 +22,67 @@ type Step struct {
 	Error string `json:"error,omitempty"`
 	// Files are written into Request.Dir before returning, simulating agent edits.
 	Files map[string]string `json:"files,omitempty"`
+	// DelayMS makes the fake wait this long before returning (cancelled early with the context).
+	DelayMS int `json:"delay_ms,omitempty"`
 }
 
 // Script maps each role to the responses it returns, in order.
 type Script map[Role][]Step
 
+// FakeScript is a loaded script file: role scripts plus optional per-task scripts. A request
+// whose TaskID has a task script plays that script; any other request plays the role script.
+type FakeScript struct {
+	Roles Script
+	Tasks map[string]Script
+}
+
 // Fake is a scripted, zero-token runner for tests (RN2). It is safe for concurrent use.
 type Fake struct {
-	mu     sync.Mutex
-	script Script
-	next   map[Role]int
-	calls  []Request
+	mu    sync.Mutex
+	roles Script
+	tasks map[string]Script
+	next  map[string]int // keyed by task id (or "") and role
+	calls []Request
 }
 
-// NewFake returns a fake runner that plays script.
-func NewFake(script Script) *Fake {
-	return &Fake{script: script, next: map[Role]int{}}
+// NewFake returns a fake runner that plays a Script (role scripts only) or a FakeScript.
+func NewFake[S Script | FakeScript](script S) *Fake {
+	f := &Fake{next: map[string]int{}}
+	switch v := any(script).(type) {
+	case Script:
+		f.roles = v
+	case FakeScript:
+		f.roles, f.tasks = v.Roles, v.Tasks
+	}
+	return f
 }
 
-// LoadFakeScript reads a JSON script: {"implementer": [{"output": {...}, ...}], ...}.
-func LoadFakeScript(path string) (Script, error) {
+// LoadFakeScript reads a JSON script: {"implementer": [{"output": {...}, ...}], ...}, with an
+// optional "tasks": {"<task id>": {"<role>": [steps]}} for per-task scripts.
+func LoadFakeScript(path string) (FakeScript, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return FakeScript{}, err
 	}
-	var s Script
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("parse fake script %s: %w", path, err)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return FakeScript{}, fmt.Errorf("parse fake script %s: %w", path, err)
 	}
-	return s, nil
+	fs := FakeScript{Roles: Script{}}
+	for key, v := range raw {
+		if key == "tasks" {
+			if err := json.Unmarshal(v, &fs.Tasks); err != nil {
+				return FakeScript{}, fmt.Errorf("parse fake script %s: tasks: %w", path, err)
+			}
+			continue
+		}
+		var steps []Step
+		if err := json.Unmarshal(v, &steps); err != nil {
+			return FakeScript{}, fmt.Errorf("parse fake script %s: %s: %w", path, key, err)
+		}
+		fs.Roles[Role(key)] = steps
+	}
+	return fs, nil
 }
 
 // Name implements Runner.
@@ -69,15 +102,28 @@ var ErrScriptExhausted = errors.New("fake runner: no scripted step left")
 func (f *Fake) Run(ctx context.Context, req Request) (Result, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, req)
-	steps := f.script[req.Role]
-	i := f.next[req.Role]
+	steps, key := f.roles[req.Role], string(req.Role)
+	if ts, ok := f.tasks[req.TaskID]; ok && req.TaskID != "" {
+		steps, key = ts[req.Role], req.TaskID+"\x00"+string(req.Role)
+	}
+	i := f.next[key]
 	if i >= len(steps) {
 		f.mu.Unlock()
 		return Result{}, fmt.Errorf("%w for role %q (call %d)", ErrScriptExhausted, req.Role, i+1)
 	}
-	f.next[req.Role] = i + 1
+	f.next[key] = i + 1
 	step := steps[i]
 	f.mu.Unlock()
+
+	if step.DelayMS > 0 {
+		timer := time.NewTimer(time.Duration(step.DelayMS) * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return Result{Status: StatusCancelled, Error: ctx.Err().Error()}, nil
+		}
+	}
 
 	var total budget.Usage
 	for _, u := range step.Usage {
