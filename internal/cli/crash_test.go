@@ -71,7 +71,11 @@ func TestCrashKilledRunRecoversWithoutDuplicates(t *testing.T) {
 		for _, a := range atts {
 			running = running || a.Status == store.AttemptRunning
 		}
-		if running {
+		ta, err := s.GetTask(ctx, "g1/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if running && ta.Status == store.TaskVerified {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -86,9 +90,17 @@ func TestCrashKilledRunRecoversWithoutDuplicates(t *testing.T) {
 	first.Wait()
 	waited = true
 
-	lock, err := runlock.Acquire(paths.RunLock)
-	if err != nil {
-		t.Fatalf("run lock still held after SIGKILL: %v", err)
+	var lock *runlock.Lock
+	lockDeadline := time.Now().Add(10 * time.Second)
+	for {
+		lock, err = runlock.Acquire(paths.RunLock)
+		if err == nil {
+			break
+		}
+		if time.Now().After(lockDeadline) {
+			t.Fatalf("run lock still held after SIGKILL: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if err := lock.Release(); err != nil {
 		t.Fatal(err)

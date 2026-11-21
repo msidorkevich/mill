@@ -166,6 +166,10 @@ func lockAndRecover(ctx context.Context, env Env, name string, paths project.Pat
 			fmt.Fprintf(env.Stderr, "mill %s: %v\n", name, err)
 		}
 	}
+	if err := killLeftoverWorkers(ctx, env.Stdout, s); err != nil {
+		release()
+		return nil, err
+	}
 	tasks, attempts, err := s.RecoverInterrupted(ctx)
 	if err != nil {
 		release()
@@ -424,4 +428,31 @@ func fmtInt(n int64) string {
 		b.WriteRune(c)
 	}
 	return b.String()
+}
+
+// killLeftoverWorkers kills the process groups of workers that outlived a killed mill. A
+// recorded process is only killed when it is alive, leads its own group and its command line
+// contains the recorded command; anything else (gone, or pid reused) is left alone.
+func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store) error {
+	running, err := s.RunningAttempts(ctx)
+	if err != nil {
+		return err
+	}
+	for _, a := range running {
+		if a.PID <= 0 {
+			continue
+		}
+		pgid, command, alive, err := host.ProcessInfo(a.PID)
+		if err != nil {
+			return fmt.Errorf("check leftover worker %d (%s attempt %d %s): %w; stop it by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+		}
+		if !alive || pgid != a.PID || a.Command == "" || !strings.Contains(command, a.Command) {
+			continue
+		}
+		if err := host.KillGroup(pgid); err != nil {
+			return fmt.Errorf("kill leftover worker %d (%s attempt %d %s): %w; stop it by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+		}
+		fmt.Fprintf(out, "killed leftover worker %d (%s attempt %d %s)\n", a.PID, a.TaskID, a.N, a.Role)
+	}
+	return nil
 }

@@ -120,6 +120,8 @@ type Attempt struct {
 	Usage      budget.Usage `json:"usage"`
 	OutputPath string       `json:"output_path,omitempty"`
 	LogPath    string       `json:"log_path,omitempty"`
+	PID        int          `json:"pid"`
+	Command    string       `json:"command"`
 }
 
 // Attempt statuses.
@@ -149,11 +151,33 @@ func (s *Store) FinishAttempt(ctx context.Context, id int64, status string, u bu
 	return err
 }
 
+// SetAttemptProcess records the worker process (and its raw output file) of a running attempt.
+func (s *Store) SetAttemptProcess(ctx context.Context, id int64, pid int, command, logPath string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE attempts SET pid = ?, command = ?, log_path = ? WHERE id = ? AND status = ?`,
+		pid, command, logPath, id, AttemptRunning)
+	if err != nil {
+		return fmt.Errorf("record process of attempt %d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("record process of attempt %d: no running attempt with that id", id)
+	}
+	return nil
+}
+
+// RunningAttempts lists attempts whose status is running.
+func (s *Store) RunningAttempts(ctx context.Context) ([]Attempt, error) {
+	return s.queryAttempts(ctx, `WHERE status = ?`, AttemptRunning)
+}
+
 // Attempts lists a task's attempts in order.
 func (s *Store) Attempts(ctx context.Context, taskID string) ([]Attempt, error) {
+	return s.queryAttempts(ctx, `WHERE task_id = ?`, taskID)
+}
+
+func (s *Store) queryAttempts(ctx context.Context, where string, arg any) ([]Attempt, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, n, role, status, started_at, ended_at,
-		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, output_path, log_path
-		FROM attempts WHERE task_id = ? ORDER BY id`, taskID)
+		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, output_path, log_path,
+		pid, command FROM attempts `+where+` ORDER BY id`, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +189,7 @@ func (s *Store) Attempts(ctx context.Context, taskID string) ([]Attempt, error) 
 		var ended sql.NullString
 		if err := rows.Scan(&a.ID, &a.TaskID, &a.N, &a.Role, &a.Status, &started, &ended,
 			&a.Usage.InputTokens, &a.Usage.OutputTokens, &a.Usage.CacheWriteTokens, &a.Usage.CacheReadTokens,
-			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath); err != nil {
+			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath, &a.PID, &a.Command); err != nil {
 			return nil, err
 		}
 		a.StartedAt, _ = parseTime(started)

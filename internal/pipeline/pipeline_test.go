@@ -692,3 +692,44 @@ func TestReattachCommitsInterruptedWork(t *testing.T) {
 		t.Fatalf("partial.txt not committed before the next attempt: %q", out)
 	}
 }
+
+// startingRunner reports a started process like the claude runner, and records what the
+// store holds for the attempt while the run is in flight.
+type startingRunner struct {
+	*runner.Fake
+	t    *testing.T
+	s    *store.Store
+	mu   sync.Mutex
+	seen []store.Attempt
+}
+
+func (r *startingRunner) Run(ctx context.Context, req runner.Request) (runner.Result, error) {
+	req.OnStart(runner.Started{PID: 4321, Command: "claude", RawPath: "/raw/" + string(req.Role) + ".jsonl"})
+	running, err := r.s.RunningAttempts(context.Background())
+	if err != nil {
+		r.t.Error(err)
+	}
+	r.mu.Lock()
+	r.seen = append(r.seen, running...)
+	r.mu.Unlock()
+	return r.Fake.Run(ctx, req)
+}
+
+func TestAgentAttemptRecordsProcessWhileRunning(t *testing.T) {
+	e := setup(t, "true", runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a.txt": "x\n"})},
+		runner.RoleVerifier:    {verdict("pass")},
+	}, nil)
+	e.task(t, "t1")
+	sr := &startingRunner{Fake: e.fake, t: t, s: e.p.Store}
+	e.p.Runner = sr
+	e.run(t, "t1")
+	if len(sr.seen) == 0 {
+		t.Fatal("no running attempt seen")
+	}
+	for _, a := range sr.seen {
+		if a.PID != 4321 || a.Command != "claude" || a.LogPath != "/raw/"+a.Role+".jsonl" {
+			t.Fatalf("running attempt = %+v", a)
+		}
+	}
+}

@@ -34,7 +34,7 @@ func (*Exec) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
 		cmd.Env = []string{} // nil would inherit mill's environment
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return killGroup(cmd.Process.Pid) }
+	cmd.Cancel = func() error { return KillGroup(cmd.Process.Pid) }
 
 	var files []*os.File
 	closeAll := func() {
@@ -88,7 +88,7 @@ func (h *execHandle) Wait() (Exit, error) {
 	err := h.cmd.Wait()
 	h.close()
 	// Kill anything the process left running in its group (e.g. backgrounded children).
-	_ = killGroup(h.cmd.Process.Pid)
+	_ = KillGroup(h.cmd.Process.Pid)
 	if err == nil {
 		return Exit{Code: 0}, nil
 	}
@@ -102,11 +102,11 @@ func (h *execHandle) Wait() (Exit, error) {
 	return Exit{Code: -1}, err
 }
 
-func (h *execHandle) Kill() error { return killGroup(h.cmd.Process.Pid) }
+func (h *execHandle) Kill() error { return KillGroup(h.cmd.Process.Pid) }
 
-// killGroup sends SIGKILL to the whole process group. A group that is already gone is not
+// KillGroup sends SIGKILL to the whole process group. A group that is already gone is not
 // an error.
-func killGroup(pgid int) error {
+func KillGroup(pgid int) error {
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}

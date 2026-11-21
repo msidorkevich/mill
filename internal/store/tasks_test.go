@@ -413,3 +413,62 @@ func TestRecoverInterruptedResetsOnlyRunningWork(t *testing.T) {
 		t.Fatalf("second RecoverInterrupted = %d, %d, %v; want 0, 0, nil", tasks, attempts, err)
 	}
 }
+
+func TestAttemptProcessRecordedAndListed(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	a1, _ := s.StartAttempt(ctx, "t1", 1, "implementer")
+	a2, _ := s.StartAttempt(ctx, "t1", 1, "verifier")
+	if err := s.SetAttemptProcess(ctx, a1, 4242, "claude", "/tmp/raw.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishAttempt(ctx, a2, "ok", budget.Usage{}, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAttemptProcess(ctx, a2, 1, "claude", "x"); err == nil {
+		t.Fatal("SetAttemptProcess accepted a finished attempt")
+	}
+	got, err := s.RunningAttempts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != a1 || got[0].PID != 4242 || got[0].Command != "claude" || got[0].LogPath != "/tmp/raw.jsonl" {
+		t.Fatalf("running = %+v", got)
+	}
+}
+
+func TestMigrateV4AddsAttemptProcessColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mill.db")
+	saved := migrations
+	migrations = saved[:4]
+	LatestVersion = 4
+	s, err := Open(ctx, path, Options{})
+	migrations, LatestVersion = saved, len(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	old, err := s.StartAttempt(ctx, "t1", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2 := open(t, path)
+	if v, _ := s2.SchemaVersion(ctx); v != 5 {
+		t.Fatalf("schema = %d, want 5", v)
+	}
+	got, err := s2.RunningAttempts(ctx)
+	if err != nil || len(got) != 1 || got[0].ID != old || got[0].PID != 0 || got[0].Command != "" {
+		t.Fatalf("running after upgrade = %+v, %v", got, err)
+	}
+	if err := s2.SetAttemptProcess(ctx, old, 7, "claude", "log"); err != nil {
+		t.Fatal(err)
+	}
+}

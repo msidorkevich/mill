@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -200,4 +201,42 @@ func waitGone(t *testing.T, pid int) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("child process %d still running after Kill", pid)
+}
+
+func TestProcessInfoAndKillGroup(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }()
+	defer func() { cmd.Process.Kill(); <-exited }()
+
+	pgid, command, alive, err := ProcessInfo(pid)
+	if err != nil || !alive || pgid != pid || !strings.Contains(command, "sleep 30") {
+		t.Fatalf("ProcessInfo = %d %q %v %v", pgid, command, alive, err)
+	}
+	if err := KillGroup(pgid); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("process survived KillGroup")
+	}
+	if _, _, alive, err := ProcessInfo(pid); err != nil || alive {
+		t.Fatalf("ProcessInfo after kill: alive=%v err=%v", alive, err)
+	}
+}
+
+func TestProcessInfoMissingPidIsNotAlive(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, alive, err := ProcessInfo(cmd.Process.Pid); err != nil || alive {
+		t.Fatalf("alive=%v err=%v, want not alive and no error", alive, err)
+	}
 }
