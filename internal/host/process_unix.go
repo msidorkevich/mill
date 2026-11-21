@@ -5,9 +5,12 @@ package host
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // ProcessInfo reports the process group and full command line of pid, and whether it is
@@ -66,4 +69,38 @@ func GroupMembers(pgid int) ([]int, error) {
 		}
 	}
 	return pids, nil
+}
+
+// ProcessCwd returns the current working directory of pid. A process that is gone or whose
+// directory cannot be read is an error.
+func ProcessCwd(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("process cwd: invalid pid %d", pid)
+	}
+	if runtime.GOOS == "linux" {
+		cwd, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd")
+		if err != nil {
+			return "", fmt.Errorf("process cwd of %d: %w", pid, err)
+		}
+		return cwd, nil
+	}
+	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
+	if err != nil {
+		return "", fmt.Errorf("lsof -p %d: %w", pid, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "n") {
+			return line[1:], nil
+		}
+	}
+	return "", fmt.Errorf("lsof -p %d: no working directory in output %q", pid, strings.TrimSpace(string(out)))
+}
+
+// KillProcess sends SIGKILL to the single process pid. A process that is already gone is
+// not an error.
+func KillProcess(pid int) error {
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("kill %d: %w", pid, err)
+	}
+	return nil
 }

@@ -511,10 +511,12 @@ func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store) err
 		}
 		if !alive {
 			// The recorded leader is gone, but the agent may have left children running in
-			// its group (e.g. a test run started from its Bash tool). A process group id
-			// cannot be reused while the group has members, and no new process can get that
-			// pid while the group exists, so any member of group a.PID must descend from the
-			// recorded worker; no command-line check is needed.
+			// its group (e.g. a test run started from its Bash tool). The group id is not
+			// proof they are ours: if the whole group died and recovery runs much later, the
+			// pid can be reused by an unrelated process that starts its own group and exits,
+			// leaving members. What identifies the worker's children is the working
+			// directory: the agent and what it starts run inside the task's worktree, so
+			// only members whose cwd is inside it are killed, one by one.
 			members, err := host.GroupMembers(a.PID)
 			if err != nil {
 				return fmt.Errorf("check leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
@@ -522,10 +524,27 @@ func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store) err
 			if len(members) == 0 {
 				continue
 			}
-			if err := host.KillGroup(a.PID); err != nil {
-				return fmt.Errorf("kill leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+			worktree, err := taskWorktree(ctx, s, a.TaskID)
+			if err != nil {
+				return fmt.Errorf("check leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
 			}
-			fmt.Fprintf(out, "killed %d leftover process(es) of worker %d (%s attempt %d %s), whose agent had already exited\n", len(members), a.PID, a.TaskID, a.N, a.Role)
+			killed, left := 0, 0
+			for _, m := range members {
+				if worktree == "" || !insideDir(m, worktree) {
+					left++
+					continue
+				}
+				if err := host.KillProcess(m); err != nil {
+					return fmt.Errorf("kill leftover process %d of worker %d (%s attempt %d %s): %w; stop it by hand and retry", m, a.PID, a.TaskID, a.N, a.Role, err)
+				}
+				killed++
+			}
+			if killed > 0 {
+				fmt.Fprintf(out, "killed %d leftover process(es) of worker %d (%s attempt %d %s), whose agent had already exited\n", killed, a.PID, a.TaskID, a.N, a.Role)
+			}
+			if left > 0 {
+				fmt.Fprintf(out, "left %d process(es) of group %d alone: not running inside the task's worktree\n", left, a.PID)
+			}
 			continue
 		}
 		if pgid != a.PID || a.Command == "" || !strings.Contains(command, a.Command) {
@@ -537,4 +556,41 @@ func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store) err
 		fmt.Fprintf(out, "killed leftover worker %d (%s attempt %d %s)\n", a.PID, a.TaskID, a.N, a.Role)
 	}
 	return nil
+}
+
+// taskWorktree returns the task's recorded worktree with symlinks resolved, or "" when the
+// task has no recorded (or no longer existing) worktree.
+func taskWorktree(ctx context.Context, s *store.Store, taskID string) (string, error) {
+	b, err := s.GetBranch(ctx, taskID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if b.Worktree == "" {
+		return "", nil
+	}
+	wt, err := filepath.EvalSymlinks(b.Worktree)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve worktree %s: %w", b.Worktree, err)
+	}
+	return wt, nil
+}
+
+// insideDir reports whether pid's working directory is dir or below it. An unreadable
+// working directory is not inside.
+func insideDir(pid int, dir string) bool {
+	cwd, err := host.ProcessCwd(pid)
+	if err != nil {
+		return false
+	}
+	if r, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = r
+	}
+	rel, err := filepath.Rel(dir, cwd)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
