@@ -240,6 +240,7 @@ type Branch struct {
 	Base         string    `json:"base"`
 	BaseSHA      string    `json:"base_sha"`
 	HeadSHA      string    `json:"head_sha,omitempty"`
+	StartSHA     string    `json:"start_sha,omitempty"`
 	Worktree     string    `json:"worktree"`
 	PublishedRef string    `json:"published_ref,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -248,12 +249,12 @@ type Branch struct {
 // SaveBranch inserts or updates a task's branch row.
 func (s *Store) SaveBranch(ctx context.Context, b Branch) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO branches
-		(task_id, name, base, base_sha, head_sha, worktree, published_ref, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		(task_id, name, base, base_sha, start_sha, head_sha, worktree, published_ref, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(task_id) DO UPDATE SET name = excluded.name, base = excluded.base,
-		base_sha = excluded.base_sha, head_sha = excluded.head_sha, worktree = excluded.worktree,
+		base_sha = excluded.base_sha, start_sha = excluded.start_sha, head_sha = excluded.head_sha, worktree = excluded.worktree,
 		published_ref = excluded.published_ref, updated_at = excluded.updated_at`,
-		b.TaskID, b.Name, b.Base, b.BaseSHA, b.HeadSHA, b.Worktree, b.PublishedRef, s.ts())
+		b.TaskID, b.Name, b.Base, b.BaseSHA, b.StartSHA, b.HeadSHA, b.Worktree, b.PublishedRef, s.ts())
 	return err
 }
 
@@ -261,9 +262,9 @@ func (s *Store) SaveBranch(ctx context.Context, b Branch) error {
 func (s *Store) GetBranch(ctx context.Context, taskID string) (Branch, error) {
 	var b Branch
 	var updated string
-	err := s.db.QueryRowContext(ctx, `SELECT task_id, name, base, base_sha, head_sha, worktree,
+	err := s.db.QueryRowContext(ctx, `SELECT task_id, name, base, base_sha, start_sha, head_sha, worktree,
 		published_ref, updated_at FROM branches WHERE task_id = ?`, taskID).
-		Scan(&b.TaskID, &b.Name, &b.Base, &b.BaseSHA, &b.HeadSHA, &b.Worktree, &b.PublishedRef, &updated)
+		Scan(&b.TaskID, &b.Name, &b.Base, &b.BaseSHA, &b.StartSHA, &b.HeadSHA, &b.Worktree, &b.PublishedRef, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Branch{}, fmt.Errorf("branch for %s: %w", taskID, ErrNotFound)
 	}
