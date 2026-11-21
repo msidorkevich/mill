@@ -187,3 +187,7 @@ Exit criterion:
       retried as is (`mill run <goal> --retry-blocked`). Add a way to edit a task's spec.
 - [ ] The planner call has no time limit (`runner.attempt_timeout` is only applied in the
       pipeline); a hung planner is stopped only by its budget.
+- [ ] Workers run in their own process groups, so `kill -9` of mill does not reach them. In the
+      real kill test no `claude` process was left 3s later, but that relies on Claude Code
+      exiting by itself. Record each worker's process group and kill any survivors during
+      crash recovery.
