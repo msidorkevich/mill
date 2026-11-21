@@ -175,3 +175,86 @@ func TestTaskRunNotInitialized(t *testing.T) {
 		t.Fatalf("not initialized: %+v", r)
 	}
 }
+
+func TestTaskList(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+
+	r := run(t, root, nil, "task", "list")
+	if r.code != ExitOK || strings.TrimSpace(r.stdout) != "no tasks" {
+		t.Fatalf("empty list: %+v", r)
+	}
+	r = run(t, root, nil, "task", "list", "--json")
+	var empty struct {
+		Schema string            `json:"schema"`
+		Tasks  []json.RawMessage `json:"tasks"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &empty); err != nil || empty.Schema != "mill/task-list@1" || empty.Tasks == nil || len(empty.Tasks) != 0 {
+		t.Fatalf("empty --json: %v\n%s", err, r.stdout)
+	}
+
+	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+		t.Fatalf("task run: %+v", r)
+	}
+
+	r = run(t, root, nil, "task", "list")
+	if r.code != ExitOK {
+		t.Fatalf("list: %+v", r)
+	}
+	lines := strings.Split(strings.TrimSpace(r.stdout), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want header and one row:\n%s", r.stdout)
+	}
+	if got := strings.Fields(lines[0]); strings.Join(got, " ") != "ID STATUS ATTEMPTS TOKENS COST TITLE" {
+		t.Fatalf("header = %q", lines[0])
+	}
+	if got := strings.Join(strings.Fields(lines[1]), " "); got != "hello verified 1 1,500 0.05 Say hello" {
+		t.Fatalf("row = %q", got)
+	}
+
+	r = run(t, root, nil, "task", "list", "--json")
+	var doc struct {
+		Schema string `json:"schema"`
+		Tasks  []struct {
+			ID       string `json:"id"`
+			Title    string `json:"title"`
+			Status   string `json:"status"`
+			Phase    string `json:"phase"`
+			Attempts int    `json:"attempts"`
+			Usage    struct {
+				InputTokens int64   `json:"input_tokens"`
+				CostUSD     float64 `json:"cost_usd"`
+			} `json:"usage"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil || doc.Schema != "mill/task-list@1" || len(doc.Tasks) != 1 {
+		t.Fatalf("list --json: %v\n%s", err, r.stdout)
+	}
+	if tk := doc.Tasks[0]; tk.ID != "hello" || tk.Title != "Say hello" || tk.Status != "verified" || tk.Attempts != 1 || tk.Usage.InputTokens != 1200 || tk.Usage.CostUSD != 0.05 {
+		t.Fatalf("task = %+v", tk)
+	}
+
+	// Status filter.
+	r = run(t, root, nil, "task", "list", "--status", "blocked")
+	if r.code != ExitOK || strings.TrimSpace(r.stdout) != "no tasks" {
+		t.Fatalf("blocked filter: %+v", r)
+	}
+	r = run(t, root, nil, "task", "list", "--status", "verified")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "hello") {
+		t.Fatalf("verified filter: %+v", r)
+	}
+
+	// Invalid status is a usage error naming the valid ones.
+	r = run(t, root, nil, "task", "list", "--status", "bogus")
+	if r.code != ExitUsage {
+		t.Fatalf("bogus status code = %d", r.code)
+	}
+	for _, want := range []string{"pending", "running", "verified", "blocked", "failed"} {
+		if !strings.Contains(r.stderr, want) {
+			t.Errorf("stderr missing %q: %s", want, r.stderr)
+		}
+	}
+
+	if r := run(t, root, nil, "task"); !strings.Contains(r.stderr, "mill task list") {
+		t.Errorf("usage lacks list: %s", r.stderr)
+	}
+}

@@ -46,6 +46,7 @@ task file outside the checkout:
 ```sh
 mill task run --file ../add-reverse.json            # implement → gate → verify → retry
 mill task show add-reverse                          # status, attempts, spend, findings (--json)
+mill task list                                      # every task, oldest first (--status S, --json)
 mill task run --file ../add-reverse.json --retry    # after editing the spec or raising a budget
 ```
 
