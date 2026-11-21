@@ -152,8 +152,8 @@ Built by me (setup):
 Built by mill, one task at a time:
 - [x] `plan-validate`: `internal/plan`: plan format, validation (PL2–PL3), cycle detection,
       `owns` overlap warnings, topological order, deepest parent (1 attempt, $0.22)
-- [ ] `goals-store`: goals in the store (create, get, list, status, plan), approving a plan
-      creates its tasks and deps in one transaction, `start_sha` on branches
+- [x] `goals-store`: goals in the store (create, get, list, status, plan), approving a plan
+      creates its tasks and deps in one transaction, `start_sha` on branches (1 attempt, $0.37)
 - [ ] `plan-cli`: `mill plan --file`, `plan show`, `plan edit`, `plan approve`, `goal list`,
       `goal show`
 - [ ] `graph-branches`: pipeline for goal tasks: names, base rules with fan-in, `start_sha`
