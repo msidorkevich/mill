@@ -1,5 +1,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X mill/internal/cli.Version=$(VERSION)
+# The mill gate passes GOTESTFLAGS=-count=1 so a cached test pass never stands in for a run.
+GOTESTFLAGS ?=
 
 .PHONY: check fmt vet test build install clean
 
@@ -13,7 +15,7 @@ vet:
 	go vet ./...
 
 test:
-	go test ./...
+	go test $(GOTESTFLAGS) ./...
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/mill ./cmd/mill

@@ -106,5 +106,66 @@ Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–
       `created_at` is wrong for whole-second times (`12:00:00Z` sorts after `12:00:00.1Z`).
       Store a fixed-width format. (Done by mill: task `fixed-timestamps`, 1 attempt, $0.19;
       schema v3 migrates old values.)
-- [ ] The gate reuses Go's test cache (it ran in 0.8s after the implementer's own run). Fine for
+- [x] The gate reuses Go's test cache (it ran in 0.8s after the implementer's own run). Fine for
       determinism, but consider `-count=1` in `check_cmd` if a cached pass ever hides a problem.
+      (Done: the gate runs `make check GOTESTFLAGS=-count=1`.)
+
+## M2. Planner and graph: in progress (branch `m2-graph`)
+
+Requirements: PL1–6, GR1–6, GT2–3, BG2, TS3. Exit criterion: a goal becomes 3–8 tasks, all
+verified as local branches; killing and restarting mill finishes with nothing duplicated.
+
+**Dogfooding plan:** mill builds M2 itself. Until the scheduler exists, each piece is a single
+task (`mill task run`), reviewed and merged by hand. Once the scheduler is merged, the rest of
+M2 runs as a goal through M2's own graph runner. Task files: `~/prj/mill-tasks/`.
+
+### Design decisions
+
+- **Goals** get sequential ids `g1`, `g2`, … and a status: `draft` (plan awaiting approval) →
+  `approved` → `running` → `done`, or `blocked` when nothing more can run.
+- **Task ids inside a goal** are stored as `<goal>/<task>` (e.g. `g1/config`), so plans from
+  different goals never collide. Branch `mill/<goal>/<task>`, worktree
+  `<worktrees>/<goal>/<task>`, runs `.mill/runs/<goal>/<task>/`. Single tasks keep
+  `mill/t/<id>`.
+- **Base rules (GT2):** no deps → `base_branch` tip; one dep → the parent's branch at its
+  verified head; several → the deepest parent's branch, with the other parents merged in.
+  A merge conflict blocks the task (the keeper handles it in M4).
+- **Diff base:** a branch records `base_sha` (parent tip, for restacking later) and `start_sha`
+  (after fan-in merges). The verifier reviews `start_sha..HEAD`, so it sees only this task's
+  changes.
+- **Overlapping `owns`** between tasks with no dependency path are reported as plan warnings;
+  the scheduler never runs them at the same time (GR4).
+- **Hand-written plans** (`mill plan --file plan.json`) skip the planner. Used for dogfooding
+  and tests.
+- **Crash recovery:** a run lock (`flock` on `.mill/run.lock`) keeps one mill run per repo. On
+  start, tasks left `running` go back to `pending`, attempts left `running` become `abandoned`,
+  and uncommitted worktree changes are committed as an interrupted attempt.
+- **Project conventions for agents** live in `CLAUDE.md` (workers load it; checked with a probe).
+
+### Subtasks
+
+Built by me (setup):
+- [x] Branch `m2-graph`; mill tasks branch from it (`base_branch = "m2-graph"`)
+- [x] `CLAUDE.md` with conventions for agents
+- [x] Gate runs tests uncached (`make check GOTESTFLAGS=-count=1`)
+
+Built by mill, one task at a time:
+- [ ] `plan-validate`: `internal/plan`: plan format, validation (PL2–PL3), cycle detection,
+      `owns` overlap warnings, topological order, deepest parent
+- [ ] `goals-store`: goals in the store (create, get, list, status, plan), approving a plan
+      creates its tasks and deps in one transaction, `start_sha` on branches
+- [ ] `plan-cli`: `mill plan --file`, `plan show`, `plan edit`, `plan approve`, `goal list`,
+      `goal show`
+- [ ] `graph-branches`: pipeline for goal tasks: names, base rules with fan-in, `start_sha`
+      diffs, goal budget check (GT2–3, BG2)
+- [ ] `scheduler`: `mill run <goal>`: ready set, `owns` serialization, `max_parallel`, goal
+      status, run lock, crash recovery (GR1–GR6)
+
+Built by mill as a goal (through the scheduler):
+- [ ] `planner`: `mill plan "<goal>"`: repo survey, planner agent, retry once on validation
+      errors (PL1, PL4, PL6)
+- [ ] `crash-test`: kill -9 a running `mill run` and restart; nothing duplicated (TS3)
+
+Exit criterion:
+- [ ] A real goal through the real planner becomes 3–8 tasks, all verified
+- [ ] Kill and restart finishes with nothing duplicated
