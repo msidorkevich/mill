@@ -236,3 +236,122 @@ func TestTaskSummaries(t *testing.T) {
 		t.Fatalf("verified filter = %+v, %v", got, err)
 	}
 }
+
+func TestTimestampsFixedWidthAndOrdered(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+
+	// A whole second sorts after ".1Z" under RFC3339Nano text order; fixed width must not.
+	s.now = func() time.Time { return fixed }
+	if err := s.CreateTask(ctx, spec("whole")); err != nil {
+		t.Fatal(err)
+	}
+	s.now = func() time.Time { return fixed.Add(100 * time.Millisecond) }
+	if err := s.CreateTask(ctx, spec("frac")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AppendEvent(ctx, "x", "", "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.TaskSummaries(ctx, "")
+	if err != nil || len(got) != 2 || got[0].ID != "whole" || got[1].ID != "frac" {
+		t.Fatalf("TaskSummaries = %+v, %v; want whole then frac", got, err)
+	}
+	for _, q := range []string{"SELECT created_at FROM tasks", "SELECT updated_at FROM tasks", "SELECT at FROM events"} {
+		rows, err := s.DB().QueryContext(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var v string
+			rows.Scan(&v)
+			if len(v) != len("2006-01-02T15:04:05.000000000Z") || v[19] != '.' || v[len(v)-1] != 'Z' {
+				t.Errorf("%s: %q is not fixed width", q, v)
+			}
+		}
+		rows.Close()
+	}
+}
+
+func TestMigrateV2NormalizesTimestamps(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mill.db")
+	saved := migrations
+	migrations = saved[:2]
+	LatestVersion = 2
+	s, err := Open(ctx, path, Options{})
+	migrations, LatestVersion = saved, len(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := []string{
+		"2026-11-21T12:00:00Z", "2026-11-21T12:00:00.1Z", "2026-11-21T12:00:00.12Z",
+		"2026-11-21T12:00:00.123456Z", "2026-11-21T12:00:00.123456789Z",
+	}
+	db := s.DB()
+	for i, v := range old {
+		id := "t" + string(rune('a'+i))
+		if _, err := db.ExecContext(ctx, `INSERT INTO goals (id, title, status, created_at, updated_at) VALUES (?, 'g', 's', ?, ?)`, id, v, v); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO tasks (id, title, kind, spec, status, created_at, updated_at) VALUES (?, 't', 'implement', 's', 'pending', ?, ?)`, id, v, v); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO attempts (task_id, n, role, status, started_at, ended_at) VALUES (?, 1, 'implementer', 'ok', ?, ?)`, id, v, v); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO branches (task_id, name, base, base_sha, updated_at) VALUES (?, ?, 'main', 'sha', ?)`, id, "b"+id, v); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `INSERT INTO events (at, kind) VALUES (?, 'x')`, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An attempt that never ended keeps a NULL ended_at.
+	if _, err := db.ExecContext(ctx, `INSERT INTO attempts (task_id, n, role, status, started_at) VALUES ('ta', 2, 'implementer', 'running', ?)`, old[0]); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2 := open(t, path)
+	db = s2.DB()
+	for _, c := range []struct{ table, col string }{
+		{"goals", "created_at"}, {"goals", "updated_at"}, {"tasks", "created_at"}, {"tasks", "updated_at"},
+		{"attempts", "started_at"}, {"attempts", "ended_at"}, {"branches", "updated_at"},
+	} {
+		rows, err := db.QueryContext(ctx, "SELECT id_, v FROM (SELECT rowid AS id_, "+c.col+" AS v FROM "+c.table+") WHERE v IS NOT NULL ORDER BY id_")
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := 0
+		for rows.Next() {
+			var id int
+			var v string
+			rows.Scan(&id, &v)
+			want, _ := time.Parse(time.RFC3339Nano, old[i%len(old)])
+			if len(v) != 30 || v[19] != '.' || v[29] != 'Z' {
+				t.Errorf("%s.%s: %q not normalized", c.table, c.col, v)
+			}
+			if got, err := parseTime(v); err != nil || !got.Equal(want) {
+				t.Errorf("%s.%s: %q parses to %v, %v; want %v", c.table, c.col, v, got, err, want)
+			}
+			i++
+		}
+		rows.Close()
+	}
+	var nulls int
+	db.QueryRowContext(ctx, `SELECT count(*) FROM attempts WHERE ended_at IS NULL`).Scan(&nulls)
+	if nulls != 1 {
+		t.Errorf("NULL ended_at count = %d, want 1", nulls)
+	}
+	rows, _ := db.QueryContext(ctx, `SELECT at FROM events ORDER BY seq`)
+	defer rows.Close()
+	for i := 0; rows.Next(); i++ {
+		var v string
+		rows.Scan(&v)
+		if v != old[i] {
+			t.Errorf("event %d at = %q, want untouched %q", i, v, old[i])
+		}
+	}
+}

@@ -91,6 +91,13 @@ BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
 ALTER TABLE tasks ADD COLUMN phase TEXT NOT NULL DEFAULT '';
 ALTER TABLE branches ADD COLUMN worktree TEXT NOT NULL DEFAULT '';
 `,
+	// 3: fixed-width timestamps (events are append-only and left alone).
+	`
+UPDATE goals SET created_at = substr(created_at,1,19) || '.' || substr(CASE WHEN length(created_at) > 20 THEN substr(created_at,21,length(created_at)-21) ELSE '' END || '000000000',1,9) || 'Z', updated_at = substr(updated_at,1,19) || '.' || substr(CASE WHEN length(updated_at) > 20 THEN substr(updated_at,21,length(updated_at)-21) ELSE '' END || '000000000',1,9) || 'Z' WHERE (created_at IS NULL OR created_at LIKE '____-__-__T__:__:__%Z') AND (updated_at IS NULL OR updated_at LIKE '____-__-__T__:__:__%Z');
+UPDATE tasks SET created_at = substr(created_at,1,19) || '.' || substr(CASE WHEN length(created_at) > 20 THEN substr(created_at,21,length(created_at)-21) ELSE '' END || '000000000',1,9) || 'Z', updated_at = substr(updated_at,1,19) || '.' || substr(CASE WHEN length(updated_at) > 20 THEN substr(updated_at,21,length(updated_at)-21) ELSE '' END || '000000000',1,9) || 'Z' WHERE (created_at IS NULL OR created_at LIKE '____-__-__T__:__:__%Z') AND (updated_at IS NULL OR updated_at LIKE '____-__-__T__:__:__%Z');
+UPDATE attempts SET started_at = substr(started_at,1,19) || '.' || substr(CASE WHEN length(started_at) > 20 THEN substr(started_at,21,length(started_at)-21) ELSE '' END || '000000000',1,9) || 'Z', ended_at = substr(ended_at,1,19) || '.' || substr(CASE WHEN length(ended_at) > 20 THEN substr(ended_at,21,length(ended_at)-21) ELSE '' END || '000000000',1,9) || 'Z' WHERE (started_at IS NULL OR started_at LIKE '____-__-__T__:__:__%Z') AND (ended_at IS NULL OR ended_at LIKE '____-__-__T__:__:__%Z');
+UPDATE branches SET updated_at = substr(updated_at,1,19) || '.' || substr(CASE WHEN length(updated_at) > 20 THEN substr(updated_at,21,length(updated_at)-21) ELSE '' END || '000000000',1,9) || 'Z' WHERE (updated_at IS NULL OR updated_at LIKE '____-__-__T__:__:__%Z');
+`,
 }
 
 // LatestVersion is the schema version this build writes.
