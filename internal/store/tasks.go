@@ -325,10 +325,17 @@ func (s *Store) UpdateTaskSpec(ctx context.Context, spec taskspec.Spec) error {
 	return err
 }
 
+// AbandonedUsage is the usage recovered for an attempt abandoned by RecoverInterrupted.
+type AbandonedUsage struct {
+	Usage         budget.Usage
+	CostEstimated bool
+}
+
 // RecoverInterrupted repairs the state a killed run left behind: running tasks go back to
-// pending and running attempts become abandoned, in one transaction. It records a
-// task-recovered event per task. Only call it while holding the run lock.
-func (s *Store) RecoverInterrupted(ctx context.Context) (tasks int, attempts int, err error) {
+// pending and running attempts become abandoned, in one transaction, recording the usage
+// given per attempt id (attempts not in usage keep zero). It records a task-recovered event
+// per task. Only call it while holding the run lock.
+func (s *Store) RecoverInterrupted(ctx context.Context, usage map[int64]AbandonedUsage) (tasks int, attempts int, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, fmt.Errorf("recover interrupted run: %w", err)
@@ -369,14 +376,36 @@ func (s *Store) RecoverInterrupted(ctx context.Context) (tasks int, attempts int
 			return 0, 0, fmt.Errorf("record recovery of %s: %w", id, err)
 		}
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE attempts SET status = ?, ended_at = ? WHERE status = ?`,
-		AttemptAbandoned, now, AttemptRunning)
+	arows, err := tx.QueryContext(ctx, `SELECT id FROM attempts WHERE status = ? ORDER BY id`, AttemptRunning)
 	if err != nil {
 		return 0, 0, fmt.Errorf("recover attempts: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	var aids []int64
+	for arows.Next() {
+		var id int64
+		if err := arows.Scan(&id); err != nil {
+			arows.Close()
+			return 0, 0, err
+		}
+		aids = append(aids, id)
+	}
+	if err := arows.Err(); err != nil {
+		arows.Close()
+		return 0, 0, err
+	}
+	arows.Close()
+	for _, id := range aids {
+		u := usage[id]
+		if _, err := tx.ExecContext(ctx, `UPDATE attempts SET status = ?, ended_at = ?, cost_estimated = ?,
+			input_tokens = ?, output_tokens = ?, cache_write_tokens = ?, cache_read_tokens = ?, cost_usd = ?
+			WHERE id = ?`, AttemptAbandoned, now, u.CostEstimated, u.Usage.InputTokens, u.Usage.OutputTokens,
+			u.Usage.CacheWriteTokens, u.Usage.CacheReadTokens, u.Usage.CostUSD, id); err != nil {
+			return 0, 0, fmt.Errorf("recover attempt %d: %w", id, err)
+		}
+	}
+	n := len(aids)
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("recover interrupted run: %w", err)
 	}
-	return len(ids), int(n), nil
+	return len(ids), n, nil
 }

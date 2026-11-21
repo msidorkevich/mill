@@ -264,6 +264,47 @@ func (p *streamParser) line(b []byte) {
 	}
 }
 
+// merged returns the usage so far: the result event's when present (authoritative, with the
+// cost), else the live assistant usage. Callers hold p.mu.
+func (p *streamParser) merged() budget.Usage {
+	if p.final == nil {
+		return p.live
+	}
+	final := p.final.Usage.usage()
+	u := maxUsage(final, p.live)
+	u.CostUSD = p.final.TotalCostUSD
+	return u
+}
+
+// UsageFromStream parses a claude stream-json file with the rules of the live parser and
+// returns the usage it records: assistant usage deduplicated per message id, replaced by the
+// result event's usage and cost when there is one. model is named by the system/init event;
+// finished reports whether a result event was seen. The cost is zero when !finished.
+func UsageFromStream(path string) (u budget.Usage, model string, finished bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return budget.Usage{}, "", false, fmt.Errorf("read agent stream: %w", err)
+	}
+	defer f.Close()
+	p := &streamParser{seen: map[string]budget.Usage{}}
+	r := bufio.NewReaderSize(f, 1<<20)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if len(strings.TrimSpace(string(line))) > 0 {
+			p.line(line)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return budget.Usage{}, "", false, fmt.Errorf("read agent stream %s: %w", path, rerr)
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.merged(), p.model, p.final != nil, nil
+}
+
 // result builds the Result after the process has exited.
 //
 // Without a result event claude reported no cost, so it is estimated from tokens using the
@@ -280,8 +321,7 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 		if delta := positive(subtract(final, p.live)); delta != (budget.Usage{}) && p.onUsage != nil {
 			p.onUsage(delta)
 		}
-		res.Usage = maxUsage(final, p.live)
-		res.Usage.CostUSD = final.CostUSD
+		res.Usage = p.merged()
 		if n := len(p.final.PermissionDenials); n > 0 {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%d tool call(s) denied by permission rules", n))
 		}

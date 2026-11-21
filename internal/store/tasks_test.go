@@ -379,7 +379,7 @@ func TestRecoverInterruptedResetsOnlyRunningWork(t *testing.T) {
 	fin, _ := s.StartAttempt(ctx, "done", 1, "implementer")
 	must(s.FinishAttempt(ctx, fin, "ok", budget.Usage{}, false, "", ""))
 
-	tasks, attempts, err := s.RecoverInterrupted(ctx)
+	tasks, attempts, err := s.RecoverInterrupted(ctx, nil)
 	if err != nil || tasks != 2 || attempts != 1 {
 		t.Fatalf("RecoverInterrupted = %d, %d, %v; want 2, 1, nil", tasks, attempts, err)
 	}
@@ -409,7 +409,7 @@ func TestRecoverInterruptedResetsOnlyRunningWork(t *testing.T) {
 	if !found {
 		t.Error("no task-recovered event for run2")
 	}
-	if tasks, attempts, err := s.RecoverInterrupted(ctx); err != nil || tasks != 0 || attempts != 0 {
+	if tasks, attempts, err := s.RecoverInterrupted(ctx, nil); err != nil || tasks != 0 || attempts != 0 {
 		t.Fatalf("second RecoverInterrupted = %d, %d, %v; want 0, 0, nil", tasks, attempts, err)
 	}
 }
@@ -520,5 +520,41 @@ func TestMigrateFromV5AddsCostEstimated(t *testing.T) {
 	}
 	if list, _ := s2.Attempts(ctx, "t1"); len(list) != 1 || !list[0].CostEstimated {
 		t.Fatalf("attempts = %+v", list)
+	}
+}
+
+func TestRecoverInterruptedRecordsUsageOfAbandonedAttempts(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	g, _ := s.CreateGoal(ctx, "t", nil)
+	if err := s.ApproveGoal(ctx, g.ID, goalPlan()); err != nil {
+		t.Fatal(err)
+	}
+	withStream, err := s.StartAttempt(ctx, "g1/a", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	noStream, err := s.StartAttempt(ctx, "g1/b", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := budget.Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 7, CostUSD: 0.25}
+	if _, attempts, err := s.RecoverInterrupted(ctx, map[int64]AbandonedUsage{withStream: {Usage: u, CostEstimated: true}}); err != nil || attempts != 2 {
+		t.Fatalf("RecoverInterrupted = %d, %v", attempts, err)
+	}
+	a, _ := s.Attempts(ctx, "g1/a")
+	if a[0].Status != AttemptAbandoned || a[0].Usage != u || !a[0].CostEstimated {
+		t.Errorf("attempt with stream = %+v", a[0])
+	}
+	b, _ := s.Attempts(ctx, "g1/b")
+	if b[0].Status != AttemptAbandoned || b[0].Usage != (budget.Usage{}) || b[0].CostEstimated {
+		t.Errorf("attempt without stream = %+v", b[0])
+	}
+	_ = noStream
+	if got, err := s.TaskUsage(ctx, "g1/a"); err != nil || got != u {
+		t.Errorf("TaskUsage = %+v, %v; want %+v", got, err, u)
+	}
+	if got, err := s.GoalUsage(ctx, g.ID); err != nil || got != u {
+		t.Errorf("GoalUsage = %+v, %v; want %+v", got, err, u)
 	}
 }
