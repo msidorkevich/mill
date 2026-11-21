@@ -109,12 +109,15 @@ The commands are listed above; this is the order to use them in.
 
 **Base branches.** A task with no dependency is based on the base branch. With one dependency it
 is based on that dependency's branch. With several, it is based on the deepest dependency's
-branch and the others are merged in, so its diff against that base is only its own work.
+branch and the others are merged in. Either way the verifier reviews only the task's own work:
+the diff from where the task started, after those merges.
 
 **Blocked tasks.** When a task blocks or fails, independent tasks still run and the goal ends
 `blocked` (exit 4); `mill goal show g1` names the stopped tasks and the ones waiting on them.
-Fix the cause (the spec with `mill task show`, a budget or `check_cmd` in `.mill/config.toml`),
-then `mill run g1 --retry-blocked` puts blocked and failed tasks back to pending and continues.
+Find the cause with `mill task show g1/<task>` (reason, attempts, last findings), fix it (for
+example a budget or `check_cmd` in `.mill/config.toml`), then `mill run g1 --retry-blocked` puts
+blocked and failed tasks back to pending and continues. A goal task's spec is frozen once the
+plan is approved.
 Verified tasks are not run again.
 
 **Interrupted or killed runs.** After Ctrl-C, a crash or `kill -9`, nothing is lost. The next
