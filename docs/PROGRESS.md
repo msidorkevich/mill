@@ -68,7 +68,7 @@ Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–
 - [x] Dogfood: a hand-written task on mill's own repo produces a verified branch worth merging
       (`task-list`: adds `mill task list`; verified in 1 attempt, 44.8k tokens, $0.24; reviewed:
       one aggregate SQL query, tests for ordering, aggregation, filters, empty and invalid status;
-      branch `mill/t/task-list`, waiting to be merged)
+      merged)
 
 ### Notes and decisions
 
@@ -102,8 +102,9 @@ Includes the dogfood cut. Requirements: TP1–6, RN3, SE1, SE3, BG1, BG3, BG5–
 
 ### Follow-ups found while dogfooding
 
-- [ ] Timestamps are stored with RFC3339Nano, which trims trailing zeros, so text ordering by
+- [x] Timestamps are stored with RFC3339Nano, which trims trailing zeros, so text ordering by
       `created_at` is wrong for whole-second times (`12:00:00Z` sorts after `12:00:00.1Z`).
-      Store a fixed-width format.
+      Store a fixed-width format. (Done by mill: task `fixed-timestamps`, 1 attempt, $0.19;
+      schema v3 migrates old values.)
 - [ ] The gate reuses Go's test cache (it ran in 0.8s after the implementer's own run). Fine for
       determinism, but consider `-count=1` in `check_cmd` if a cached pass ever hides a problem.
