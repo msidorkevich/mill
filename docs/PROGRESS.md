@@ -199,3 +199,22 @@ Exit criterion (toy Go repo, real agents):
 - [ ] Attempts abandoned by a killed run record no usage (mill never saw their final result),
       so goal and task spend under-count killed runs. Recovery could read the attempt's
       stream file and record the usage it reports.
+
+## M2 follow-ups: in progress (goal `g2`, on `main`)
+
+`m2-graph` was merged into `main` (fast-forward); mill's tasks now branch from `main`. The
+follow-ups run as one goal through mill's scheduler (plan:
+`~/prj/mill-tasks/followups.plan.json`).
+
+Correction: the planner follow-up was partly a review mistake. `mill plan` does apply
+`runner.attempt_timeout` (I reviewed `planner.go` and missed the wrapper in `cli/plan.go`). The
+real gap is smaller: the limit is shared by both planner calls and a timeout reads as a bare
+"context deadline exceeded".
+
+- [ ] `task-edit`: `mill task edit <id>` changes a pending/blocked/failed task's spec, also after
+      approval (goal task spec updated in the task row and the stored plan)
+- [ ] `planner-timeout`: time limit per planner call, with a clear message
+- [ ] `worker-reaper`: record each worker's pid; recovery kills leftover workers of a killed run
+- [ ] `cost-estimate`: price table (overridable in config); runs that end without a result from
+      claude get an estimated cost, marked `~$` (resolves the M1 "killed run costs $0" limitation)
+- [ ] `abandoned-usage`: recovery reads abandoned attempts' streams and records their usage
