@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"mill/internal/budget"
+	"mill/internal/price"
 )
 
 // Config is the project configuration. Every field has a default (see Default).
@@ -38,6 +39,9 @@ type Config struct {
 	Host     HostConfig      `toml:"host"`
 	Sizes    map[string]Size `toml:"sizes"`
 	Budget   Budget          `toml:"budget"`
+	// Prices overrides the built-in token prices (USD per million tokens), keyed by model
+	// alias or id. Used to estimate the cost of runs that end without a result.
+	Prices map[string]price.Rates `toml:"prices"`
 }
 
 // Duration is a time.Duration written as a string such as "20m" in TOML.
@@ -177,6 +181,16 @@ usd = 8.0
 
 [budget.goal]
 tokens = 6_000_000
+
+# Optional price overrides, USD per million tokens, used to estimate the cost of runs that end
+# without a result from claude. Keyed by model alias or id; built-in rates cover the Claude 5
+# models.
+# [prices.opus]
+# input = 4.0
+# output = 20.0
+# cache_write_5m = 5.0
+# cache_write_1h = 8.0
+# cache_read = 0.20
 `
 
 // Load reads path on top of the defaults and validates the result. Unknown keys are errors,
@@ -269,6 +283,14 @@ func (c Config) Validate() error {
 		}
 		if s.Model == "" {
 			add("sizes.%s.model must not be empty", name)
+		}
+	}
+	for name, r := range c.Prices {
+		for key, v := range map[string]float64{"input": r.Input, "output": r.Output,
+			"cache_write_5m": r.CacheWrite5m, "cache_write_1h": r.CacheWrite1h, "cache_read": r.CacheRead} {
+			if v < 0 {
+				add("prices.%s.%s must be >= 0, got %v", name, key, v)
+			}
 		}
 	}
 	if !c.Budget.Count.Valid() {

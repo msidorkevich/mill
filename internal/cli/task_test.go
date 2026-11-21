@@ -332,3 +332,42 @@ func TestTaskRunRecoversInterruptedTasks(t *testing.T) {
 		t.Fatalf("run: %+v", r)
 	}
 }
+
+func TestTaskShowMarksEstimatedCosts(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+		t.Fatalf("task run: %+v", r)
+	}
+	if r := run(t, root, nil, "task", "show", "hello"); strings.Contains(r.stdout, "~$") || strings.Contains(r.stdout, "estimated") {
+		t.Fatalf("reported costs marked as estimated:\n%s", r.stdout)
+	}
+
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := s.Attempts(ctx, "hello")
+	if err != nil || len(attempts) == 0 {
+		t.Fatalf("attempts = %v, %v", attempts, err)
+	}
+	a := attempts[0]
+	if err := s.FinishAttempt(ctx, a.ID, a.Status, a.Usage, true, a.OutputPath, a.LogPath); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	r := run(t, root, nil, "task", "show", "hello")
+	if !strings.Contains(r.stdout, "~$") || !strings.Contains(r.stdout, "includes estimated costs") {
+		t.Fatalf("show does not mark the estimate:\n%s", r.stdout)
+	}
+	r = run(t, root, nil, "task", "show", "hello", "--json")
+	var v struct {
+		Attempts []struct {
+			CostEstimated bool `json:"cost_estimated"`
+		} `json:"attempts"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &v); err != nil || len(v.Attempts) == 0 || !v.Attempts[0].CostEstimated {
+		t.Fatalf("json cost_estimated: %v\n%s", err, r.stdout)
+	}
+}

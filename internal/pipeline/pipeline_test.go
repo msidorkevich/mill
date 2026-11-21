@@ -569,7 +569,7 @@ func TestGoalBudgetBlocksGoalTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.p.Store.FinishAttempt(ctx, id, "ok", budget.Usage{InputTokens: 900}, "", ""); err != nil {
+	if err := e.p.Store.FinishAttempt(ctx, id, "ok", budget.Usage{InputTokens: 900}, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	out := e.run(t, "g1/a")
@@ -731,5 +731,31 @@ func TestAgentAttemptRecordsProcessWhileRunning(t *testing.T) {
 		if a.PID != 4321 || a.Command != "claude" || a.LogPath != "/raw/"+a.Role+".jsonl" {
 			t.Fatalf("running attempt = %+v", a)
 		}
+	}
+}
+
+// estimatingRunner marks every result's cost as estimated, like claude does for a killed run.
+type estimatingRunner struct{ runner.Runner }
+
+func (r estimatingRunner) Run(ctx context.Context, req runner.Request) (runner.Result, error) {
+	res, err := r.Runner.Run(ctx, req)
+	res.Usage.CostUSD, res.CostEstimated = 0.02, true
+	return res, err
+}
+
+func TestEstimatedCostIsShownWithTildeAndStored(t *testing.T) {
+	e := setup(t, "true", runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a": "1"}, budget.Usage{InputTokens: 100})},
+		runner.RoleVerifier:    {verdict("pass")},
+	}, nil)
+	e.p.Runner = estimatingRunner{e.p.Runner}
+	e.task(t, "est")
+	e.run(t, "est")
+	if !strings.Contains(e.out.String(), "~$0.02") {
+		t.Fatalf("progress lacks ~$0.02:\n%s", e.out)
+	}
+	atts, _ := e.p.Store.Attempts(context.Background(), "est")
+	if len(atts) == 0 || !atts[0].CostEstimated {
+		t.Fatalf("attempts = %+v", atts)
 	}
 }

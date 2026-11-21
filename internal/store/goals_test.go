@@ -247,7 +247,7 @@ func TestGoalUsageSumsAttemptsAcrossTasks(t *testing.T) {
 			t.Fatal(err)
 		}
 		u := budget.Usage{InputTokens: 10, OutputTokens: 5, CostUSD: 0.5}
-		if err := s.FinishAttempt(ctx, aid, "ok", u, "", ""); err != nil {
+		if err := s.FinishAttempt(ctx, aid, "ok", u, false, "", ""); err != nil {
 			t.Fatal(err)
 		}
 	}

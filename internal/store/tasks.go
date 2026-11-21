@@ -122,6 +122,8 @@ type Attempt struct {
 	LogPath    string       `json:"log_path,omitempty"`
 	PID        int          `json:"pid"`
 	Command    string       `json:"command"`
+	// CostEstimated is true when Usage.CostUSD was estimated from tokens.
+	CostEstimated bool `json:"cost_estimated"`
 }
 
 // Attempt statuses.
@@ -141,12 +143,13 @@ func (s *Store) StartAttempt(ctx context.Context, taskID string, n int, role str
 	return res.LastInsertId()
 }
 
-// FinishAttempt records how an agent run ended and what it spent.
-func (s *Store) FinishAttempt(ctx context.Context, id int64, status string, u budget.Usage, outputPath, logPath string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE attempts SET status = ?, ended_at = ?,
+// FinishAttempt records how an agent run ended and what it spent. costEstimated marks a cost
+// estimated from tokens rather than reported by the agent.
+func (s *Store) FinishAttempt(ctx context.Context, id int64, status string, u budget.Usage, costEstimated bool, outputPath, logPath string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE attempts SET status = ?, ended_at = ?, cost_estimated = ?,
 		input_tokens = ?, output_tokens = ?, cache_write_tokens = ?, cache_read_tokens = ?, cost_usd = ?,
 		output_path = ?, log_path = ? WHERE id = ?`,
-		status, s.ts(), u.InputTokens, u.OutputTokens, u.CacheWriteTokens, u.CacheReadTokens, u.CostUSD,
+		status, s.ts(), costEstimated, u.InputTokens, u.OutputTokens, u.CacheWriteTokens, u.CacheReadTokens, u.CostUSD,
 		outputPath, logPath, id)
 	return err
 }
@@ -177,7 +180,7 @@ func (s *Store) Attempts(ctx context.Context, taskID string) ([]Attempt, error) 
 func (s *Store) queryAttempts(ctx context.Context, where string, arg any) ([]Attempt, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, n, role, status, started_at, ended_at,
 		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, output_path, log_path,
-		pid, command FROM attempts `+where+` ORDER BY id`, arg)
+		pid, command, cost_estimated FROM attempts `+where+` ORDER BY id`, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +192,7 @@ func (s *Store) queryAttempts(ctx context.Context, where string, arg any) ([]Att
 		var ended sql.NullString
 		if err := rows.Scan(&a.ID, &a.TaskID, &a.N, &a.Role, &a.Status, &started, &ended,
 			&a.Usage.InputTokens, &a.Usage.OutputTokens, &a.Usage.CacheWriteTokens, &a.Usage.CacheReadTokens,
-			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath, &a.PID, &a.Command); err != nil {
+			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath, &a.PID, &a.Command, &a.CostEstimated); err != nil {
 			return nil, err
 		}
 		a.StartedAt, _ = parseTime(started)

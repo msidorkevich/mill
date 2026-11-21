@@ -12,6 +12,7 @@ import (
 
 	"mill/internal/budget"
 	"mill/internal/host"
+	"mill/internal/price"
 )
 
 // Lines shaped like real `claude -p --output-format stream-json --verbose` output.
@@ -313,5 +314,68 @@ func TestClaudeReportsStartedProcess(t *testing.T) {
 	}
 	if got[0].PID <= 0 || got[0].Command != filepath.Base(bin) || got[0].RawPath != res.RawPath || got[0].RawPath == "" {
 		t.Fatalf("started = %+v (bin %s, raw %s)", got[0], bin, res.RawPath)
+	}
+}
+
+func TestClaudeKilledRunEstimatesCostFromInitModel(t *testing.T) {
+	initOpus := `{"type":"system","subtype":"init","model":"claude-opus-5-5[1m]"}`
+	bin, _, _ := fakeClaude(t, []string{initOpus, lineAsst1}, "sleep 30")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := baseReq(t)
+	req.Model = "haiku" // the init event's model wins over the request's
+	req.OnUsage = func(budget.Usage) { cancel() }
+	res, err := newClaude(bin).Run(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := (2*4.0 + 10*20.0 + 5000*8.0) / 1e6
+	if res.Status != StatusCancelled || !res.CostEstimated || res.Usage.CostUSD < want-1e-9 || res.Usage.CostUSD > want+1e-9 {
+		t.Fatalf("result = %+v, want estimated cost %v", res, want)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "|"), "cost estimated from tokens (claude reported none)") {
+		t.Fatalf("warnings = %v", res.Warnings)
+	}
+}
+
+func TestClaudeEstimateFallsBackToRequestModelAndOverrides(t *testing.T) {
+	noModel := `{"type":"system","subtype":"init"}`
+	bin, _, _ := fakeClaude(t, []string{noModel, lineAsst1}, "exit 1")
+	c := newClaude(bin)
+	c.Prices = map[string]price.Rates{"sonnet": {CacheWrite1h: 1000}}
+	req := baseReq(t)
+	req.Model = "sonnet"
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 5000 * 1000.0 / 1e6
+	if !res.CostEstimated || res.Usage.CostUSD < want-1e-9 || res.Usage.CostUSD > want+1e-9 {
+		t.Fatalf("result = %+v, want cost %v", res, want)
+	}
+}
+
+func TestClaudeUnknownModelLeavesCostZeroAndWarns(t *testing.T) {
+	bin, _, _ := fakeClaude(t, []string{lineInit, lineAsst1}, "exit 1")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CostEstimated || res.Usage.CostUSD != 0 {
+		t.Fatalf("result = %+v, want no estimate", res)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "|"), "could not be estimated") {
+		t.Fatalf("warnings = %v", res.Warnings)
+	}
+}
+
+func TestClaudeReportedCostIsNotEstimated(t *testing.T) {
+	bin, _, _ := fakeClaude(t, []string{`{"type":"system","subtype":"init","model":"opus"}`, lineAsst1, lineResult}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CostEstimated || res.Usage.CostUSD != 0.0125 {
+		t.Fatalf("result = %+v, want reported cost 0.0125", res)
 	}
 }

@@ -526,7 +526,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 		}
 	}
 	// Record the attempt even when ctx is done, so spend is never lost.
-	if err := p.Store.FinishAttempt(context.WithoutCancel(ctx), id, status, res.Usage, outPath, res.RawPath); err != nil {
+	if err := p.Store.FinishAttempt(context.WithoutCancel(ctx), id, status, res.Usage, res.CostEstimated, outPath, res.RawPath); err != nil {
 		return ar, err
 	}
 	detail := ""
@@ -536,7 +536,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	if len(res.Warnings) > 0 {
 		detail += " [" + strings.Join(res.Warnings, "; ") + "]"
 	}
-	p.logf("%s a%d %-9s %s %s (%s)%s", t.ID, n, role, status, fmtUsage(res.Usage), p.since(started), detail)
+	p.logf("%s a%d %-9s %s %s (%s)%s", t.ID, n, role, status, fmtUsageEst(res.Usage, res.CostEstimated), p.since(started), detail)
 	if runErr != nil {
 		return ar, fmt.Errorf("%s run: %w", role, runErr)
 	}
@@ -688,8 +688,15 @@ func short(sha string) string {
 	return sha
 }
 
-func fmtUsage(u budget.Usage) string {
-	return fmt.Sprintf("%s tok, $%.2f", fmtTokens(u.Tokens(budget.CountBillable)), u.CostUSD)
+func fmtUsage(u budget.Usage) string { return fmtUsageEst(u, false) }
+
+// fmtUsageEst formats usage, marking an estimated cost with "~".
+func fmtUsageEst(u budget.Usage, estimated bool) string {
+	mark := ""
+	if estimated {
+		mark = "~"
+	}
+	return fmt.Sprintf("%s tok, %s$%.2f", fmtTokens(u.Tokens(budget.CountBillable)), mark, u.CostUSD)
 }
 
 func fmtLimits(l budget.Limits) string {

@@ -188,7 +188,9 @@ func newPipeline(env Env, name string, paths project.Paths, cfg config.Config, s
 	var agentEnv []string
 	switch cfg.Runner.Kind {
 	case "claude":
-		r = runner.NewClaude(cfg.Runner.ClaudeBin, h)
+		cl := runner.NewClaude(cfg.Runner.ClaudeBin, h)
+		cl.Prices = cfg.Prices
+		r = cl
 		agentEnv = runner.ClaudeEnvAllow
 	case "fake":
 		sp := cfg.Runner.FakeScript
@@ -376,7 +378,15 @@ func printTask(env Env, v taskView) {
 		fmt.Fprintf(w, "  branch    %s (base %s @%s, head %s)\n", b.Name, b.Base, short(b.BaseSHA), short(b.HeadSHA))
 		fmt.Fprintf(w, "  worktree  %s\n", b.Worktree)
 	}
-	fmt.Fprintf(w, "  spend     %s tokens (billable), $%.2f\n", fmtInt(v.Usage.Tokens(budget.CountBillable)), v.Usage.CostUSD)
+	estimated := false
+	for _, a := range v.Attempts {
+		estimated = estimated || a.CostEstimated
+	}
+	total := ""
+	if estimated {
+		total = " (includes estimated costs, marked ~)"
+	}
+	fmt.Fprintf(w, "  spend     %s tokens (billable), $%.2f%s\n", fmtInt(v.Usage.Tokens(budget.CountBillable)), v.Usage.CostUSD, total)
 	fmt.Fprintf(w, "  runs      %s\n", v.RunsDir)
 
 	if len(v.Attempts) > 0 {
@@ -388,9 +398,13 @@ func printTask(env Env, v taskView) {
 			if a.EndedAt != nil {
 				dur = a.EndedAt.Sub(a.StartedAt).Round(time.Second).String()
 			}
-			fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s/%s\t$%.2f\t%s\n", a.N, a.Role, a.Status,
+			mark := ""
+			if a.CostEstimated {
+				mark = "~"
+			}
+			fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s/%s\t%s$%.2f\t%s\n", a.N, a.Role, a.Status,
 				fmtInt(a.Usage.InputTokens), fmtInt(a.Usage.OutputTokens),
-				fmtInt(a.Usage.CacheWriteTokens), fmtInt(a.Usage.CacheReadTokens), a.Usage.CostUSD, dur)
+				fmtInt(a.Usage.CacheWriteTokens), fmtInt(a.Usage.CacheReadTokens), mark, a.Usage.CostUSD, dur)
 		}
 		tw.Flush()
 	}

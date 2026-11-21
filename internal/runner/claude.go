@@ -16,6 +16,7 @@ import (
 
 	"mill/internal/budget"
 	"mill/internal/host"
+	"mill/internal/price"
 )
 
 // ClaudeEnvAllow lists the variables the claude CLI may need for authentication and provider
@@ -32,6 +33,9 @@ type Claude struct {
 	Host host.Host // where the process runs
 	// Poll is how often the output file is read while the agent runs.
 	Poll time.Duration
+	// Prices overrides the built-in token prices used to estimate the cost of runs that end
+	// without a result event.
+	Prices map[string]price.Rates
 }
 
 // NewClaude returns a claude runner using bin and h.
@@ -94,7 +98,7 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 	close(done)
 	wg.Wait()
 
-	res := p.result(ctx, ex, readTail(stderrPath, 2000))
+	res := p.result(ctx, ex, readTail(stderrPath, 2000), req.Model, c.Prices)
 	res.RawPath = streamPath
 	if waitErr != nil && res.Status == StatusOK {
 		res.Status, res.Error = StatusError, waitErr.Error()
@@ -182,6 +186,7 @@ type streamParser struct {
 	live    budget.Usage
 	final   *resultEvent
 	badJSON int
+	model   string // model named by the system/init event
 }
 
 type usageJSON struct {
@@ -211,6 +216,8 @@ type resultEvent struct {
 func (p *streamParser) line(b []byte) {
 	var ev struct {
 		Type    string          `json:"type"`
+		Subtype string          `json:"subtype"`
+		Model   string          `json:"model"`
 		Message json.RawMessage `json:"message"`
 	}
 	if err := json.Unmarshal(b, &ev); err != nil {
@@ -220,6 +227,12 @@ func (p *streamParser) line(b []byte) {
 		return
 	}
 	switch ev.Type {
+	case "system":
+		if ev.Subtype == "init" && ev.Model != "" {
+			p.mu.Lock()
+			p.model = ev.Model
+			p.mu.Unlock()
+		}
 	case "assistant":
 		// message is decoded only here: other event types may carry a string.
 		var msg struct {
@@ -252,7 +265,10 @@ func (p *streamParser) line(b []byte) {
 }
 
 // result builds the Result after the process has exited.
-func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail string) Result {
+//
+// Without a result event claude reported no cost, so it is estimated from tokens using the
+// init event's model (falling back to reqModel).
+func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, reqModel string, prices map[string]price.Rates) Result {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	res := Result{Usage: p.live}
@@ -268,6 +284,18 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail stri
 		res.Usage.CostUSD = final.CostUSD
 		if n := len(p.final.PermissionDenials); n > 0 {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%d tool call(s) denied by permission rules", n))
+		}
+	}
+	if p.final == nil && res.Usage != (budget.Usage{}) {
+		model := p.model
+		if model == "" {
+			model = reqModel
+		}
+		if usd, ok := price.Estimate(model, res.Usage, prices); ok {
+			res.Usage.CostUSD, res.CostEstimated = usd, true
+			res.Warnings = append(res.Warnings, "cost estimated from tokens (claude reported none)")
+		} else {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("cost could not be estimated: no known rates for model %q", model))
 		}
 	}
 	if p.badJSON > 0 {
