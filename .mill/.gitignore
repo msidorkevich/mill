@@ -1,0 +1,4 @@
+# machine-local mill state
+runs/
+mill.db
+mill.db-*

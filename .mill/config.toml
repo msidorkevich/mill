@@ -1,0 +1,45 @@
+# mill project configuration. Commit this file; .mill/runs/ and the database are ignored.
+
+# The gate: run with "sh -c" in each task's worktree. Required: an empty gate fails every task.
+check_cmd = "make check"
+
+base_branch = "m1-pipeline"
+remote = "origin"
+max_parallel = 2          # tasks running at the same time
+max_attempts = 3          # implement attempts per task before it is blocked
+start_children_on = "verified"   # or "published"
+
+worktree_root = ""        # where task worktrees live; "" = ~/.cache/mill/worktrees
+gate_timeout = "20m"      # per gate command
+env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
+
+[runner]
+kind = "claude"           # or "fake" (scripted, zero tokens; set fake_script)
+claude_bin = "claude"
+attempt_timeout = "30m"   # per agent run
+
+[host]
+kind = "auto"             # "auto" (herdr if available, else exec), "exec" or "herdr"
+
+[sizes.S]
+model = "sonnet"
+[sizes.M]
+model = "opus"
+
+[budget]
+count = "billable"        # tokens counted against limits: "billable" or "all" (adds cache reads)
+
+[budget.attempt]          # per attempt; 0 or absent = no limit in that unit
+usd = 2.0
+tokens = 400_000
+
+[budget.size.S]
+attempt = { usd = 1.0, tokens = 200_000 }
+[budget.size.M]
+attempt = { usd = 3.0, tokens = 600_000 }
+
+[budget.task]
+usd = 8.0
+
+[budget.goal]
+tokens = 6_000_000
