@@ -451,3 +451,78 @@ func TestLastActionDescribesLatestToolCallOrText(t *testing.T) {
 		t.Fatal("missing file: want an error")
 	}
 }
+
+// Lines observed on a real run that hit the 5-hour usage limit.
+const (
+	lineLimitWarn     = `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1795348200,"rateLimitType":"five_hour","utilization":0.99,"overageStatus":"rejected","isUsingOverage":false,"surpassedThreshold":0.9}}`
+	lineLimitRejected = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1795348200,"rateLimitType":"five_hour","overageStatus":"rejected","isUsingOverage":false}}`
+	lineLimitText     = `{"type":"assistant","message":{"id":"m9","content":[{"type":"text","text":"You've hit your 5-hour limit · resets 12:50pm (Europe/Berlin)"}]}}`
+	lineLimitResult   = `{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"terminal_reason":"api_error","result":"You've hit your 5-hour limit · resets 12:50pm (Europe/Berlin)","total_cost_usd":0,"usage":{}}`
+)
+
+func TestClaudeRateLimitedRunReportsLimitAndReset(t *testing.T) {
+	bin, _, _ := fakeClaude(t, []string{lineInit, lineAsst1, lineLimitWarn, lineLimitRejected, lineLimitText, lineLimitResult}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset := time.Unix(1795348200, 0)
+	if res.Status != StatusRateLimited || res.LimitType != "five_hour" || !res.ResetsAt.Equal(reset) {
+		t.Fatalf("got %q %q %v", res.Status, res.LimitType, res.ResetsAt)
+	}
+	if !strings.Contains(res.Error, "five_hour") || !strings.Contains(res.Error, reset.Local().Format(localTimeFormat)) {
+		t.Fatalf("error = %q", res.Error)
+	}
+	if res.Usage.InputTokens != 2 {
+		t.Fatalf("usage not kept: %+v", res.Usage)
+	}
+}
+
+func TestClaudeRateLimitedWithoutEventHasUnknownReset(t *testing.T) {
+	bin, _, _ := fakeClaude(t, []string{lineInit, lineLimitResult}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusRateLimited || res.LimitType != "" || !res.ResetsAt.IsZero() || res.Error == "" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+func TestClaudeRateLimitedOnRejectedEventWithOtherError(t *testing.T) {
+	errRes := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"usage":{}}`
+	bin, _, _ := fakeClaude(t, []string{lineLimitRejected, errRes}, "")
+	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
+	if res.Status != StatusRateLimited || res.LimitType != "five_hour" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+func TestClaudeUsageWarningAddedOnceAndKeepsSuccess(t *testing.T) {
+	bin, _, _ := fakeClaude(t, []string{lineInit, lineLimitWarn, lineLimitWarn, lineResult}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "usage at 99% of the five_hour limit, resets at " + time.Unix(1795348200, 0).Local().Format(localTimeFormat)
+	if res.Status != StatusOK || len(res.Warnings) != 1 || res.Warnings[0] != want {
+		t.Fatalf("status %q warnings %q, want %q", res.Status, res.Warnings, want)
+	}
+}
+
+func TestClaudeOtherErrorResultStaysError(t *testing.T) {
+	errRes := `{"type":"result","subtype":"success","is_error":true,"api_error_status":500,"result":"overloaded","usage":{}}`
+	bin, _, _ := fakeClaude(t, []string{lineLimitWarn, errRes}, "")
+	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
+	if res.Status != StatusError {
+		t.Fatalf("status = %q", res.Status)
+	}
+}
+
+func TestUsageFromStreamHandlesRateLimitedStream(t *testing.T) {
+	path := writeStream(t, lineInit, lineAsst1, lineLimitWarn, lineLimitRejected, lineLimitText, lineLimitResult)
+	u, model, finished, err := UsageFromStream(path)
+	if err != nil || !finished || model != "claude-haiku" || u.InputTokens != 2 {
+		t.Fatalf("u=%+v model=%q finished=%v err=%v", u, model, finished, err)
+	}
+}

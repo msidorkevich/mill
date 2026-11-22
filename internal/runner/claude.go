@@ -187,7 +187,26 @@ type streamParser struct {
 	final   *resultEvent
 	badJSON int
 	model   string // model named by the system/init event
+
+	rejected *rateLimitInfo // latest rate_limit_event with status rejected
+	warning  string         // usage warning from the first allowed_warning event
 }
+
+type rateLimitInfo struct {
+	Status        string  `json:"status"`
+	ResetsAt      int64   `json:"resetsAt"`
+	RateLimitType string  `json:"rateLimitType"`
+	Utilization   float64 `json:"utilization"`
+}
+
+func (r rateLimitInfo) resetTime() time.Time {
+	if r.ResetsAt <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(r.ResetsAt, 0)
+}
+
+const localTimeFormat = "2006-01-02 15:04 MST"
 
 type usageJSON struct {
 	InputTokens         int64 `json:"input_tokens"`
@@ -211,6 +230,7 @@ type resultEvent struct {
 	TerminalReason    string            `json:"terminal_reason"`
 	Errors            []string          `json:"errors"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
+	APIErrorStatus    int               `json:"api_error_status"`
 }
 
 func (p *streamParser) line(b []byte) {
@@ -219,6 +239,7 @@ func (p *streamParser) line(b []byte) {
 		Subtype string          `json:"subtype"`
 		Model   string          `json:"model"`
 		Message json.RawMessage `json:"message"`
+		Info    *rateLimitInfo  `json:"rate_limit_info"`
 	}
 	if err := json.Unmarshal(b, &ev); err != nil {
 		p.mu.Lock()
@@ -232,6 +253,25 @@ func (p *streamParser) line(b []byte) {
 			p.mu.Lock()
 			p.model = ev.Model
 			p.mu.Unlock()
+		}
+	case "rate_limit_event":
+		if ev.Info == nil {
+			return
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		switch ev.Info.Status {
+		case "rejected":
+			info := *ev.Info
+			p.rejected = &info
+		case "allowed_warning":
+			if p.warning == "" {
+				msg := fmt.Sprintf("usage at %.0f%% of the %s limit", ev.Info.Utilization*100, ev.Info.RateLimitType)
+				if t := ev.Info.resetTime(); !t.IsZero() {
+					msg += ", resets at " + t.Local().Format(localTimeFormat)
+				}
+				p.warning = msg
+			}
 		}
 	case "assistant":
 		// message is decoded only here: other event types may carry a string.
@@ -338,6 +378,9 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 			res.Warnings = append(res.Warnings, fmt.Sprintf("cost could not be estimated: no known rates for model %q", model))
 		}
 	}
+	if p.warning != "" {
+		res.Warnings = append(res.Warnings, p.warning)
+	}
 	if p.badJSON > 0 {
 		res.Warnings = append(res.Warnings, fmt.Sprintf("%d unparseable output line(s)", p.badJSON))
 	}
@@ -356,6 +399,18 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 	case strings.Contains(p.final.Subtype, "budget"):
 		res.Status = StatusBudgetExceeded
 		res.Error = "claude stopped at --max-budget-usd (" + p.final.Subtype + ")"
+	case p.final.APIErrorStatus == 429 && p.final.IsError, p.rejected != nil && (p.final.IsError || p.final.Subtype != "success"):
+		res.Status = StatusRateLimited
+		res.Error = "claude usage limit reached"
+		if p.rejected != nil {
+			res.LimitType, res.ResetsAt = p.rejected.RateLimitType, p.rejected.resetTime()
+			if res.LimitType != "" {
+				res.Error += " (" + res.LimitType + ")"
+			}
+			if !res.ResetsAt.IsZero() {
+				res.Error += ", resets at " + res.ResetsAt.Local().Format(localTimeFormat)
+			}
+		}
 	case p.final.IsError || p.final.Subtype != "success":
 		res.Status = StatusError
 		res.Error = strings.TrimSpace(fmt.Sprintf("claude %s: %s %s", p.final.Subtype,
