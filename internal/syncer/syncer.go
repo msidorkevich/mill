@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gate"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/plan"
@@ -37,6 +38,9 @@ type Options struct {
 	Paths project.Paths
 	Host  host.Host // runs the gate; nil means host.NewExec()
 	Out   io.Writer // one progress line per action; nil discards
+	// ReportRedGate leaves a task whose gate fails after a restack unblocked and lists it in
+	// Result.GateRed, for the caller to fix (the keeper). Off, such a task is blocked.
+	ReportRedGate bool
 }
 
 // Landed is a task found merged on the remote.
@@ -78,6 +82,12 @@ type Blocked struct {
 	Reason string `json:"reason"`
 }
 
+// GateRed is a restacked task whose gate failed, left unblocked because ReportRedGate is set.
+type GateRed struct {
+	TaskID string      `json:"task_id"`
+	Gate   gate.Result `json:"gate"`
+}
+
 // Manual is a fan-in task that sync does not restack.
 type Manual struct {
 	TaskID string   `json:"task_id"`
@@ -98,6 +108,8 @@ type Result struct {
 	Blocked        []Blocked        `json:"blocked"`
 	Manual         []Manual         `json:"manual"`
 	GoalsLanded    []string         `json:"goals_landed"`
+	// GateRed lists restacked tasks whose gate failed; only filled when ReportRedGate is set.
+	GateRed []GateRed `json:"gate_red,omitempty"`
 }
 
 type syncer struct {
@@ -490,6 +502,11 @@ func (s *syncer) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 		return s.block(ctx, t.ID, fmt.Sprintf("sync: the gate could not be re-run after the restack: %v", err))
 	}
 	if !g.Passed {
+		if s.ReportRedGate {
+			s.res.GateRed = append(s.res.GateRed, GateRed{TaskID: t.ID, Gate: g})
+			s.logf("%s: the gate failed after restacking onto %s; left for the fixer", t.ID, onto)
+			return nil
+		}
 		return s.block(ctx, t.ID, fmt.Sprintf("sync: the gate failed after restacking onto %s:\n%s", onto, publish.FailedCommands(g)))
 	}
 	br.GateSHA = newHead
