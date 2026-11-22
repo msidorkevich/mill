@@ -120,6 +120,18 @@ func (s *Store) SetTaskStatus(ctx context.Context, id, status, phase, reason str
 	return err
 }
 
+// SetTaskReason changes a task's reason only; its status and phase are left as they are.
+func (s *Store) SetTaskReason(ctx context.Context, id, reason string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET reason = ?, updated_at = ? WHERE id = ?`, reason, s.ts(), id)
+	if err != nil {
+		return fmt.Errorf("set reason of task %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %s: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // Attempt is one agent run for a task.
 type Attempt struct {
 	ID         int64        `json:"id"`

@@ -716,3 +716,27 @@ func TestUpdateAttemptUsageOnlyWhileRunning(t *testing.T) {
 		t.Fatalf("finished attempt changed: %+v", list[0])
 	}
 }
+
+func TestSetTaskReasonKeepsStatusAndPhase(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "t1", TaskVerified, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskReason(ctx, "t1", "conflicts with t2"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTask(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != TaskVerified || got.Phase != "" || got.Reason != "conflicts with t2" {
+		t.Fatalf("task = %+v", got)
+	}
+	if err := s.SetTaskReason(ctx, "nope", "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing task: err = %v, want ErrNotFound", err)
+	}
+}

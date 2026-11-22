@@ -1,0 +1,355 @@
+package keeper
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/msidorkevich/mill/internal/gate"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/publish"
+	"github.com/msidorkevich/mill/internal/store"
+)
+
+// CombinedResult is what one combined check found.
+type CombinedResult struct {
+	Ran      bool     `json:"ran"`      // false when fewer than two branches were ready
+	Passed   bool     `json:"passed"`   // every ready branch merged together passes the gate
+	Branches []string `json:"branches"` // the ready tasks, in merge order
+	Culprit  string   `json:"culprit,omitempty"`
+	Partner  string   `json:"partner,omitempty"` // empty when the culprit is red with the base alone
+	Failed   string   `json:"failed,omitempty"`  // what failed for the culprit (and its partner)
+	Probes   int      `json:"probes"`            // gate runs on merged states
+}
+
+// readyBranch is a verified or published task whose gate ran at its head.
+type readyBranch struct {
+	task store.Task
+	br   store.Branch
+}
+
+// combined holds the state of one combined check.
+type combined struct {
+	Options
+	dir    string // the throwaway worktree
+	base   string // the remote base branch tip
+	logDir string
+	host   host.Host
+	env    []string
+	res    *CombinedResult
+}
+
+// probeResult is the outcome of the gate on one merged state.
+type probeResult struct {
+	red    bool
+	failed string
+}
+
+// Combined merges every ready branch onto the remote base branch in a throwaway worktree and
+// runs the gate there. When it is red it bisects the merge order for the culprit and looks for
+// the earlier branch it conflicts with; such a pair is recorded as a combined-conflict event
+// and in both tasks' reasons, without blocking either. A gate that cannot run is an error.
+func Combined(ctx context.Context, o Options) (res CombinedResult, err error) {
+	res = CombinedResult{Branches: []string{}}
+	ready, err := readyBranches(ctx, o)
+	if err != nil {
+		return res, err
+	}
+	for _, r := range ready {
+		res.Branches = append(res.Branches, r.task.ID)
+	}
+	if len(ready) < 2 {
+		return res, nil
+	}
+	res.Ran = true
+
+	upstream := o.Cfg.Remote + "/" + o.Cfg.BaseBranch
+	base, err := gitx.RevParse(ctx, o.Paths.Root, "refs/remotes/"+upstream)
+	if err != nil {
+		return res, fmt.Errorf("combined check: remote %s has no branch %s: %w", o.Cfg.Remote, o.Cfg.BaseBranch, err)
+	}
+	home := ""
+	if o.Pipeline != nil {
+		home = o.Pipeline.Home
+	}
+	if home == "" {
+		if home, err = os.UserHomeDir(); err != nil {
+			return res, fmt.Errorf("combined check: no home directory for the default worktree root; set worktree_root: %w", err)
+		}
+	}
+	wtRoot := o.Cfg.Worktrees(o.Paths.Root, home)
+	if err := os.MkdirAll(wtRoot, 0o755); err != nil {
+		return res, fmt.Errorf("combined check: create the worktree root %s: %w", wtRoot, err)
+	}
+	dir, err := os.MkdirTemp(wtRoot, ".combined-")
+	if err != nil {
+		return res, fmt.Errorf("combined check: create a throwaway worktree under %s: %w", wtRoot, err)
+	}
+	defer func() {
+		if cerr := removeThrowaway(context.WithoutCancel(ctx), o.Paths.Root, dir); cerr != nil {
+			err = errors.Join(err, cerr)
+		}
+	}()
+	if err := gitx.AddDetachedWorktree(ctx, o.Paths.Root, dir, base); err != nil {
+		return res, fmt.Errorf("combined check: add a throwaway worktree at %s: %w", dir, err)
+	}
+
+	h := o.Host
+	if h == nil {
+		h = host.NewExec()
+	}
+	c := &combined{
+		Options: o, dir: dir, base: base, host: h, res: &res,
+		logDir: filepath.Join(o.Paths.Runs, "combined", filepath.Base(dir)),
+		env:    host.AllowEnv(os.Environ(), append(append([]string{}, host.DefaultEnvAllow...), o.Cfg.EnvAllow...)),
+	}
+	c.logf("combined check: merging %d ready branches onto %s (%s)", len(ready), upstream, short(base))
+
+	all, err := c.probe(ctx, ready)
+	if err != nil {
+		return res, err
+	}
+	if !all.red {
+		res.Passed = true
+		c.logf("combined check: green")
+		return res, nil
+	}
+
+	// The shortest red prefix: prefixes shorter than lo are green, the prefix of hi is red.
+	failures := map[int]probeResult{len(ready): all}
+	lo, hi := 1, len(ready)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		p, err := c.probe(ctx, ready[:mid])
+		if err != nil {
+			return res, err
+		}
+		if p.red {
+			failures[mid] = p
+			hi = mid
+		} else {
+			lo = mid + 1
+		}
+	}
+	culprit := ready[hi-1]
+	res.Culprit = culprit.task.ID
+
+	// A culprit red with the base alone has no partner: every pair with it would be red.
+	alone := failures[1]
+	if hi > 1 {
+		if alone, err = c.probe(ctx, []readyBranch{culprit}); err != nil {
+			return res, err
+		}
+	}
+	if alone.red {
+		res.Failed = alone.failed
+		c.logf("combined check: %s is red with the base alone:\n%s", culprit.task.ID, alone.failed)
+		return res, nil
+	}
+
+	for _, p := range ready[:hi-1] {
+		pr, err := c.probe(ctx, []readyBranch{p, culprit})
+		if err != nil {
+			return res, err
+		}
+		if pr.red {
+			res.Partner, res.Failed = p.task.ID, pr.failed
+			return res, c.recordPair(ctx, culprit.task, p.task, pr.failed)
+		}
+	}
+
+	var earlier []string
+	for _, p := range ready[:hi-1] {
+		earlier = append(earlier, p.task.ID)
+	}
+	res.Failed = fmt.Sprintf("red only together with several of %s, never with one of them alone:\n%s",
+		strings.Join(earlier, ", "), failures[hi].failed)
+	c.logf("combined check: %s is %s", culprit.task.ID, res.Failed)
+	return res, nil
+}
+
+func (c *combined) logf(format string, a ...any) {
+	if c.Out != nil {
+		fmt.Fprintf(c.Out, format+"\n", a...)
+	}
+}
+
+// probe rebuilds the throwaway worktree as the base tip with branches merged in order and runs
+// check_cmd plus each merged task's checks. A merge conflict is red. An error means the state
+// could not be built or the gate could not run.
+func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResult, error) {
+	if _, err := gitx.Run(ctx, c.dir, "reset", "-q", "--hard", c.base); err != nil {
+		return probeResult{}, fmt.Errorf("combined check: reset the throwaway worktree to %s: %w", short(c.base), err)
+	}
+	if _, err := gitx.Run(ctx, c.dir, "clean", "-q", "-ffdx"); err != nil {
+		return probeResult{}, fmt.Errorf("combined check: clean the throwaway worktree: %w", err)
+	}
+	c.res.Probes++
+	var ids []string
+	cmds := []string{c.Cfg.CheckCmd}
+	for _, b := range branches {
+		ids = append(ids, b.task.ID)
+		err := gitx.Merge(ctx, c.dir, b.br.HeadSHA, fmt.Sprintf("mill: combined check merges %s (%s)", b.br.Name, b.task.ID))
+		var ce *gitx.ConflictError
+		if errors.As(err, &ce) {
+			failed := fmt.Sprintf("  merge conflict: %s (%s) conflicts in %s", b.task.ID, b.br.Name, strings.Join(ce.Files, ", "))
+			c.logf("combined check: probe %d [%s]: red\n%s", c.res.Probes, strings.Join(ids, " "), failed)
+			return probeResult{red: true, failed: failed}, nil
+		}
+		if err != nil {
+			return probeResult{}, fmt.Errorf("combined check: merge %s (%s) into the throwaway worktree: %w", b.task.ID, b.br.Name, err)
+		}
+		cmds = append(cmds, b.task.Checks...)
+	}
+	g := gate.Run(ctx, gate.Options{
+		Host: c.host, Dir: c.dir, Cmds: cmds, LogDir: filepath.Join(c.logDir, fmt.Sprintf("probe-%d", c.res.Probes)),
+		Env: c.env, Timeout: c.Cfg.GateTimeout.Duration,
+	})
+	if ctx.Err() != nil {
+		return probeResult{}, fmt.Errorf("combined check interrupted: %w", ctx.Err())
+	}
+	if err := cannotRun(g); err != nil {
+		return probeResult{}, fmt.Errorf("combined check: the gate could not run on [%s]: %w", strings.Join(ids, " "), err)
+	}
+	if g.Passed {
+		c.logf("combined check: probe %d [%s]: green", c.res.Probes, strings.Join(ids, " "))
+		return probeResult{}, nil
+	}
+	failed := publish.FailedCommands(g)
+	c.logf("combined check: probe %d [%s]: red\n%s", c.res.Probes, strings.Join(ids, " "), failed)
+	return probeResult{red: true, failed: failed}, nil
+}
+
+// cannotRun reports why a gate result is not a verdict on the code: no commands, or a command
+// that could not be started or was interrupted.
+func cannotRun(g gate.Result) error {
+	if len(g.Commands) == 0 {
+		return errors.New(g.Reason)
+	}
+	for _, cr := range g.Commands {
+		if strings.HasPrefix(cr.Error, "could not run") || cr.Error == "interrupted" {
+			return fmt.Errorf("%s: %s", cr.Cmd, cr.Error)
+		}
+	}
+	return nil
+}
+
+// recordPair appends a combined-conflict event naming both tasks and sets both reasons. The
+// statuses are left alone.
+func (c *combined) recordPair(ctx context.Context, culprit, partner store.Task, failed string) error {
+	goalID := ""
+	if culprit.GoalID == partner.GoalID {
+		goalID = culprit.GoalID
+	}
+	if _, err := c.Store.AppendEvent(ctx, "combined-conflict", goalID, culprit.ID, map[string]any{
+		"tasks": []string{partner.ID, culprit.ID}, "culprit": culprit.ID, "partner": partner.ID,
+		"base": c.base, "failed": failed}); err != nil {
+		return fmt.Errorf("record the combined conflict of %s and %s: %w", culprit.ID, partner.ID, err)
+	}
+	for _, p := range [][2]string{{culprit.ID, partner.ID}, {partner.ID, culprit.ID}} {
+		reason := fmt.Sprintf("combined check: merged together with %s onto %s (%s) the gate fails:\n%s",
+			p[1], c.Cfg.Remote+"/"+c.Cfg.BaseBranch, short(c.base), failed)
+		if err := c.Store.SetTaskReason(ctx, p[0], reason); err != nil {
+			return fmt.Errorf("record the combined conflict in the reason of %s: %w", p[0], err)
+		}
+	}
+	c.logf("combined check: %s and %s fail together:\n%s", partner.ID, culprit.ID, failed)
+	return nil
+}
+
+// removeThrowaway removes the throwaway worktree and git's record of it.
+func removeThrowaway(ctx context.Context, repo, dir string) error {
+	var errs []error
+	if listed, err := worktreeListed(ctx, repo, dir); err != nil {
+		errs = append(errs, err)
+	} else if listed {
+		if err := gitx.RemoveWorktree(ctx, repo, dir); err != nil {
+			errs = append(errs, fmt.Errorf("remove the throwaway worktree %s: %w", dir, err))
+		}
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		errs = append(errs, fmt.Errorf("delete the throwaway worktree directory %s: %w", dir, err))
+	}
+	if err := gitx.PruneWorktrees(ctx, repo); err != nil {
+		errs = append(errs, fmt.Errorf("prune worktrees after removing %s: %w", dir, err))
+	}
+	return errors.Join(errs...)
+}
+
+// worktreeListed reports whether git records a worktree at dir.
+func worktreeListed(ctx context.Context, repo, dir string) (bool, error) {
+	out, err := gitx.Run(ctx, repo, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("list worktrees: %w", err)
+	}
+	for _, l := range strings.Split(out, "\n") {
+		if p, ok := strings.CutPrefix(l, "worktree "); ok && filepath.Clean(p) == filepath.Clean(dir) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// readyBranches lists the verified and published tasks whose gate ran at their head, ordered
+// by goal and then by plan order.
+func readyBranches(ctx context.Context, o Options) ([]readyBranch, error) {
+	var goals []store.Goal
+	if o.Goal != "" {
+		g, err := o.Store.GetGoal(ctx, o.Goal)
+		if err != nil {
+			return nil, fmt.Errorf("goal %s: %w", o.Goal, err)
+		}
+		goals = []store.Goal{g}
+	} else {
+		var err error
+		if goals, err = o.Store.ListGoals(ctx); err != nil {
+			return nil, err
+		}
+	}
+	var out []readyBranch
+	for _, g := range goals {
+		tasks, err := o.Store.GoalTasks(ctx, g.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(tasks) == 0 {
+			continue
+		}
+		byID := map[string]store.Task{}
+		for _, t := range tasks {
+			byID[t.ID] = t
+		}
+		var pl plan.Plan
+		if err := json.Unmarshal(g.Plan, &pl); err != nil {
+			return nil, fmt.Errorf("goal %s has an unreadable plan: %w", g.ID, err)
+		}
+		locals, err := pl.Order()
+		if err != nil {
+			return nil, fmt.Errorf("goal %s plan: %w", g.ID, err)
+		}
+		for _, l := range locals {
+			t, ok := byID[store.TaskID(g.ID, l)]
+			if !ok || (t.Status != store.TaskVerified && t.Status != store.TaskPublished) {
+				continue
+			}
+			br, err := o.Store.GetBranch(ctx, t.ID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("task %s is %s but its branch cannot be loaded: %w", t.ID, t.Status, err)
+			}
+			if br.Name == "" || br.HeadSHA == "" || br.GateSHA != br.HeadSHA {
+				continue
+			}
+			out = append(out, readyBranch{task: t, br: br})
+		}
+	}
+	return out, nil
+}
