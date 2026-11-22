@@ -187,4 +187,32 @@ Verified tasks are not run again.
 `mill run` can work on a repository at a time; a second one fails and says so. Wait for the
 first to finish or stop it, then run again.
 
+### Reviewing, publishing and syncing
+
+Once a goal's tasks are verified, you review them in mill and publish them for your forge.
+
+- `mill review` lists verified and published tasks. `mill review show g1/a` prints the spec,
+  acceptance, last verdict and gate, attempts, cost, branch and diff stat (`--diff` for the full
+  diff).
+- `mill review approve g1/a` publishes the task. `mill review changes g1/a -m "text"` records
+  your comments (a blank line separates findings) and sends the task back for another attempt.
+  `mill review reject g1/a -m "why"` blocks the task and puts its non-landed descendants on hold.
+
+**What a published branch contains.** `review/g1/a` on the remote is one squashed commit with
+the task's whole change, not its attempt history. The message holds a description (title,
+spec, acceptance) and trailers: `Mill-Task: g1/a`, `Mill-Goal`, and for a stacked task
+`Mill-Base` (the parent's published commit). The commit is stacked on its parent: the first
+parent of `review/g1/b` is `review/g1/a`'s commit, so a forge shows only b's own change.
+A task whose dependencies have not been published is refused, and a fan-in task waits for its
+other dependencies to land. Approving again force-pushes with a lease.
+
+**Syncing.** After you merge on the forge, `mill sync` fetches and detects what landed, by
+`ancestor` (merge commit), `patch` (squash or rebase merge with the same patch) or `trailer`
+(the `Mill-Task` trailer survived an edited merge). Children of a landed task are restacked
+onto `<remote>/<base_branch>`, re-gated and re-published, so their review branches track main.
+When every task of a goal has landed, the goal becomes `landed`.
+
+**mill only ever pushes `review/*` branches.** It never pushes to `main` or any other branch;
+merging stays with you and your forge.
+
 Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.
