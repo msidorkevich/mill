@@ -85,6 +85,24 @@ func TestKeepJSONIsOneDocumentWithoutProgress(t *testing.T) {
 	if doc.Schema != "mill/keep@1" || len(doc.Keeper) == 0 || string(doc.Keeper) == "null" || !doc.Combined.Ran || !doc.Combined.Passed {
 		t.Errorf("document = %+v\n%s", doc, r.stdout)
 	}
+	var k map[string]json.RawMessage
+	if err := json.Unmarshal(doc.Keeper, &k); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"sync", "rebased", "resolved_rerere", "resolved_agent", "fixed", "blocked", "republished", "needs_republish", "skipped"} {
+		if _, ok := k[f]; !ok {
+			t.Errorf("keeper lacks %q:\n%s", f, r.stdout)
+		}
+	}
+	var q map[string]json.RawMessage
+	if err := json.Unmarshal(k["queue"], &q); err != nil {
+		t.Fatalf("keeper.queue: %v\n%s", err, r.stdout)
+	}
+	for _, f := range []string{"published", "waiting"} {
+		if v := strings.Join(strings.Fields(string(q[f])), ""); v != "[]" {
+			t.Errorf("keeper.queue.%s = %s, want []", f, q[f])
+		}
+	}
 }
 
 func TestKeepRefusesWhileAnotherHolderHasTheLock(t *testing.T) {

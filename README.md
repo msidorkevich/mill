@@ -97,6 +97,7 @@ mill review show g1/a           # spec, acceptance, last verdict and gate, attem
 mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
 mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
 mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
+mill review approve --goal g1   # approve every verified task, parents first; children of unpublished parents are queued
 mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
 mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
 ```
@@ -225,13 +226,31 @@ Once a goal's tasks are verified, you review them in mill and publish them for y
   your comments (a blank line separates findings) and sends the task back for another attempt.
   `mill review reject g1/a -m "why"` blocks the task and puts its non-landed descendants on hold.
 
+**The approval queue.** Approving a verified task whose parent is not published or landed yet
+does not fail: mill records the approval and prints
+`approved g1/b: queued, will publish when parent g1/a is published or landed` (exit 0). Other
+refusals (red gate, conflict, wrong status) still fail and record nothing. `mill review` shows
+a queued task with status `approved` and what it waits for (WAITING FOR, `waiting` in JSON);
+`mill review show` prints when and at which attempt it was approved. Each `mill keep` pass
+publishes queued tasks whose dependencies now allow it. An approval covers the code it was given
+for, so it is cleared when the task changes: `mill review changes`, `mill review reject`, a task
+put back to pending (`--retry-blocked`, crash recovery) or a new implementer or fixer attempt
+(including the fixer `mill keep` runs after a red gate). `mill keep` also clears an approval
+whose attempt is older than the task's latest one (for example after the resolver agent changed
+the code). Restacks keep the approval: a rebase that replays the same commits onto a moved base
+is still the approved change.
+
+The recommended loop for a stack: `mill review approve --goal g1` publishes what it can and
+queues the rest, then `mill keep --watch` publishes each queued child as soon as you merge its
+parent on the forge.
+
 **What a published branch contains.** `review/g1/a` on the remote is one squashed commit with
 the task's whole change, not its attempt history. The message holds a description (title,
 spec, acceptance) and trailers: `Mill-Task: g1/a`, `Mill-Goal`, and for a stacked task
 `Mill-Base` (the parent's published commit). The commit is stacked on its parent: the first
 parent of `review/g1/b` is `review/g1/a`'s commit, so a forge shows only b's own change.
-A task whose dependencies have not been published is refused, and a fan-in task waits for its
-other dependencies to land. Approving again force-pushes with a lease.
+A task whose dependencies have not been published is not pushed (it is queued, see above), and
+a fan-in task waits for its other dependencies to land. Approving again force-pushes with a lease.
 
 **Syncing.** After you merge on the forge, `mill sync` fetches and detects what landed, by
 `ancestor` (merge commit), `patch` (squash or rebase merge with the same patch) or `trailer`
@@ -264,13 +283,17 @@ command holds it. One pass does the following:
 - **Asks the resolver agent** for the conflicts rerere does not know.
 - **Fixes red gates.** When a restacked branch's gate turns red, the fixer agent runs.
 - **Re-publishes** published tasks whose branch changed, so `review/*` follows.
+- **Publishes the approval queue** last, dependencies first: each approved task is published as
+  `mill review approve` would. One still refused only because of a dependency stays queued and
+  is listed under Waiting with the reason; any other refusal or error blocks the task with a
+  reason naming the publish failure.
 - **Runs the combined check** when at least two branches are ready (or with `--combined`): all
   ready branches are merged onto `<remote>/<base_branch>` in a throwaway worktree and the gate
   runs there. When it fails, mill reports the culprit and its partner with the failed commands.
   Neither task is blocked.
 
 The summary lists Landed, Rebased, Resolved by rerere, Resolved by agent, Fixed, Republished,
-Blocked (with the reason; inspect with `mill task show <id>`) and Combined check, or prints
+Published from queue, Waiting (with the reason), Blocked (with the reason; inspect with `mill task show <id>`) and Combined check, or prints
 `Nothing to do.`. A pass that completes exits 0, even with blocked tasks.
 
 Flags:
@@ -282,6 +305,8 @@ Flags:
 - `--combined`: only fetch and run the combined check; nothing is rebased.
 - `--json`: print one document per pass with `"schema": "mill/keep@1"`, holding the keeper
   result (`keeper`, null with `--combined`) and the `combined` result. Progress goes to stderr.
+  `keeper.queue` holds `published` (`task_id`, `ref`, `sha`) and `waiting` (`task_id`,
+  `reason`); both are empty arrays when nothing is queued.
 
 **mill only ever pushes `review/*` branches.** It never pushes to `main` or any other branch;
 merging stays with you and your forge.
