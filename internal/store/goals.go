@@ -389,6 +389,9 @@ func (s *Store) ResetGoalTasks(ctx context.Context, goalID string, statuses []st
 			map[string]string{"status": TaskPending, "phase": "", "reason": reason}); err != nil {
 			return nil, err
 		}
+		if err := s.clearApprovalTx(ctx, tx, goalID, id, reason); err != nil {
+			return nil, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("reset tasks of goal %s: %w", goalID, err)

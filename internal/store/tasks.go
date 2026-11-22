@@ -53,6 +53,10 @@ type Task struct {
 	Reason    string    `json:"reason,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// Approved is true while the operator's approval of the task's current code stands.
+	Approved        bool   `json:"approved,omitempty"`
+	ApprovedAt      string `json:"approved_at,omitempty"`
+	ApprovedAttempt int    `json:"approved_attempt,omitempty"`
 }
 
 func (s *Store) ts() string { return s.now().UTC().Format(timeLayout) }
@@ -78,12 +82,13 @@ func (s *Store) CreateTask(ctx context.Context, spec taskspec.Spec) error {
 // GetTask loads a task.
 func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 	var t Task
-	var goal sql.NullString
+	var goal, approvedAt sql.NullString
+	var approvedAttempt sql.NullInt64
 	var acc, chk, own, created, updated string
 	err := s.db.QueryRowContext(ctx, `SELECT id, goal_id, title, kind, spec, acceptance, checks, owns,
-		size, status, phase, reason, created_at, updated_at FROM tasks WHERE id = ?`, id).
+		size, status, phase, reason, created_at, updated_at, approved_at, approved_attempt FROM tasks WHERE id = ?`, id).
 		Scan(&t.ID, &goal, &t.Title, &t.Kind, &t.Spec.Spec, &acc, &chk, &own, &t.Size, &t.Status,
-			&t.Phase, &t.Reason, &created, &updated)
+			&t.Phase, &t.Reason, &created, &updated, &approvedAt, &approvedAttempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, fmt.Errorf("task %s: %w", id, ErrNotFound)
 	}
@@ -91,6 +96,9 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 		return Task{}, err
 	}
 	t.GoalID = goal.String
+	t.Approved = approvedAt.Valid
+	t.ApprovedAt = approvedAt.String
+	t.ApprovedAttempt = int(approvedAttempt.Int64)
 	for _, f := range []struct {
 		raw string
 		dst *[]string
@@ -105,8 +113,14 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 }
 
 // SetTaskStatus changes a task's status, phase and reason and records a task-status event.
+// Setting a task pending clears its approval in the same transaction.
 func (s *Store) SetTaskStatus(ctx context.Context, id, status, phase, reason string) error {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set status of task %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
 		`UPDATE tasks SET status = ?, phase = ?, reason = ?, updated_at = ? WHERE id = ?`,
 		status, phase, reason, s.ts(), id)
 	if err != nil {
@@ -115,9 +129,184 @@ func (s *Store) SetTaskStatus(ctx context.Context, id, status, phase, reason str
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("task %s: %w", id, ErrNotFound)
 	}
-	_, err = s.AppendEvent(ctx, "task-status", "", id,
-		map[string]string{"status": status, "phase": phase, "reason": reason})
-	return err
+	if err := s.appendEventTx(ctx, tx, "task-status", "", id,
+		map[string]string{"status": status, "phase": phase, "reason": reason}); err != nil {
+		return err
+	}
+	if status == TaskPending {
+		if err := s.clearApprovalTx(ctx, tx, "", id, "task set pending: "+reason); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// ApproveTask records the operator's approval of a verified task's attempt and a
+// task-approved event. A task in any other status is refused and left unchanged.
+func (s *Store) ApproveTask(ctx context.Context, id string, attempt int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("approve task %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	var status, g string
+	err = tx.QueryRowContext(ctx, `SELECT status, COALESCE(goal_id, '') FROM tasks WHERE id = ?`, id).Scan(&status, &g)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("task %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("approve task %s: %w", id, err)
+	}
+	switch status {
+	case TaskVerified:
+	case TaskPublished:
+		return fmt.Errorf("task %s is published, not verified: published tasks are never queued, merge or reject its pull request instead", id)
+	default:
+		return fmt.Errorf("task %s is %s, not verified: only a verified task can be approved", id, status)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET approved_at = ?, approved_attempt = ? WHERE id = ?`,
+		s.ts(), attempt, id); err != nil {
+		return fmt.Errorf("approve task %s: %w", id, err)
+	}
+	if err := s.appendEventTx(ctx, tx, "task-approved", g, id, map[string]int{"attempt": attempt}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("approve task %s: %w", id, err)
+	}
+	return nil
+}
+
+// ClearApproval clears a task's approval and records a task-approval-cleared event with
+// reason. A task without an approval is left alone and no event is recorded.
+func (s *Store) ClearApproval(ctx context.Context, id, reason string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("clear approval of %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	var g string
+	err = tx.QueryRowContext(ctx, `SELECT COALESCE(goal_id, '') FROM tasks WHERE id = ?`, id).Scan(&g)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("task %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return fmt.Errorf("clear approval of %s: %w", id, err)
+	}
+	if err := s.clearApprovalTx(ctx, tx, g, id, reason); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("clear approval of %s: %w", id, err)
+	}
+	return nil
+}
+
+// clearApprovalTx clears a task's approval through tx and records task-approval-cleared, only
+// when the task has an approval.
+func (s *Store) clearApprovalTx(ctx context.Context, tx *sql.Tx, goalID, id, reason string) error {
+	res, err := tx.ExecContext(ctx, `UPDATE tasks SET approved_at = NULL, approved_attempt = NULL
+		WHERE id = ? AND approved_at IS NOT NULL`, id)
+	if err != nil {
+		return fmt.Errorf("clear approval of %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("clear approval of %s: %w", id, err)
+	}
+	if n == 0 {
+		return nil
+	}
+	return s.appendEventTx(ctx, tx, "task-approval-cleared", goalID, id, map[string]string{"reason": reason})
+}
+
+// ApprovedTasks returns the approved tasks whose status is verified, dependencies before
+// dependents (ties by created_at, then id).
+func (s *Store) ApprovedTasks(ctx context.Context) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM tasks WHERE approved_at IS NOT NULL AND status = ?
+		ORDER BY created_at, id`, TaskVerified)
+	if err != nil {
+		return nil, fmt.Errorf("list approved tasks: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	// Order over all of task_deps (deps), so an approved task follows an approved ancestor
+	// even when the task between them is not in the list.
+	drows, err := s.db.QueryContext(ctx, `SELECT task_id, depends_on FROM deps`)
+	if err != nil {
+		return nil, fmt.Errorf("list approved tasks: %w", err)
+	}
+	parents := map[string][]string{}
+	for drows.Next() {
+		var c, p string
+		if err := drows.Scan(&c, &p); err != nil {
+			drows.Close()
+			return nil, err
+		}
+		parents[c] = append(parents[c], p)
+	}
+	if err := drows.Err(); err != nil {
+		drows.Close()
+		return nil, err
+	}
+	drows.Close()
+
+	// ancestors[id] is every task id depends on, directly or transitively.
+	ancestors := map[string]map[string]bool{}
+	for _, id := range ids {
+		seen := map[string]bool{}
+		queue := append([]string{}, parents[id]...)
+		for len(queue) > 0 {
+			p := queue[0]
+			queue = queue[1:]
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			queue = append(queue, parents[p]...)
+		}
+		ancestors[id] = seen
+	}
+	// Repeatedly take the first task (in created_at, id order) that depends on none of the
+	// remaining tasks. A dependency cycle cannot block the loop: it falls back to the first.
+	var out []Task
+	remaining := ids
+	for len(remaining) > 0 {
+		pick := 0
+		for i, c := range remaining {
+			ready := true
+			for j, o := range remaining {
+				if i != j && ancestors[c][o] {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				pick = i
+				break
+			}
+		}
+		t, err := s.GetTask(ctx, remaining[pick])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+		remaining = append(append([]string{}, remaining[:pick]...), remaining[pick+1:]...)
+	}
+	return out, nil
 }
 
 // SetTaskReason changes a task's reason only; its status and phase are left as they are.
@@ -157,15 +346,45 @@ const (
 )
 
 // StartAttempt records the start of an agent run and returns its id.
+// An implementer or fixer run gives the task new code, so it clears the task's approval in
+// the same transaction; other roles (verifier, resolver) keep it.
 func (s *Store) StartAttempt(ctx context.Context, taskID string, n int, role string) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("start attempt %s #%d %s: %w", taskID, n, role, err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO attempts (task_id, n, role, status, started_at) VALUES (?, ?, ?, ?, ?)`,
 		taskID, n, role, AttemptRunning, s.ts())
 	if err != nil {
 		return 0, fmt.Errorf("start attempt %s #%d %s: %w", taskID, n, role, err)
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("start attempt %s #%d %s: %w", taskID, n, role, err)
+	}
+	if role == RoleImplementer || role == RoleFixer {
+		var g string
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(goal_id, '') FROM tasks WHERE id = ?`, taskID).Scan(&g); err != nil {
+			return 0, fmt.Errorf("start attempt %s #%d %s: %w", taskID, n, role, err)
+		}
+		if err := s.clearApprovalTx(ctx, tx, g, taskID, fmt.Sprintf("%s attempt %d started", role, n)); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("start attempt %s #%d %s: %w", taskID, n, role, err)
+	}
+	return id, nil
 }
+
+// Attempt roles that give a task new code; they match runner.RoleImplementer and
+// runner.RoleFixer, which the pipeline passes to StartAttempt.
+const (
+	RoleImplementer = "implementer"
+	RoleFixer       = "fixer"
+)
 
 // FinishAttempt records how an agent run ended and what it spent. costEstimated marks a cost
 // estimated from tokens rather than reported by the agent.
@@ -428,6 +647,9 @@ func (s *Store) RecoverInterrupted(ctx context.Context, usage map[int64]Abandone
 			`INSERT INTO events (at, kind, goal_id, task_id, data) VALUES (?, ?, NULL, ?, ?)`,
 			now, "task-recovered", id, string(payload)); err != nil {
 			return 0, 0, fmt.Errorf("record recovery of %s: %w", id, err)
+		}
+		if err := s.clearApprovalTx(ctx, tx, "", id, reason); err != nil {
+			return 0, 0, err
 		}
 	}
 	arows, err := tx.QueryContext(ctx, `SELECT id FROM attempts WHERE status = ? ORDER BY id`, AttemptRunning)

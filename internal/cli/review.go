@@ -19,7 +19,7 @@ import (
 	"github.com/msidorkevich/mill/internal/store"
 )
 
-const reviewUsage = "Usage: mill review [--json] | show <id> [--diff] [--json] | changes <id> (-m <text> | --file <path>) | reject <id> -m <reason> | approve <id>"
+const reviewUsage = "Usage: mill review [--json] | show <id> [--diff] [--json] | changes <id> (-m <text> | --file <path>) | reject <id> -m <reason> | approve (<id>... | --goal <g>)"
 
 func runReview(ctx context.Context, env Env, args []string) int {
 	if len(args) > 0 {
@@ -60,31 +60,53 @@ func runReviewList(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	if tasks == nil {
-		tasks = []store.ReviewTask{}
+	rows := []reviewRow{}
+	for _, t := range tasks {
+		r := reviewRow{ReviewTask: t, Status: t.Status}
+		if t.Approved && t.Status == store.TaskVerified {
+			r.Status = "approved"
+			if r.Waiting, err = queuedReason(ctx, s, t.ID); err != nil {
+				return fail(err)
+			}
+		}
+		rows = append(rows, r)
 	}
 	if *asJSON {
 		doc := struct {
-			Schema string             `json:"schema"`
-			Tasks  []store.ReviewTask `json:"tasks"`
-		}{"mill/review-list@1", tasks}
+			Schema string      `json:"schema"`
+			Tasks  []reviewRow `json:"tasks"`
+		}{"mill/review-list@1", rows}
 		return encodeJSON(env, "mill review", doc)
 	}
-	if len(tasks) == 0 {
+	if len(rows) == 0 {
 		fmt.Fprintln(env.Stdout, "nothing to review")
 		return ExitOK
 	}
 	tw := tabwriter.NewWriter(env.Stdout, 2, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSTATUS\tATTEMPTS\tCOST\tTITLE\tBRANCH")
-	for _, t := range tasks {
+	fmt.Fprintln(tw, "ID\tSTATUS\tATTEMPTS\tCOST\tTITLE\tBRANCH\tWAITING FOR")
+	for _, t := range rows {
 		branch := "-"
 		if t.Status == store.TaskPublished && t.PublishedRef != "" {
 			branch = t.PublishedRef
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%.2f\t%s\t%s\n", t.ID, t.Status, t.Attempts, t.Usage.CostUSD, t.Title, branch)
+		waiting := "-"
+		if t.Status == "approved" {
+			if t.Waiting != "" {
+				waiting = t.Waiting
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%.2f\t%s\t%s\t%s\n", t.ID, t.Status, t.Attempts, t.Usage.CostUSD, t.Title, branch, waiting)
 	}
 	tw.Flush()
 	return ExitOK
+}
+
+// reviewRow is one task of `mill review`: a verified task with a queued approval has status
+// approved and says what it waits for.
+type reviewRow struct {
+	store.ReviewTask
+	Status  string `json:"status"`
+	Waiting string `json:"waiting,omitempty"`
 }
 
 func encodeJSON(env Env, name string, v any) int {
@@ -110,8 +132,10 @@ type reviewView struct {
 	Usage    budget.Usage           `json:"usage"`
 	Verdict  *prompt.VerifierOutput `json:"verdict,omitempty"`
 	Gate     *gate.Result           `json:"gate,omitempty"`
-	Events   []reviewEvent          `json:"events"` // gate-flaky, owns-outside, gate-base-failing of the last attempt
-	From     string                 `json:"from"`   // start of the diff
+	Approval string                 `json:"approval,omitempty"` // "approved <timestamp> at attempt <n>" while an approval stands
+	Waiting  string                 `json:"waiting,omitempty"`  // what a queued approval waits for
+	Events   []reviewEvent          `json:"events"`             // gate-flaky, owns-outside, gate-base-failing of the last attempt
+	From     string                 `json:"from"`               // start of the diff
 	DiffStat string                 `json:"diff_stat"`
 	Diff     string                 `json:"diff,omitempty"`
 }
@@ -157,6 +181,14 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 	}
 	if v.Usage, err = s.TaskUsage(ctx, id); err != nil {
 		return fail(err)
+	}
+	if v.Task.Approved {
+		v.Approval = fmt.Sprintf("approved %s at attempt %d", v.Task.ApprovedAt, v.Task.ApprovedAttempt)
+		if v.Task.Status == store.TaskVerified {
+			if v.Waiting, err = queuedReason(ctx, s, id); err != nil {
+				return fail(err)
+			}
+		}
 	}
 	evs, err := s.TaskEvents(ctx, id)
 	if err != nil {
@@ -234,6 +266,12 @@ func printReview(env Env, v reviewView) {
 	fmt.Fprintf(w, "  branch    %s (start %s, head %s)\n", v.Branch.Name, short(v.From), short(v.Branch.HeadSHA))
 	if v.Branch.PublishedRef != "" {
 		fmt.Fprintf(w, "  published %s\n", v.Branch.PublishedRef)
+	}
+	if v.Approval != "" {
+		fmt.Fprintf(w, "  approval  %s\n", v.Approval)
+		if v.Waiting != "" {
+			fmt.Fprintf(w, "  waiting   will publish when %s\n", v.Waiting)
+		}
 	}
 	fmt.Fprintf(w, "\nSpec:\n  %s\n", strings.ReplaceAll(t.Spec.Spec, "\n", "\n  "))
 	fmt.Fprintln(w, "\nAcceptance:")
@@ -393,11 +431,25 @@ func runReviewReject(ctx context.Context, env Env, args []string) int {
 	return ExitOK
 }
 
+const approveUsage = "mill review approve (<id>... | --goal <g>)"
+
 func runReviewApprove(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "review approve")
-	id, code, ok := goalArg(env, "review approve", "mill review approve <id>", fs, args)
-	if !ok {
-		return code
+	goalID := fs.String("goal", "", "approve every verified or published task of this goal, dependencies first")
+	var ids []string
+	for len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		ids, args = append(ids, args[0]), args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flagErrHelp) {
+			return ExitOK
+		}
+		return ExitUsage
+	}
+	ids = append(ids, fs.Args()...)
+	if (*goalID == "") == (len(ids) == 0) {
+		fmt.Fprintln(env.Stderr, "mill review approve: give one or more task ids or --goal <g>, not both\nUsage: "+approveUsage)
+		return ExitUsage
 	}
 	fail := func(err error) int {
 		fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
@@ -418,12 +470,57 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 		}
 	}()
 
-	res, err := publish.Publish(ctx, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id})
+	if *goalID != "" {
+		if ids, err = goalReviewOrder(ctx, s, *goalID); err != nil {
+			return fail(err)
+		}
+		if len(ids) == 0 {
+			return fail(fmt.Errorf("goal %s has no verified or published task to approve; see `mill review`", *goalID))
+		}
+	}
+	code := ExitOK
+	for _, id := range ids {
+		if err := approveOne(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id}); err != nil {
+			fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
+			code = ExitError
+		}
+	}
+	return code
+}
+
+// approveOne publishes one task, or queues its approval when only an unpublished dependency
+// stands in the way.
+func approveOne(ctx context.Context, env Env, s *store.Store, o publish.Options) error {
+	id := o.TaskID
+	res, err := publish.Publish(ctx, o)
 	if res.GateRerun != nil && err == nil {
 		fmt.Fprintf(env.Stdout, "Gate re-run at the head: passed (%d command(s)).\n", len(res.GateRerun.Commands))
 	}
 	if err != nil {
-		return fail(err)
+		if _, ok := publish.ParentRefusal(err); !ok {
+			return err
+		}
+		t, terr := s.GetTask(ctx, id)
+		if terr != nil {
+			return fmt.Errorf("%v; and the task cannot be loaded to queue its approval: %w", err, terr)
+		}
+		if t.Status != store.TaskVerified {
+			return err
+		}
+		n, nerr := s.MaxAttemptN(ctx, id)
+		if nerr != nil {
+			return fmt.Errorf("%v; and its latest attempt cannot be read to queue its approval: %w", err, nerr)
+		}
+		reason := waitingReason(err)
+		if err := s.ApproveTask(ctx, id, n); err != nil {
+			return err
+		}
+		goalID, _ := store.SplitTaskID(id)
+		if _, err := s.AppendEvent(ctx, approvalWaitingEvent, goalID, id, approvalWaiting{Attempt: n, Reason: reason}); err != nil {
+			return fmt.Errorf("approved %s but could not record why it waits: %w; approve it again", id, err)
+		}
+		fmt.Fprintf(env.Stdout, "approved %s: queued, will publish when %s\n", id, reason)
+		return nil
 	}
 	verb := "Published"
 	if res.Republish {
@@ -431,5 +528,99 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 	}
 	fmt.Fprintf(env.Stdout, "%s %s as %s on %s at %s (parent %s).\n", verb, id, res.Ref, res.Remote, short(res.SHA), short(res.Parent))
 	fmt.Fprintf(env.Stdout, "\nNext: open a pull request from %s into %s.\n", res.Ref, res.Onto)
-	return ExitOK
+	return nil
+}
+
+// approvalWaitingEvent records why a queued approval cannot publish yet; it follows the
+// task-approved event of the same approval.
+const approvalWaitingEvent = "task-approval-waiting"
+
+type approvalWaiting struct {
+	Attempt int    `json:"attempt"`
+	Reason  string `json:"reason"`
+}
+
+// waitingReason turns a dependency refusal into what the queued approval waits for.
+func waitingReason(err error) string {
+	var re *publish.RefusedError
+	if !errors.As(err, &re) {
+		return "its dependencies are published or landed"
+	}
+	switch {
+	case strings.Contains(re.Msg, "every other dependency must have landed"):
+		return "the other dependencies land"
+	case strings.Contains(re.Msg, "its branch is still based on"):
+		return "`mill sync` moves it onto the base branch"
+	case strings.Contains(re.Msg, "that are not published") && re.Parent != "":
+		return fmt.Sprintf("parent %s publishes its new changes", re.Parent)
+	case re.Parent != "":
+		return fmt.Sprintf("parent %s is published or landed", re.Parent)
+	}
+	return "its dependencies are published or landed"
+}
+
+// queuedReason returns the reason recorded with the task's current approval, "" if none.
+func queuedReason(ctx context.Context, s *store.Store, id string) (string, error) {
+	evs, err := s.TaskEvents(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	for i := len(evs) - 1; i >= 0; i-- {
+		switch evs[i].Kind {
+		case "task-approved":
+			return "", nil
+		case approvalWaitingEvent:
+			var d approvalWaiting
+			if err := json.Unmarshal(evs[i].Data, &d); err != nil {
+				return "", fmt.Errorf("corrupt %s event %d: %w", approvalWaitingEvent, evs[i].Seq, err)
+			}
+			return d.Reason, nil
+		}
+	}
+	return "", nil
+}
+
+// goalReviewOrder lists a goal's verified and published tasks, dependencies before
+// dependents (plan order otherwise).
+func goalReviewOrder(ctx context.Context, s *store.Store, goalID string) ([]string, error) {
+	if _, err := s.GetGoal(ctx, goalID); err != nil {
+		return nil, err
+	}
+	tasks, err := s.GoalTasks(ctx, goalID)
+	if err != nil {
+		return nil, err
+	}
+	deps := map[string][]string{}
+	for _, t := range tasks {
+		if deps[t.ID], err = s.TaskDeps(ctx, t.ID); err != nil {
+			return nil, err
+		}
+	}
+	var out []string
+	done := map[string]bool{}
+	var visit func(id string)
+	visit = func(id string) {
+		if done[id] {
+			return
+		}
+		done[id] = true
+		for _, d := range deps[id] {
+			visit(d)
+		}
+		out = append(out, id)
+	}
+	for _, t := range tasks {
+		visit(t.ID)
+	}
+	status := map[string]string{}
+	for _, t := range tasks {
+		status[t.ID] = t.Status
+	}
+	ids := out[:0]
+	for _, id := range out {
+		if st := status[id]; st == store.TaskVerified || st == store.TaskPublished {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
 }
