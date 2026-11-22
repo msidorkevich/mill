@@ -349,3 +349,8 @@ commit, rebase, squash), and mill detects each one.
       rebase, squash, trailer-only), SE2 test, README publishing section
 - [ ] Dogfood exit: publish M3's own branches to a local bare forge, merge them there, `mill
       sync` detects each
+- [ ] `publish-guards` (found in review of g5): (1) publishing a child whose parent landed
+      before `mill sync` restacked it would reuse the parent's unsquashed commits; (2) a child
+      of a parent with unpublished changes would carry them; (3) sync blocked a restacked child
+      only because its parent was not re-published yet; (4) tasks merged without publishing
+      (all of M1/M2, merged by hand) never become landed
