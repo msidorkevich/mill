@@ -125,9 +125,6 @@ func runVersion(_ context.Context, env Env, args []string) int {
 	return ExitOK
 }
 
-// gitignoreText keeps machine-local state out of git; config.toml stays committed.
-const gitignoreText = "# machine-local mill state\nruns/\nmill.db\nmill.db-*\nrun.lock\n"
-
 func runInit(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "init")
 	if code, ok := parse(fs, args); !ok {
@@ -153,7 +150,7 @@ func runInit(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "mill init: existing %s is invalid: %v\n", p.Config, err)
 		return ExitError
 	}
-	ignState, err := writeIfMissing(p.GitIgnore, gitignoreText)
+	ignState, err := syncGitignore(p.GitIgnore)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "mill init: %v\n", err)
 		return ExitError
@@ -195,6 +192,38 @@ func writeIfMissing(path, text string) (string, error) {
 		return "", err
 	}
 	return "created", f.Close()
+}
+
+// syncGitignore creates path with the required lines, or appends the ones an existing file
+// lacks. Existing lines and their order are kept.
+func syncGitignore(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return writeIfMissing(path, doctor.GitignoreText())
+	}
+	if err != nil {
+		return "", err
+	}
+	missing := doctor.MissingGitignoreLines(string(b))
+	if len(missing) == 0 {
+		return "kept (already exists)", nil
+	}
+	add := strings.Join(missing, "\n") + "\n"
+	if len(b) > 0 && b[len(b)-1] != '\n' {
+		add = "\n" + add
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(add); err != nil {
+		f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return "updated (added: " + strings.Join(missing, ", ") + ")", nil
 }
 
 func runDoctor(ctx context.Context, env Env, args []string) int {

@@ -242,3 +242,31 @@ func TestDoctorJSON(t *testing.T) {
 		t.Fatalf("doc = %+v", doc)
 	}
 }
+
+func TestInitAppendsMissingGitignoreLines(t *testing.T) {
+	root := gitRepo(t)
+	p := project.PathsAt(root)
+	if err := os.MkdirAll(p.MillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := "# mine\nmy-own\nruns/\nmill.db\nmill.db-*"
+	if err := os.WriteFile(p.GitIgnore, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "init")
+	if r.code != ExitOK || !strings.Contains(r.stdout, ".gitignore   updated (added: run.lock)") {
+		t.Fatalf("init: %+v", r)
+	}
+	got, _ := os.ReadFile(p.GitIgnore)
+	if string(got) != old+"\nrun.lock\n" {
+		t.Errorf(".gitignore = %q", got)
+	}
+	r = run(t, root, nil, "init")
+	if r.code != ExitOK || !strings.Contains(r.stdout, ".gitignore   kept") {
+		t.Fatalf("second init: %+v", r)
+	}
+	again, _ := os.ReadFile(p.GitIgnore)
+	if string(again) != string(got) {
+		t.Errorf("up-to-date .gitignore changed: %q", again)
+	}
+}

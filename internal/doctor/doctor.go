@@ -194,6 +194,17 @@ func Run(ctx context.Context, opts Options) Report {
 		}
 	}
 
+	// gitignore
+	if !initOK {
+		add("gitignore", Skip, "needs mill init")
+	} else if b, err := os.ReadFile(paths.GitIgnore); err != nil {
+		add("gitignore", Warn, "read %s: %v; run `mill init` to create it", paths.GitIgnore, err)
+	} else if missing := MissingGitignoreLines(string(b)); len(missing) > 0 {
+		add("gitignore", Warn, "%s lacks %s; run `mill init` to add them", paths.GitIgnore, strings.Join(missing, ", "))
+	} else {
+		add("gitignore", OK, "%s has every required line", paths.GitIgnore)
+	}
+
 	r.OK = true
 	for _, c := range r.Checks {
 		if c.Status == Fail {
@@ -201,6 +212,30 @@ func Run(ctx context.Context, opts Options) Report {
 		}
 	}
 	return r
+}
+
+// GitignoreLines are the lines .mill/.gitignore must contain to keep machine-local state
+// out of git. `mill init` and the gitignore check both use this one list.
+var GitignoreLines = []string{"runs/", "mill.db", "mill.db-*", "run.lock"}
+
+// GitignoreText is the content `mill init` writes to a new .mill/.gitignore.
+func GitignoreText() string {
+	return "# machine-local mill state\n" + strings.Join(GitignoreLines, "\n") + "\n"
+}
+
+// MissingGitignoreLines returns the required lines absent from text, in required order.
+func MissingGitignoreLines(text string) []string {
+	have := map[string]bool{}
+	for _, l := range strings.Split(text, "\n") {
+		have[strings.TrimSpace(l)] = true
+	}
+	var missing []string
+	for _, l := range GitignoreLines {
+		if !have[l] {
+			missing = append(missing, l)
+		}
+	}
+	return missing
 }
 
 var gitVersionRe = regexp.MustCompile(`git version (\d+)\.(\d+)(?:\.(\d+))?`)
