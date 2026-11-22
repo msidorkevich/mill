@@ -21,5 +21,9 @@ mill is a Go CLI (Go 1.24, module `github.com/msidorkevich/mill`). Requirements:
 - Tests are deterministic: inject clocks, no sleeps to wait for state (poll with a deadline).
 
 ## Before you finish
+- Agents cannot run `mill` or `./bin/mill`: workers are denied the command by their role
+  settings, which also blocks a freshly built binary. Don't try. Verify behaviour through
+  tests (`cli.Run` in a temporary repo) or `go run ./cmd/mill <args>` from a temporary
+  directory. Never point mill at the repository's own `.mill/`.
 - `make check` must pass (gofmt, go vet, go test).
 - Document user-visible changes in README.md (CLI usage) when a task adds a command.
