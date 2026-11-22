@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/msidorkevich/mill/internal/budget"
@@ -10,7 +11,10 @@ import (
 // ReviewTask is a task awaiting review (verified) or a merge (published).
 type ReviewTask struct {
 	TaskSummary
-	PublishedRef string `json:"published_ref,omitempty"`
+	PublishedRef    string `json:"published_ref,omitempty"`
+	Approved        bool   `json:"approved,omitempty"`
+	ApprovedAt      string `json:"approved_at,omitempty"`
+	ApprovedAttempt int    `json:"approved_attempt,omitempty"`
 }
 
 // ReviewTasks lists verified and published tasks, oldest first (created_at, then id).
@@ -18,7 +22,8 @@ func (s *Store) ReviewTasks(ctx context.Context) ([]ReviewTask, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.title, t.status, t.phase,
 		COALESCE(MAX(a.n), 0), COALESCE(SUM(a.input_tokens), 0), COALESCE(SUM(a.output_tokens), 0),
 		COALESCE(SUM(a.cache_write_tokens), 0), COALESCE(SUM(a.cache_read_tokens), 0), COALESCE(SUM(a.cost_usd), 0),
-		COALESCE((SELECT b.published_ref FROM branches b WHERE b.task_id = t.id), '')
+		COALESCE((SELECT b.published_ref FROM branches b WHERE b.task_id = t.id), ''),
+		t.approved_at, t.approved_attempt
 		FROM tasks t LEFT JOIN attempts a ON a.task_id = t.id
 		WHERE t.status IN (?, ?)
 		GROUP BY t.id ORDER BY t.created_at, t.id`, TaskVerified, TaskPublished)
@@ -30,10 +35,16 @@ func (s *Store) ReviewTasks(ctx context.Context) ([]ReviewTask, error) {
 	for rows.Next() {
 		var t ReviewTask
 		var u budget.Usage
+		var approvedAt sql.NullString
+		var approvedAttempt sql.NullInt64
 		if err := rows.Scan(&t.ID, &t.Title, &t.Status, &t.Phase, &t.Attempts,
-			&u.InputTokens, &u.OutputTokens, &u.CacheWriteTokens, &u.CacheReadTokens, &u.CostUSD, &t.PublishedRef); err != nil {
+			&u.InputTokens, &u.OutputTokens, &u.CacheWriteTokens, &u.CacheReadTokens, &u.CostUSD, &t.PublishedRef,
+			&approvedAt, &approvedAttempt); err != nil {
 			return nil, err
 		}
+		t.Approved = approvedAt.Valid
+		t.ApprovedAt = approvedAt.String
+		t.ApprovedAttempt = int(approvedAttempt.Int64)
 		t.Usage = u
 		out = append(out, t)
 	}
@@ -97,8 +108,11 @@ func (s *Store) RejectTask(ctx context.Context, id, reason string) ([]string, er
 			TaskBlocked, why, now, tid); err != nil {
 			return err
 		}
-		return s.appendEventTx(ctx, tx, "task-status", g, tid,
-			map[string]string{"status": TaskBlocked, "phase": "", "reason": why})
+		if err := s.appendEventTx(ctx, tx, "task-status", g, tid,
+			map[string]string{"status": TaskBlocked, "phase": "", "reason": why}); err != nil {
+			return err
+		}
+		return s.clearApprovalTx(ctx, tx, g, tid, why)
 	}
 	if err := set(id, reason); err != nil {
 		return nil, fmt.Errorf("reject %s: %w", id, err)
@@ -145,6 +159,9 @@ func (s *Store) RequestChanges(ctx context.Context, id string, attempt int, find
 	}
 	if err := s.appendEventTx(ctx, tx, "task-status", g, id,
 		map[string]string{"status": TaskPending, "phase": "", "reason": reason}); err != nil {
+		return err
+	}
+	if err := s.clearApprovalTx(ctx, tx, g, id, "changes requested: "+reason); err != nil {
 		return err
 	}
 	return tx.Commit()

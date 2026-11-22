@@ -454,7 +454,7 @@ func TestMigrateV4AddsAttemptProcessColumns(t *testing.T) {
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
 		t.Fatal(err)
 	}
-	old, err := s.StartAttempt(ctx, "t1", 1, "implementer")
+	old, err := s.StartAttempt(ctx, "t1", 1, "verifier")
 	if err != nil {
 		t.Fatal(err)
 	}

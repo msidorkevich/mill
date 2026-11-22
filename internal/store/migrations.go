@@ -117,6 +117,11 @@ ALTER TABLE attempts ADD COLUMN cost_estimated INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE branches ADD COLUMN published_sha TEXT NOT NULL DEFAULT '';
 ALTER TABLE branches ADD COLUMN gate_sha TEXT NOT NULL DEFAULT '';
 `,
+	// 8: operator approval of a verified task and the attempt it approved.
+	`
+ALTER TABLE tasks ADD COLUMN approved_at TEXT NULL;
+ALTER TABLE tasks ADD COLUMN approved_attempt INTEGER NULL;
+`,
 }
 
 // LatestVersion is the schema version this build writes.
