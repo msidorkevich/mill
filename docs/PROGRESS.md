@@ -450,3 +450,49 @@ not exercised on GitHub itself). The early usage warning has since shown up in r
       need; sent back with `mill review changes` (the operator comments reached the implementer
       as `[operator]` findings), fixed in attempt 2: directories with a `.git` entry are never
       entered. $0.33.
+
+## M4. Keeper: built, publishing (goal `g9`)
+
+Requirements: KP1, KP4–KP8, TS2 (conflict cases). Exit criterion: scenario tests with injected
+textual and semantic conflicts are resolved or flagged correctly.
+
+**Planned by mill's own planner** for the first time on real work: `mill plan "<goal>"` with my
+design decisions in the goal text produced 6 tasks in one call ($0.93). Edited before approval:
+removed a duplicate `make check` from every task's checks (it would have doubled every gate) and
+made the CLI task size S.
+
+### Design decisions
+
+- `mill keep [<goal>] [--watch] [--interval] [--combined] [--json]`: one reconcile pass over open
+  tasks (verified or published) in dependency order, starting with sync.
+- Lazy (KP4): rebase only on a real conflict (`git merge-tree`, KP5).
+- Conflicts (KP6): rebase with `rerere`; then a resolver agent (the only new role) edits the
+  conflicted files while the rebase is stopped; then gate + verifier; any failure restores the
+  branch exactly and blocks the task for the operator.
+- Fixer (KP7): a red gate after a restack becomes findings for a normal implement attempt.
+- Fan-in restack: rebuild on the deepest parent (or the base branch), re-merge the others,
+  replay only the task's own commits.
+- Combined check (KP8): merge all ready branches in a throwaway worktree, gate, bisect the
+  culprit, find its partner, flag both (not blocked).
+
+### Subtasks (goal `g9`: 6/6 verified, $10.11)
+
+- [x] `gitx-rebase-steps`: rebase/merge that can stop, rerere, conflict hunks ($1.10)
+- [x] `resolver-agent`: resolver prompt and pipeline entry points ($1.13)
+- [x] `keeper-pass`: one reconcile pass: lazy detection, rerere, resolver, fixer, re-publish ($2.08)
+- [x] `fanin-restack`: fan-in restack in keep, sync and task rebase ($3.90)
+- [x] `combined-check`: merge all ready branches, bisect culprit and partner ($1.48)
+- [x] `keep-command`: `mill keep` with --watch, --combined, --json ($0.42)
+- [x] Usage-limit handling proven for real: `fanin-restack` and `combined-check` hit the
+      five-hour limit; recorded as rate_limited (no attempts burned), the goal waited until the
+      reset (`--wait-on-limit`), resumed, kept the agents' work, and finished.
+- [x] Dogfood: `mill keep g9` built from the M4 branches ran on mill itself: no conflicts; the
+      combined check merged all six branches onto master and the gate was green.
+- [ ] Publishing in four rounds (the fan-in rule: every dependency but the deepest must land
+      before a fan-in task is published)
+
+### Follow-ups found in M4
+
+- [ ] The fan-in publish rule makes a wide DAG land slowly (four merge rounds for six tasks).
+      Consider publishing a fan-in on top of a temporary merge of its unlanded parents, or a
+      documented "land in waves" helper that says which PRs can be merged now.
