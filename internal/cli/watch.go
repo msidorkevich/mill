@@ -11,9 +11,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/runner"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 const watchUsage = "Usage: mill watch [<goal>|<task>] [--once] [--interval <duration>]"

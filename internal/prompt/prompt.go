@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"strings"
 
-	"mill/internal/gate"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/gate"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 // ImplementerSchema is the JSON Schema the implementer's final output must match.

@@ -7,8 +7,8 @@ import (
 	"io"
 	"sync"
 
-	"mill/internal/scheduler"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/scheduler"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // lockedWriter makes whole-line writes from several goroutines safe.

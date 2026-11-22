@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"strings"
 
-	"mill/internal/config"
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // Status of one check.

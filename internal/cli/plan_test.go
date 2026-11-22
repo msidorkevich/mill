@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 const validPlan = `{

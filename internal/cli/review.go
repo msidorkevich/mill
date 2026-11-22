@@ -10,13 +10,13 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"mill/internal/budget"
-	"mill/internal/gate"
-	"mill/internal/gitx"
-	"mill/internal/prompt"
-	"mill/internal/publish"
-	"mill/internal/runlock"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/gate"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/prompt"
+	"github.com/msidorkevich/mill/internal/publish"
+	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 const reviewUsage = "Usage: mill review [--json] | show <id> [--diff] [--json] | changes <id> (-m <text> | --file <path>) | reject <id> -m <reason> | approve <id>"

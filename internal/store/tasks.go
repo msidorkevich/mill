@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 // Task statuses (GR5). Only the harness changes them.

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/host"
+	"github.com/msidorkevich/mill/internal/host"
 )
 
 func opts(t *testing.T, cmds ...string) Options {

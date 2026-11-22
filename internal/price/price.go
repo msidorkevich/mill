@@ -8,7 +8,7 @@ package price
 import (
 	"strings"
 
-	"mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/budget"
 )
 
 // Rates are prices in USD per million tokens.

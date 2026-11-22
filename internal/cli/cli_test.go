@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/config"
-	"mill/internal/doctor"
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/doctor"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 type result struct {

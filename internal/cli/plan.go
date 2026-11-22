@@ -13,11 +13,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/host"
-	"mill/internal/plan"
-	"mill/internal/planner"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/planner"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 func runPlan(ctx context.Context, env Env, args []string) int {

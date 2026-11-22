@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/gitx"
-	"mill/internal/project"
-	"mill/internal/runlock"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // addRemote creates a bare repository, adds it as origin and pushes main to it. It returns

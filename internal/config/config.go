@@ -13,8 +13,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"mill/internal/budget"
-	"mill/internal/price"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/price"
 )
 
 // Config is the project configuration. Every field has a default (see Default).

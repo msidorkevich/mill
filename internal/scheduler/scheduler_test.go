@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/pipeline"
-	"mill/internal/plan"
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/pipeline"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 // task is a plan entry: id, owns, depends_on.

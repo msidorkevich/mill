@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/host"
-	"mill/internal/price"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/price"
 )
 
 // Lines shaped like real `claude -p --output-format stream-json --verbose` output.

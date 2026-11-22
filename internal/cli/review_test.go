@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/pipeline"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/pipeline"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // verifiedGoal is a repo whose goal g1 ran to completion: a, b and c (c needs a and b) are verified.

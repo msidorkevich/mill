@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/gitx"
-	"mill/internal/plan"
-	"mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/runner"
 )
 
 // Survey limits.

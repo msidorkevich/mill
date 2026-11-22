@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/budget"
-	"mill/internal/plan"
-	"mill/internal/project"
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 // watchRepo has goal g1 with tasks a and b; a has a running implement attempt whose stream

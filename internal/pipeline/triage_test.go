@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/config"
-	"mill/internal/gitx"
-	"mill/internal/runner"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // flakyCmd fails the first time it runs and passes afterwards, counting runs in a file.

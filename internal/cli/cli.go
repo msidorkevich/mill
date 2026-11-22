@@ -11,13 +11,13 @@ import (
 	"os"
 	"strings"
 
-	"mill/internal/config"
-	"mill/internal/doctor"
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/doctor"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
-// Version is set at build time: -ldflags "-X mill/internal/cli.Version=v0.1.0".
+// Version is set at build time: -ldflags "-X github.com/msidorkevich/mill/internal/cli.Version=v0.1.0".
 var Version = "dev"
 
 // Exit codes are stable (CL2).

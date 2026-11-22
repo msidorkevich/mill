@@ -10,8 +10,8 @@ import (
 	"slices"
 	"strings"
 
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 func runTaskEdit(ctx context.Context, env Env, args []string) int {

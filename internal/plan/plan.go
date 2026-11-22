@@ -9,7 +9,7 @@ import (
 	"path"
 	"strings"
 
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 // Plan is a goal broken into tasks.

@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/budget"
-	"mill/internal/gitx"
-	"mill/internal/plan"
-	"mill/internal/project"
-	"mill/internal/runlock"
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 const taskFile = `{

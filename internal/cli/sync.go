@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"mill/internal/syncer"
+	"github.com/msidorkevich/mill/internal/syncer"
 )
 
 func runSync(ctx context.Context, env Env, args []string) int {

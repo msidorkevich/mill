@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 func spec(id string) taskspec.Spec {
