@@ -306,3 +306,46 @@ The new behaviour since M2 is now written up in REQUIREMENTS.md (GR7–GR8, TP7�
 
 Still open: a real agent has not yet changed files outside its `owns`, so `owns_policy` is only
 covered by tests; restacking fan-in tasks and publishing (M3) are next.
+
+## M3. Review, publish and merge detection: in progress (on `main`)
+
+Requirements: GT1, GT4–6, RV1–7, KP2–3, SE2, TS2 (merge cases). Exit criterion: the full flow
+works against a local bare remote, with merges done by a script playing the forge (merge
+commit, rebase, squash), and mill detects each one.
+
+### Design decisions
+
+- **Statuses:** `verified` doubles as *draft* (awaiting review); new `published` and `landed`.
+  One helper (`store.Done`) treats verified/published/landed as finished for dependencies,
+  goal completion and the base rules.
+- **Review:** `mill review` lists drafts and published tasks; `review show <id> [--diff]`;
+  `review approve | changes | reject <id>`. Changes: operator comments become findings for the
+  next attempt. Reject: blocked, descendants put on hold.
+- **Publish (approve):** RV5 checks; the gate is re-run if the head changed since it last
+  passed (`gate_sha`); squash into one commit (`git commit-tree`) whose parent is the base
+  commit, or the parent task's published commit for a stacked task, so a PR shows only the
+  task's own change; description (RV6) and trailers `Mill-Task`, `Mill-Goal`, `Mill-Base`;
+  push `review/<task>` with `--force-with-lease`; one push function refuses any other target.
+- **`mill sync`:** fetch; detect merges (ancestor, `git cherry`, trailer); mark `landed`; restack
+  children of a landed parent onto main, and children of a changed parent onto its new head;
+  re-gate; re-publish published ones; a conflict or red gate blocks the task (the keeper, M4,
+  resolves it).
+- **Deferred:** GT7 (rebuild state from git alone). Task specs live only in mill's database, so
+  a real rebuild needs its own design; not part of this M3.
+- **Dogfooding:** goal `g5` builds M3 as a chain of five tasks. Then the new binary publishes
+  M3's own branches to a local bare "forge" repo, I merge them there with different methods,
+  and `mill sync` must detect each merge and restack the rest.
+
+### Subtasks (goal `g5`)
+
+- [ ] `publish-core`: statuses published/landed + `store.Done`; branch `published_sha`,
+      `gate_sha`; git helpers (fetch, merge-tree conflicts, commit-tree, guarded push, cherry,
+      trailer search)
+- [ ] `review-cli`: `mill review`, `review show`, `review changes`, `review reject`
+- [ ] `publish`: `mill review approve`: RV5 rules, re-gate, squash + description + trailers,
+      guarded push with lease
+- [ ] `sync`: `mill sync`: merge detection, landed, restack (KP2, KP3), re-gate, re-publish
+- [ ] `publish-e2e`: end-to-end test with a bare remote and a forge script (merge commit,
+      rebase, squash, trailer-only), SE2 test, README publishing section
+- [ ] Dogfood exit: publish M3's own branches to a local bare forge, merge them there, `mill
+      sync` detects each
