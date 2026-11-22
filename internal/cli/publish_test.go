@@ -89,7 +89,7 @@ func TestApproveTaskWithoutDependenciesPushesOneSquashedCommit(t *testing.T) {
 		t.Errorf("tree = %s, want head tree %s", got, want)
 	}
 	msg := gitC(t, bare, "log", "-1", "--format=%B", pushed)
-	for _, want := range []string{"A\n", "Task: g1/a", "Goal: Fan in (g1)", "on main @" + br.BaseSHA[:8], "- [ ] a.txt exists",
+	for _, want := range []string{"A\n", "Task: g1/a", "Goal: Fan in (g1)", "on main @" + br.BaseSHA[:8], "- [x] a.txt exists",
 		"gate passed at " + br.HeadSHA[:8], "test -f a.txt", "Verifier: pass: ok", "attempt(s)",
 		"Mill-Task: g1/a\n", "Mill-Goal: g1\n", "Mill-Base: " + br.BaseSHA} {
 		if !strings.Contains(msg, want) {

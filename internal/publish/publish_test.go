@@ -101,7 +101,7 @@ func TestPublishPushesSquashedCommitOnBase(t *testing.T) {
 	}
 	msg := git(t, bare, "log", "-1", "--format=%B", res.SHA)
 	if !strings.HasPrefix(msg, "Write x\n") || strings.Contains(msg, "Mill-Goal") || !strings.Contains(msg, "Mill-Task: t1") ||
-		!strings.Contains(msg, "Mill-Base: "+br.BaseSHA) || !strings.Contains(msg, "Verifier: pass: fine") {
+		!strings.Contains(msg, "Mill-Base: "+br.BaseSHA) || !strings.Contains(msg, "Verifier: pass: fine") || strings.Contains(msg, "mill review show") {
 		t.Errorf("message:\n%s", msg)
 	}
 	if got := git(t, bare, "rev-parse", "refs/heads/main"); got != mainBefore {
@@ -154,5 +154,64 @@ func TestParentRefusalRecognisesOnlyTheDependencyRule(t *testing.T) {
 		if _, ok := ParentRefusal(err); ok {
 			t.Errorf("ParentRefusal(%v) = true", err)
 		}
+	}
+}
+
+func TestPublishMessageChecksAcceptanceAndTrimsLongSummary(t *testing.T) {
+	const pointer = "Full verdict: mill review show t1\n"
+	// The 600-character limit applies to the summary alone, not the "pass: " prefix.
+	cases := []struct {
+		name, summary, want string
+	}{
+		{
+			// Character 600 ends exactly on the end of a word.
+			name:    "cut after a whole word",
+			summary: strings.Repeat("word ", 200),
+			want:    "Verifier: pass: " + strings.Repeat("word ", 119) + "word…\n" + pointer,
+		},
+		{
+			// Character 600 lands inside a word: the partial word is dropped.
+			name:    "limit inside a word",
+			summary: strings.Repeat("abcdefgh ", 100),
+			want:    "Verifier: pass: " + strings.Repeat("abcdefgh ", 65) + "abcdefgh…\n" + pointer,
+		},
+		{
+			name:    "exactly at the limit",
+			summary: strings.Repeat("x", 600),
+			want:    "Verifier: pass: " + strings.Repeat("x", 600) + "\nCost:",
+		},
+		{
+			name:    "one over the limit",
+			summary: strings.Repeat("x", 601),
+			want:    "Verifier: pass: " + strings.Repeat("x", 600) + "…\n" + pointer,
+		},
+		{
+			name:    "short",
+			summary: "all good",
+			want:    "Verifier: pass: all good\nCost:",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o, bare, _ := fixture(t)
+			ctx := context.Background()
+			if _, err := o.Store.AppendEvent(ctx, "task-verdict", "", "t1", map[string]any{"verdict": prompt.VerifierOutput{Verdict: "pass", Summary: c.summary}}); err != nil {
+				t.Fatal(err)
+			}
+			res, err := Publish(ctx, o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			msg := git(t, bare, "log", "-1", "--format=%B", res.SHA)
+			if !strings.Contains(msg, "- [x] x exists") || strings.Contains(msg, "- [ ]") {
+				t.Errorf("acceptance not checked:\n%s", msg)
+			}
+			if !strings.Contains(msg, c.want) {
+				t.Errorf("message lacks %q:\n%s", c.want, msg)
+			}
+			if strings.HasSuffix(c.want, "Cost:") && strings.Contains(msg, "mill review show") {
+				t.Errorf("unexpected pointer line:\n%s", msg)
+			}
+		})
 	}
 }
