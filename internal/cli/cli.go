@@ -57,6 +57,7 @@ func init() {
 		{"run", "run an approved goal's tasks in dependency order (--retry-blocked)", runRun},
 		{"review", "list tasks awaiting review; show, changes, reject", runReview},
 		{"sync", "detect merged reviews, mark them landed, restack and re-publish children (--json)", runSync},
+		{"keep", "keep branches mergeable: sync, rebase, fix, re-publish, combined check (--watch, --interval, --combined, --json)", runKeep},
 		{"clean", "remove worktrees and branches of landed tasks (--remote, --dry-run)", runClean},
 		{"watch", "show running agents, live spend and their latest action (--once, --interval)", runWatch},
 		{"version", "print the mill version", runVersion},
