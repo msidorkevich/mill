@@ -176,7 +176,7 @@ func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
 	}
 	var blocked bool
 	if r != nil {
-		var landed, rebased, republished, blockedL []string
+		var landed, rebased, republished, blockedL, queued, waiting []string
 		for _, l := range r.Sync.Landed {
 			landed = append(landed, fmt.Sprintf("%s  %s in %s", l.TaskID, l.Method, short(l.Commit)))
 		}
@@ -189,6 +189,12 @@ func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
 		for _, b := range r.Blocked {
 			blockedL = append(blockedL, fmt.Sprintf("%s  %s", b.TaskID, strings.ReplaceAll(b.Reason, "\n", "\n    ")))
 		}
+		for _, p := range r.Queue.Published {
+			queued = append(queued, fmt.Sprintf("%s  %s at %s", p.TaskID, p.Ref, short(p.SHA)))
+		}
+		for _, q := range r.Queue.Waiting {
+			waiting = append(waiting, fmt.Sprintf("%s  %s", q.TaskID, strings.ReplaceAll(q.Reason, "\n", "\n    ")))
+		}
 		blocked = len(r.Blocked) > 0
 		section("Landed", landed)
 		section("Rebased", rebased)
@@ -196,6 +202,8 @@ func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
 		section("Resolved by agent", r.ResolvedAgent)
 		section("Fixed", r.Fixed)
 		section("Republished", republished)
+		section("Published from queue", queued)
+		section("Waiting", waiting)
 		section("Blocked", blockedL)
 	}
 	switch {

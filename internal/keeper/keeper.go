@@ -1,8 +1,8 @@
 // Package keeper keeps verified and published task branches mergeable (KP4-KP7). One Pass
 // syncs with the remote, rebases only the branches that would conflict with their base
 // (reusing recorded resolutions with rerere and asking the resolver agent for the rest),
-// fixes branches whose gate turned red after a restack and re-publishes published tasks
-// that changed.
+// fixes branches whose gate turned red after a restack, re-publishes published tasks that
+// changed and publishes approved tasks whose dependencies now allow it.
 //
 // The caller holds the run lock.
 package keeper
@@ -82,6 +82,8 @@ type Result struct {
 	// NeedsRepublish lists changed published tasks whose re-publish waits for their parent.
 	NeedsRepublish []syncer.NeedsRepublish `json:"needs_republish"`
 	Skipped        []Skipped               `json:"skipped"`
+	// Queue is what the pass did with approved tasks waiting to be published.
+	Queue Queue `json:"queue"`
 }
 
 type keeper struct {
@@ -100,7 +102,8 @@ func (k *keeper) logf(format string, a ...any) {
 // the result; an error means the pass itself could not continue.
 func Pass(ctx context.Context, o Options) (Result, error) {
 	res := Result{Rebased: []Rebased{}, ResolvedRerere: []string{}, ResolvedAgent: []string{}, Fixed: []string{},
-		Blocked: []Blocked{}, Republished: []syncer.Republished{}, NeedsRepublish: []syncer.NeedsRepublish{}, Skipped: []Skipped{}}
+		Blocked: []Blocked{}, Republished: []syncer.Republished{}, NeedsRepublish: []syncer.NeedsRepublish{}, Skipped: []Skipped{},
+		Queue: Queue{Published: []QueuePublished{}, Waiting: []QueueWaiting{}}}
 	if o.Pipeline == nil {
 		return res, errors.New("keeper: no pipeline to run the resolver, verifier and fixer with")
 	}
@@ -136,6 +139,10 @@ func Pass(ctx context.Context, o Options) (Result, error) {
 		if err := k.goal(ctx, g); err != nil {
 			return res, err
 		}
+	}
+	// Approved tasks publish last, once their parents are synced, restacked and fixed.
+	if err := k.queue(ctx); err != nil {
+		return res, err
 	}
 	return res, nil
 }
