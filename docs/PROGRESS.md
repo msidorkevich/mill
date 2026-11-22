@@ -421,12 +421,14 @@ landed. Not yet exercised on GitHub: stacked-PR retargeting and the squash/rebas
       working on mill cannot run the binary it just built (it verified another way). Fine as a
       safety rule; mention it in CLAUDE.md so agents use `go run ./cmd/mill` or tests instead.
 
-## Usage limits (goal `g8`): published, awaiting merge
+## Usage limits (goal `g8`): done
 
 The real stream showed a machine-readable signal: `rate_limit_event` (`status: rejected`,
 `rateLimitType`, `resetsAt`) and a result with `api_error_status: 429`. 3/3 verified on the
-first attempt, $2.27; reviewed; published to GitHub (`limit-handling` stacked on
-`limit-detect`).
+first attempt, $2.27; reviewed; published to GitHub and merged (PRs #7, #8; merged with merge
+commits, so every task landed by `ancestor`; squash, rebase and stacked retargeting are still
+not exercised on GitHub itself). The early usage warning has since shown up in real runs
+("usage at 34% of the seven_day limit").
 
 - [x] `limit-detect`: runner status `rate_limited` with limit type and reset time; early
       warning from `allowed_warning` events ($0.21)
@@ -437,3 +439,14 @@ first attempt, $2.27; reviewed; published to GitHub (`limit-handling` stacked on
 - [x] `claude-md-note`: CLAUDE.md tells agents not to run `mill`/`./bin/mill` ($0.04)
 - Known gap (accepted): if claude dies after a rejected event without a final result, the run
   is reported as a plain error; the next attempt then hits the limit cleanly.
+
+## Housekeeping
+
+- [x] `mill clean --remote` run on mill itself: 41 worktrees and 41 local branches of landed
+      tasks removed, 8 `review/*` branches deleted on GitHub; a second run changed nothing.
+- [x] `clean-empty-dirs` (published): `mill clean` also removes empty directories under the
+      worktree root (empty goal folders, gate-triage `.base/` leftovers). Review found that the
+      first version descended into live worktrees and would delete empty folders an agent may
+      need; sent back with `mill review changes` (the operator comments reached the implementer
+      as `[operator]` findings), fixed in attempt 2: directories with a `.git` entry are never
+      entered. $0.33.
