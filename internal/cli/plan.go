@@ -519,8 +519,9 @@ func runGoal(ctx context.Context, env Env, args []string) int {
 			w, code = env.Stdout, ExitOK
 		}
 		fmt.Fprintln(w, "Usage:")
-		fmt.Fprintln(w, "  mill goal list [--json]         list all goals, oldest first")
-		fmt.Fprintln(w, "  mill goal show <goal> [--json]  show a goal, its tasks and spend")
+		fmt.Fprintln(w, "  mill goal list [--json]             list all goals, oldest first")
+		fmt.Fprintln(w, "  mill goal show <goal> [--json]      show a goal, its tasks and spend")
+		fmt.Fprintln(w, "  mill goal graph <goal> [--mermaid]  draw the goal's task graph (or print it as Mermaid)")
 		return code
 	}
 	switch args[0] {
@@ -528,6 +529,8 @@ func runGoal(ctx context.Context, env Env, args []string) int {
 		return runGoalList(ctx, env, args[1:])
 	case "show":
 		return runGoalShow(ctx, env, args[1:])
+	case "graph":
+		return runGoalGraph(ctx, env, args[1:])
 	}
 	fmt.Fprintf(env.Stderr, "mill goal: unknown subcommand %q\n", args[0])
 	return ExitUsage

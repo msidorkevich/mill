@@ -88,6 +88,7 @@ mill plan edit g1               # edit in $EDITOR (default vi); or: mill plan ed
 mill plan approve g1            # create the goal's tasks; the plan can no longer be edited
 mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, COST, TITLE (--json)
 mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
+mill goal graph g1              # the task graph as lanes, dependencies above dependents (--mermaid for a Mermaid flowchart)
 mill run g1                     # run the approved goal's tasks in dependency order
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
 mill run g1 --wait-on-limit     # on a usage limit, wait for the reset and continue instead of stopping
@@ -100,6 +101,45 @@ mill review approve g1/a        # publish: one squashed commit force-pushed (wit
 mill review approve --goal g1   # approve every verified task, parents first; children of unpublished parents are queued
 mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
 mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
+```
+
+`mill goal graph g1` draws one row per task in dependency order, with ASCII lines from each
+task to its dependencies, the status mark (landed ✓, published ↑, verified ●, running ▶,
+pending ○, blocked/failed ✗), the task id, its status and its direct dependencies after `←`, then
+the counts by status. Unrelated tasks never share a lane on consecutive rows (a blank line
+separates them):
+
+```
+*   ✓ a  landed
+|\
+* | ● b  verified  ← a
+| * ▶ c  running   ← a
+|/
+*   ○ d  pending   ← b, c
+4 tasks: 1 landed, 1 verified, 1 running, 1 pending
+```
+
+`mill goal graph g1 --mermaid` prints the same graph as a Mermaid flowchart, one node per task
+coloured by status, which GitHub renders when pasted into a ` ```mermaid ` block:
+
+```
+flowchart TD
+  a["a<br/>landed"]
+  b["b<br/>verified"]
+  c["c<br/>running"]
+  d["d<br/>pending"]
+  a --> b
+  a --> c
+  b --> d
+  c --> d
+  classDef landed fill:#2da44e,stroke:#1a7f37,color:#ffffff
+  classDef verified fill:#1b998b,stroke:#137a6f,color:#ffffff
+  classDef running fill:#f2cc60,stroke:#bf8700,color:#000000
+  classDef pending fill:#d0d7de,stroke:#8c959f,color:#000000
+  class a landed
+  class b verified
+  class c running
+  class d pending
 ```
 
 `mill sync` fetches the remote and marks each published task landed when its published commit
