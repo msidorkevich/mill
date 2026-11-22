@@ -307,7 +307,7 @@ The new behaviour since M2 is now written up in REQUIREMENTS.md (GR7–GR8, TP7�
 Still open: a real agent has not yet changed files outside its `owns`, so `owns_policy` is only
 covered by tests; restacking fan-in tasks and publishing (M3) are next.
 
-## M3. Review, publish and merge detection: in progress (on `main`)
+## M3. Review, publish and merge detection: done (2026-11-22)
 
 Requirements: GT1, GT4–6, RV1–7, KP2–3, SE2, TS2 (merge cases). Exit criterion: the full flow
 works against a local bare remote, with merges done by a script playing the forge (merge
@@ -358,5 +358,30 @@ commit, rebase, squash), and mill detects each one.
       `mill sync` marked every hand-merged M1–M3 task landed (method `merged`) and goals g1–g5
       landed; the review queue is empty. From here on mill's branches reach `main` only through
       the forge (then `git pull`).
-- [ ] Dogfood exit: goal `g6` (live usage + `mill watch`, two stacked tasks) is built, published
-      to the forge, merged there with different methods, and `mill sync` detects each merge
+- [x] Dogfood exit: goal `g6` (live usage + `mill watch`, two stacked tasks; $0.86, the
+      verifier failed `live-usage` once for a missing rate-limit test, attempt 2 passed) was
+      published to the forge (`watch` refused until `live-usage` was published, then stacked on
+      its published commit). The forge squash-merged `live-usage`: `mill sync` found it landed
+      (method `patch`), restacked `watch` onto the new main, re-gated and republished it. The
+      forge merged `watch` with a merge commit: landed (method `ancestor`), goal `g6` landed.
+      Local main was then updated from the forge with `git pull`.
+- [x] Default branch is `master` (operator decision): local `main` renamed, forge default set to
+      `master` and `main` deleted there, `base_branch = "master"`. (The forge's HEAD had first
+      pointed at a nonexistent `master` because I created it with `git init --bare` without
+      `-b`; that was my setup mistake, not mill.)
+
+### Follow-ups found in M3
+
+- [ ] `mill init` writes `base_branch = "main"` regardless of the repo; it should write the
+      repo's current branch (this repo uses `master`).
+- [ ] The published description renders acceptance criteria as `- [ ]`; they are verified, so
+      `- [x]` (or plain bullets).
+- [ ] Landed tasks keep their local branches and worktrees (33 now), and `review/*` branches stay
+      on the remote after landing. Add a cleanup (`mill clean`): remove worktrees and branches of
+      landed tasks, and optionally delete their review branches (allowed under SE2).
+- [ ] mill's own gate now takes ~4 minutes (many end-to-end git tests, run twice: `make check`
+      plus the task's `-race` checks). Consider sharding, or skipping the duplicate run when a
+      task's checks are a subset of `check_cmd`.
+- [ ] Minor (from the verifier): if `Runner.Run` panics, the live-usage writer goroutine leaks.
+- [ ] GT7 (rebuild state from git) stays deferred, see the design notes.
+
