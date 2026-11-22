@@ -46,11 +46,23 @@ type Result struct {
 
 // RefusedError is a publish that a RV5 rule does not allow. Nothing was pushed.
 type RefusedError struct {
-	Rule string // short name of the rule
-	Msg  string
+	Rule   string // short name of the rule
+	Msg    string
+	Parent string // for the dependency rule: the parent that must be published first, if one
 }
 
 func (e *RefusedError) Error() string { return fmt.Sprintf("refused (%s): %s", e.Rule, e.Msg) }
+
+// ParentRefusal reports whether err is a refusal by the dependency rule: the task itself is
+// fine but its parent is not published (or not in a state the task can be stacked on). parent
+// is the dependency to publish first, "" when the refusal names several.
+func ParentRefusal(err error) (parent string, ok bool) {
+	var re *RefusedError
+	if errors.As(err, &re) && re.Rule == ruleParent {
+		return re.Parent, true
+	}
+	return "", false
+}
 
 const (
 	ruleStatus   = "the task must be verified"
@@ -100,7 +112,7 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 		return res, fmt.Errorf("task %s has no recorded head commit; run `mill task show %s`", id, id)
 	}
 
-	st, err := stackOf(ctx, s, cfg, t, br)
+	st, err := stackOf(ctx, s, cfg, root, t, br)
 	if err != nil {
 		return res, err
 	}
@@ -210,7 +222,7 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 }
 
 // stackOf checks the dependency rule and decides the published commit's parent.
-func stackOf(ctx context.Context, s *store.Store, cfg config.Config, t store.Task, br store.Branch) (stack, error) {
+func stackOf(ctx context.Context, s *store.Store, cfg config.Config, root string, t store.Task, br store.Branch) (stack, error) {
 	deps, err := s.TaskDeps(ctx, t.ID)
 	if err != nil {
 		return stack{}, err
@@ -273,15 +285,37 @@ func stackOf(ctx context.Context, s *store.Store, cfg config.Config, t store.Tas
 		if pb.PublishedSHA == "" || pb.PublishedRef == "" {
 			return stack{}, fmt.Errorf("parent %s is published but has no recorded published commit; publish it again with `mill review approve %s`", parent, parent)
 		}
+		// The child's branch holds the parent's head; if that differs from what the parent
+		// published, the child's commit would carry the parent's unpublished changes.
+		headTree, err := gitx.TreeOf(ctx, root, pb.HeadSHA)
+		if err != nil {
+			return stack{}, fmt.Errorf("parent %s: read the tree of its head %s: %w", parent, short(pb.HeadSHA), err)
+		}
+		pubTree, err := gitx.TreeOf(ctx, root, pb.PublishedSHA)
+		if err != nil {
+			return stack{}, fmt.Errorf("parent %s: read the tree of its published commit %s: %w", parent, short(pb.PublishedSHA), err)
+		}
+		if headTree != pubTree {
+			return stack{}, &RefusedError{Rule: ruleParent, Parent: parent, Msg: fmt.Sprintf(
+				"task %s is stacked on %s, which has changes at %s that are not published (published %s); publish the parent first with `mill review approve %s`",
+				t.ID, parent, short(pb.HeadSHA), short(pb.PublishedSHA), parent)}
+		}
 		return stack{parentSHA: pb.PublishedSHA, onto: pb.PublishedRef, conflictTo: pb.Name, desc: "on " + pb.PublishedRef}, nil
 	case store.TaskLanded:
+		if br.Base != cfg.BaseBranch {
+			// Still based on the parent's branch, whose commits the base branch may not
+			// contain (after a squash merge); sync moves it onto the base branch first.
+			return stack{}, &RefusedError{Rule: ruleParent, Parent: parent, Msg: fmt.Sprintf(
+				"task %s is stacked on %s, which has landed, but its branch is still based on %s; run `mill sync` to move it onto %s first",
+				t.ID, parent, br.Base, cfg.BaseBranch)}
+		}
 		if br.BaseSHA == "" {
 			return stack{}, fmt.Errorf("task %s has no recorded base commit", t.ID)
 		}
 		return stack{parentSHA: br.BaseSHA, onto: cfg.BaseBranch, desc: fmt.Sprintf("on %s @%s", cfg.BaseBranch, short(br.BaseSHA))}, nil
 	}
-	return stack{}, refuse(ruleParent, "task %s is stacked on %s, which is %s; publish it first with `mill review approve %s`",
-		t.ID, parent, pt.Status, parent)
+	return stack{}, &RefusedError{Rule: ruleParent, Parent: parent, Msg: fmt.Sprintf(
+		"task %s is stacked on %s, which is %s; publish it first with `mill review approve %s`", t.ID, parent, pt.Status, parent)}
 }
 
 // GateAtHead re-runs the task's gate (check_cmd and its checks) at the branch head in its

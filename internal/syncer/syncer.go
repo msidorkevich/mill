@@ -1,6 +1,6 @@
 // Package syncer brings mill's records in line with the remote after reviews merge (GT6, KP2,
-// KP3): it marks merged tasks landed, restacks their children, re-gates and re-publishes them,
-// and marks goals landed.
+// KP3): it marks merged tasks landed (published ones, and verified ones whose branch was merged
+// directly), restacks their children, re-gates and re-publishes them, and marks goals landed.
 //
 // The caller holds the run lock.
 package syncer
@@ -27,6 +27,7 @@ const (
 	MethodAncestor = "ancestor" // the published commit is in the base branch (merge or fast-forward)
 	MethodPatch    = "patch"    // the base branch has a commit with the same patch (rebase or squash)
 	MethodTrailer  = "trailer"  // the base branch has a commit with the task's Mill-Task trailer
+	MethodMerged   = "merged"   // a verified task's branch head is in the base branch (merged without publishing)
 )
 
 // Options configure one sync.
@@ -62,6 +63,15 @@ type Republished struct {
 	Parent string `json:"parent"`
 }
 
+// NeedsRepublish is a published task that was restacked but could not be re-published because
+// its parent is not published at its current head. It stays published (its review branch shows
+// the old commit) until the parent is published and sync runs again.
+type NeedsRepublish struct {
+	TaskID string `json:"task_id"`
+	After  string `json:"after"` // the parent to publish first
+	Reason string `json:"reason"`
+}
+
 // Blocked is a task the sync could not restack, gate or re-publish.
 type Blocked struct {
 	TaskID string `json:"task_id"`
@@ -83,9 +93,11 @@ type Result struct {
 	Landed      []Landed      `json:"landed"`
 	Restacked   []Restacked   `json:"restacked"`
 	Republished []Republished `json:"republished"`
-	Blocked     []Blocked     `json:"blocked"`
-	Manual      []Manual      `json:"manual"`
-	GoalsLanded []string      `json:"goals_landed"`
+	// NeedsRepublish lists restacked tasks whose re-publish waits for their parent.
+	NeedsRepublish []NeedsRepublish `json:"needs_republish"`
+	Blocked        []Blocked        `json:"blocked"`
+	Manual         []Manual         `json:"manual"`
+	GoalsLanded    []string         `json:"goals_landed"`
 }
 
 type syncer struct {
@@ -105,7 +117,7 @@ func (s *syncer) logf(format string, a ...any) {
 // reported in the result; an error means the sync itself could not continue.
 func Sync(ctx context.Context, o Options) (Result, error) {
 	res := Result{Remote: o.Cfg.Remote, BaseBranch: o.Cfg.BaseBranch,
-		Landed: []Landed{}, Restacked: []Restacked{}, Republished: []Republished{}, Blocked: []Blocked{},
+		Landed: []Landed{}, Restacked: []Restacked{}, Republished: []Republished{}, NeedsRepublish: []NeedsRepublish{}, Blocked: []Blocked{},
 		Manual: []Manual{}, GoalsLanded: []string{}}
 	root := o.Paths.Root
 	if o.Cfg.Remote == "" {
@@ -146,8 +158,16 @@ func Sync(ctx context.Context, o Options) (Result, error) {
 	return res, nil
 }
 
-// detect marks every published task that reached the base branch as landed (GT6).
+// detect marks every published task that reached the base branch as landed (GT6), and every
+// verified task whose branch was merged into it without being published.
 func (s *syncer) detect(ctx context.Context) error {
+	if err := s.detectPublished(ctx); err != nil {
+		return err
+	}
+	return s.detectMerged(ctx)
+}
+
+func (s *syncer) detectPublished(ctx context.Context) error {
 	pub, err := s.Store.TaskSummaries(ctx, store.TaskPublished)
 	if err != nil {
 		return err
@@ -167,17 +187,63 @@ func (s *syncer) detect(ctx context.Context) error {
 		if method == "" {
 			continue
 		}
-		if err := s.Store.SetTaskStatus(ctx, ts.ID, store.TaskLanded, "", ""); err != nil {
-			return fmt.Errorf("%s landed in %s but recording it failed: %w", ts.ID, short(commit), err)
+		if err := s.land(ctx, ts.ID, method, commit, map[string]string{"published_sha": br.PublishedSHA}); err != nil {
+			return err
 		}
-		goalID, _ := store.SplitTaskID(ts.ID)
-		if _, err := s.Store.AppendEvent(ctx, "task-landed", goalID, ts.ID,
-			map[string]string{"method": method, "commit": commit, "published_sha": br.PublishedSHA, "upstream": s.upstream}); err != nil {
-			return fmt.Errorf("%s landed in %s but recording the event failed: %w", ts.ID, short(commit), err)
-		}
-		s.res.Landed = append(s.res.Landed, Landed{TaskID: ts.ID, Method: method, Commit: commit})
-		s.logf("%s: landed in %s (%s)", ts.ID, short(commit), method)
 	}
+	return nil
+}
+
+// detectMerged marks verified tasks landed whose branch head is already in the base branch:
+// someone merged the branch itself instead of a published review.
+func (s *syncer) detectMerged(ctx context.Context) error {
+	ver, err := s.Store.TaskSummaries(ctx, store.TaskVerified)
+	if err != nil {
+		return err
+	}
+	root := s.Paths.Root
+	for _, ts := range ver {
+		br, err := s.Store.GetBranch(ctx, ts.ID)
+		if err != nil {
+			return fmt.Errorf("task %s is verified but its branch cannot be loaded: %w", ts.ID, err)
+		}
+		if br.HeadSHA == "" {
+			return fmt.Errorf("task %s is verified but has no recorded head commit; run `mill task show %s`", ts.ID, ts.ID)
+		}
+		// A branch without commits of its own is trivially in the base branch.
+		if br.HeadSHA == br.BaseSHA || br.HeadSHA == br.StartSHA {
+			continue
+		}
+		in, err := gitx.IsAncestor(ctx, root, br.HeadSHA, s.upstream)
+		if err != nil {
+			return fmt.Errorf("merge detection for %s: %w", ts.ID, err)
+		}
+		if !in {
+			continue
+		}
+		commit, err := gitx.ContainingCommit(ctx, root, s.upstream, br.HeadSHA)
+		if err != nil {
+			return fmt.Errorf("merge detection for %s: %w", ts.ID, err)
+		}
+		if err := s.land(ctx, ts.ID, MethodMerged, commit, map[string]string{"head_sha": br.HeadSHA}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// land records a task as landed in commit and reports it.
+func (s *syncer) land(ctx context.Context, id, method, commit string, data map[string]string) error {
+	if err := s.Store.SetTaskStatus(ctx, id, store.TaskLanded, "", ""); err != nil {
+		return fmt.Errorf("%s landed in %s but recording it failed: %w", id, short(commit), err)
+	}
+	data["method"], data["commit"], data["upstream"] = method, commit, s.upstream
+	goalID, _ := store.SplitTaskID(id)
+	if _, err := s.Store.AppendEvent(ctx, "task-landed", goalID, id, data); err != nil {
+		return fmt.Errorf("%s landed in %s but recording the event failed: %w", id, short(commit), err)
+	}
+	s.res.Landed = append(s.res.Landed, Landed{TaskID: id, Method: method, Commit: commit})
+	s.logf("%s: landed in %s (%s)", id, short(commit), method)
 	return nil
 }
 
@@ -310,8 +376,13 @@ func (s *syncer) restack(ctx context.Context, t store.Task) error {
 			return err
 		}
 	case store.Done(dt.Status):
-		if db.HeadSHA == "" || db.HeadSHA == br.BaseSHA {
+		if db.HeadSHA == "" {
 			return nil
+		}
+		if db.HeadSHA == br.BaseSHA {
+			// Already on the dependency's head; a published task restacked earlier may
+			// still wait for its re-publish.
+			return s.republishIfStale(ctx, t, br, dt, db)
 		}
 		onto, ontoSHA = db.Name, db.HeadSHA
 	default:
@@ -429,7 +500,55 @@ func (s *syncer) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	if t.Status != store.TaskPublished {
 		return nil
 	}
+	return s.republish(ctx, t)
+}
+
+// republishIfStale re-publishes a published task whose published commit no longer matches its
+// branch head or its published parent: a restack whose re-publish waited for the parent.
+func (s *syncer) republishIfStale(ctx context.Context, t store.Task, br store.Branch, dt store.Task, db store.Branch) error {
+	if t.Status != store.TaskPublished || br.PublishedSHA == "" {
+		return nil
+	}
+	root := s.Paths.Root
+	stale := false
+	if dt.Status == store.TaskPublished && db.PublishedSHA != "" {
+		parent, err := gitx.RevParse(ctx, root, br.PublishedSHA+"^")
+		if err != nil {
+			return fmt.Errorf("read the parent of %s's published commit %s: %w", t.ID, short(br.PublishedSHA), err)
+		}
+		stale = parent != db.PublishedSHA
+	}
+	if !stale {
+		pubTree, err := gitx.TreeOf(ctx, root, br.PublishedSHA)
+		if err != nil {
+			return err
+		}
+		headTree, err := gitx.TreeOf(ctx, root, br.HeadSHA)
+		if err != nil {
+			return err
+		}
+		stale = pubTree != headTree
+	}
+	if !stale {
+		return nil
+	}
+	return s.republish(ctx, t)
+}
+
+// republish pushes a published task again. A refusal by the dependency rule leaves it
+// published and reports it as waiting for its parent; any other failure blocks it.
+func (s *syncer) republish(ctx context.Context, t store.Task) error {
+	po := publish.Options{Store: s.Store, Cfg: s.Cfg, Paths: s.Paths, Host: s.Host, TaskID: t.ID}
 	pr, err := publish.Publish(ctx, po)
+	if parent, ok := publish.ParentRefusal(err); ok {
+		next := fmt.Sprintf("publish %s with `mill review approve %s`, then run `mill sync`", parent, parent)
+		if parent == "" {
+			next = "publish its dependencies, then run `mill sync`"
+		}
+		s.res.NeedsRepublish = append(s.res.NeedsRepublish, NeedsRepublish{TaskID: t.ID, After: parent, Reason: err.Error()})
+		s.logf("%s: not re-published yet: %v; %s", t.ID, err, next)
+		return nil
+	}
 	if err != nil {
 		return s.block(ctx, t.ID, fmt.Sprintf("sync: re-publishing after the restack failed: %v", err))
 	}
