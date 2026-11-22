@@ -135,7 +135,7 @@ func keepOnce(ctx context.Context, env Env, o keepOpts) int {
 	if err != nil {
 		return fail(err)
 	}
-	ko := keeper.Options{Store: s, Cfg: cfg, Paths: paths, Host: p.Host, Pipeline: p, Goal: o.goal, Out: out}
+	ko := keeper.Options{Store: s, Cfg: cfg, Paths: paths, Host: p.Host, Pipeline: p, Goal: o.goal, Out: out, Force: o.combined}
 
 	var kres *keeper.Result
 	if o.combined {
@@ -206,13 +206,17 @@ func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
 		section("Waiting", waiting)
 		section("Blocked", blockedL)
 	}
+	cachedNote := ""
+	if c.Cached {
+		cachedNote = " (cached: nothing changed since the last check)"
+	}
 	switch {
 	case c.Ran && c.Passed:
 		empty = false
-		fmt.Fprintf(w, "Combined check: passed (%d branches merged: %s).\n", len(c.Branches), strings.Join(c.Branches, ", "))
+		fmt.Fprintf(w, "Combined check: passed (%d branches merged: %s)%s.\n", len(c.Branches), strings.Join(c.Branches, ", "), cachedNote)
 	case c.Ran && c.Culprit != "":
 		empty = false
-		fmt.Fprintf(w, "Combined check: failed.\n  culprit: %s\n", c.Culprit)
+		fmt.Fprintf(w, "Combined check: failed%s.\n  culprit: %s\n", cachedNote, c.Culprit)
 		if c.Partner != "" {
 			fmt.Fprintf(w, "  partner: %s\n", c.Partner)
 		} else {
@@ -223,7 +227,7 @@ func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
 		}
 	case c.Ran:
 		empty = false
-		fmt.Fprintln(w, "Combined check: failed.")
+		fmt.Fprintf(w, "Combined check: failed%s.\n", cachedNote)
 	}
 	if empty {
 		fmt.Fprintln(w, "Nothing to do.")

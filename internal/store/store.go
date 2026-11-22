@@ -122,6 +122,19 @@ func (s *Store) Events(ctx context.Context, afterSeq int64, limit int) ([]Event,
 	return s.queryEvents(ctx, q, args...)
 }
 
+// LatestEvent returns the newest event of the given kind. The bool is false when there is none.
+func (s *Store) LatestEvent(ctx context.Context, kind string) (Event, bool, error) {
+	evs, err := s.queryEvents(ctx, `SELECT seq, at, kind, COALESCE(goal_id, ''), COALESCE(task_id, ''), data
+	      FROM events WHERE kind = ? ORDER BY seq DESC LIMIT 1`, kind)
+	if err != nil {
+		return Event{}, false, fmt.Errorf("read the latest %s event: %w", kind, err)
+	}
+	if len(evs) == 0 {
+		return Event{}, false, nil
+	}
+	return evs[0], true, nil
+}
+
 func (s *Store) queryEvents(ctx context.Context, q string, args ...any) ([]Event, error) {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
