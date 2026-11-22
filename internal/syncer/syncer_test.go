@@ -10,6 +10,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 	"github.com/msidorkevich/mill/internal/taskspec"
@@ -149,5 +150,81 @@ func TestSyncDoesNotLandVerifiedTaskWithoutOwnCommits(t *testing.T) {
 	}
 	if tk, _ := o.Store.GetTask(ctx, "empty"); tk.Status != store.TaskVerified {
 		t.Errorf("status = %s", tk.Status)
+	}
+}
+
+// stackedGoal is a goal with task a and task b depending on it, b based on a's head, and a
+// moved by one more commit adding a2.txt so that sync restacks b onto it.
+func stackedGoal(t *testing.T, reportRedGate bool) Options {
+	t.Helper()
+	o, _ := fixture(t)
+	ctx := context.Background()
+	root := o.Paths.Root
+	base := git(t, root, "rev-parse", "HEAD")
+	pl := plan.Plan{Goal: "stack", Tasks: []taskspec.Spec{
+		{ID: "a", Title: "Task a", Kind: "implement", Spec: "write", Acceptance: []string{"ok"}, Owns: []string{}, Size: "S"},
+		{ID: "b", Title: "Task b", Kind: "implement", Spec: "write", Acceptance: []string{"ok"}, Owns: []string{}, Size: "S", DependsOn: []string{"a"}},
+	}}
+	raw, _ := json.Marshal(pl)
+	g, err := o.Store.CreateGoal(ctx, "stack", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Store.ApproveGoal(ctx, g.ID, pl); err != nil {
+		t.Fatal(err)
+	}
+	aWT, bWT := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
+	git(t, root, "worktree", "add", "-q", "-b", "mill/g1/a", aWT, base)
+	aHead := writeCommit(t, aWT, "a.txt", "work on a")
+	git(t, root, "worktree", "add", "-q", "-b", "mill/g1/b", bWT, aHead)
+	bHead := writeCommit(t, bWT, "b.txt", "work on b")
+	aNew := writeCommit(t, aWT, "a2.txt", "more work on a")
+	for _, br := range []store.Branch{
+		{TaskID: "g1/a", Name: "mill/g1/a", Base: "main", BaseSHA: base, StartSHA: base, HeadSHA: aNew, GateSHA: aNew, Worktree: aWT},
+		{TaskID: "g1/b", Name: "mill/g1/b", Base: "mill/g1/a", BaseSHA: aHead, StartSHA: aHead, HeadSHA: bHead, GateSHA: bHead, Worktree: bWT},
+	} {
+		if err := o.Store.SaveBranch(ctx, br); err != nil {
+			t.Fatal(err)
+		}
+		if err := o.Store.SetTaskStatus(ctx, br.TaskID, store.TaskVerified, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o.Cfg.CheckCmd = "test ! -f a2.txt" // red once b sits on a's new head
+	o.ReportRedGate = reportRedGate
+	return o
+}
+
+func TestSyncBlocksTaskWithRedGateAfterRestackByDefault(t *testing.T) {
+	o := stackedGoal(t, false)
+	res, err := Sync(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Restacked) != 1 || len(res.Blocked) != 1 || res.Blocked[0].TaskID != "g1/b" || res.GateRed != nil {
+		t.Fatalf("result = %+v", res)
+	}
+	if tk, _ := o.Store.GetTask(context.Background(), "g1/b"); tk.Status != store.TaskBlocked {
+		t.Fatalf("status = %s", tk.Status)
+	}
+}
+
+func TestSyncReportsRedGateAfterRestackWithoutBlocking(t *testing.T) {
+	o := stackedGoal(t, true)
+	ctx := context.Background()
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Restacked) != 1 || len(res.Blocked) != 0 || len(res.GateRed) != 1 || res.GateRed[0].TaskID != "g1/b" ||
+		res.GateRed[0].Gate.Passed || len(res.GateRed[0].Gate.Commands) != 1 {
+		t.Fatalf("result = %+v", res)
+	}
+	if tk, _ := o.Store.GetTask(ctx, "g1/b"); tk.Status != store.TaskVerified {
+		t.Fatalf("status = %s", tk.Status)
+	}
+	br, _ := o.Store.GetBranch(ctx, "g1/b")
+	if br.GateSHA == br.HeadSHA {
+		t.Fatalf("gate sha %s recorded as green at the new head", br.GateSHA)
 	}
 }

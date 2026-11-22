@@ -1,0 +1,553 @@
+// Package keeper keeps verified and published task branches mergeable (KP4-KP7). One Pass
+// syncs with the remote, rebases only the branches that would conflict with their base
+// (reusing recorded resolutions with rerere and asking the resolver agent for the rest),
+// fixes branches whose gate turned red after a restack and re-publishes published tasks
+// that changed.
+//
+// The caller holds the run lock.
+package keeper
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gate"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/pipeline"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/prompt"
+	"github.com/msidorkevich/mill/internal/publish"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/syncer"
+)
+
+// How a rebase's conflicts were resolved (the resolved_by of a task-restacked event).
+const (
+	ResolvedByRerere = "rerere" // every conflict had a recorded resolution
+	ResolvedByAgent  = "agent"  // the resolver agent resolved at least one stop
+	ResolvedByNone   = "none"   // the commits replayed without conflicts
+)
+
+// Options configure one pass.
+type Options struct {
+	Store    *store.Store
+	Cfg      config.Config
+	Paths    project.Paths
+	Host     host.Host // runs the gate; nil means host.NewExec()
+	Pipeline *pipeline.Pipeline
+	Goal     string    // only this goal's tasks; empty means every goal
+	Out      io.Writer // one progress line per action; nil discards
+}
+
+// Rebased is a task whose own commits were replayed onto its moved base.
+type Rebased struct {
+	TaskID     string `json:"task_id"`
+	Onto       string `json:"onto"`
+	OntoSHA    string `json:"onto_sha"`
+	OldHead    string `json:"old_head"`
+	NewHead    string `json:"new_head"`
+	ResolvedBy string `json:"resolved_by"`
+}
+
+// Blocked is a task the pass could not rebase, fix or re-publish.
+type Blocked struct {
+	TaskID string `json:"task_id"`
+	Reason string `json:"reason"`
+}
+
+// Skipped is a task the pass did not look at, and why.
+type Skipped struct {
+	TaskID string `json:"task_id"`
+	Reason string `json:"reason"`
+}
+
+// Result is what one pass did.
+type Result struct {
+	Sync           syncer.Result        `json:"sync"`
+	Rebased        []Rebased            `json:"rebased"`
+	ResolvedRerere []string             `json:"resolved_rerere"`
+	ResolvedAgent  []string             `json:"resolved_agent"`
+	Fixed          []string             `json:"fixed"`
+	Blocked        []Blocked            `json:"blocked"`
+	Republished    []syncer.Republished `json:"republished"`
+	// NeedsRepublish lists changed published tasks whose re-publish waits for their parent.
+	NeedsRepublish []syncer.NeedsRepublish `json:"needs_republish"`
+	Skipped        []Skipped               `json:"skipped"`
+}
+
+type keeper struct {
+	Options
+	upstream string // <remote>/<base_branch>
+	res      *Result
+}
+
+func (k *keeper) logf(format string, a ...any) {
+	if k.Out != nil {
+		fmt.Fprintf(k.Out, format+"\n", a...)
+	}
+}
+
+// Pass runs one reconcile pass. Problems with one task block that task and are reported in
+// the result; an error means the pass itself could not continue.
+func Pass(ctx context.Context, o Options) (Result, error) {
+	res := Result{Rebased: []Rebased{}, ResolvedRerere: []string{}, ResolvedAgent: []string{}, Fixed: []string{},
+		Blocked: []Blocked{}, Republished: []syncer.Republished{}, NeedsRepublish: []syncer.NeedsRepublish{}, Skipped: []Skipped{}}
+	if o.Pipeline == nil {
+		return res, errors.New("keeper: no pipeline to run the resolver, verifier and fixer with")
+	}
+	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true})
+	res.Sync = sr
+	if err != nil {
+		return res, err
+	}
+	k := &keeper{Options: o, upstream: o.Cfg.Remote + "/" + o.Cfg.BaseBranch, res: &res}
+
+	// KP7 for the branches sync restacked: their gate is red, so the fixer runs.
+	for _, gr := range sr.GateRed {
+		t, err := k.Store.GetTask(ctx, gr.TaskID)
+		if err != nil {
+			return res, err
+		}
+		if err := k.fix(ctx, t, gr.Gate, t.Status == store.TaskPublished); err != nil {
+			return res, err
+		}
+	}
+
+	var goals []store.Goal
+	if o.Goal != "" {
+		g, err := o.Store.GetGoal(ctx, o.Goal)
+		if err != nil {
+			return res, fmt.Errorf("goal %s: %w", o.Goal, err)
+		}
+		goals = []store.Goal{g}
+	} else if goals, err = o.Store.ListGoals(ctx); err != nil {
+		return res, err
+	}
+	for _, g := range goals {
+		if err := k.goal(ctx, g); err != nil {
+			return res, err
+		}
+	}
+	return res, nil
+}
+
+// goal walks a goal's tasks parents first.
+func (k *keeper) goal(ctx context.Context, g store.Goal) error {
+	tasks, err := k.Store.GoalTasks(ctx, g.ID)
+	if err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, t := range tasks {
+		known[t.ID] = true
+	}
+	var pl plan.Plan
+	if err := json.Unmarshal(g.Plan, &pl); err != nil {
+		return fmt.Errorf("goal %s has an unreadable plan: %w", g.ID, err)
+	}
+	locals, err := pl.Order()
+	if err != nil {
+		return fmt.Errorf("goal %s plan: %w", g.ID, err)
+	}
+	for _, l := range locals {
+		id := store.TaskID(g.ID, l)
+		if !known[id] {
+			continue
+		}
+		// Reload: an earlier step may have changed it.
+		t, err := k.Store.GetTask(ctx, id)
+		if err != nil {
+			return err
+		}
+		if t.Status != store.TaskVerified && t.Status != store.TaskPublished {
+			continue
+		}
+		br, err := k.Store.GetBranch(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("task %s is %s but its branch cannot be loaded: %w", id, t.Status, err)
+		}
+		if br.Name == "" {
+			continue
+		}
+		if err := k.task(ctx, t, br); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// task works out the base tip of one task and rebases it when it would conflict with it.
+func (k *keeper) task(ctx context.Context, t store.Task, br store.Branch) error {
+	deps, err := k.Store.TaskDeps(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	if len(deps) > 1 {
+		return k.restackFanIn(ctx, t, br)
+	}
+	onto, landed := k.upstream, false
+	var tip string
+	if len(deps) == 1 {
+		dep := deps[0]
+		dt, err := k.Store.GetTask(ctx, dep)
+		if err != nil {
+			return err
+		}
+		db, err := k.Store.GetBranch(ctx, dep)
+		if err != nil {
+			return fmt.Errorf("dependency %s of %s has no branch: %w", dep, t.ID, err)
+		}
+		switch {
+		case dt.Status == store.TaskLanded:
+			landed = br.Base == db.Name
+		case store.Done(dt.Status) && db.HeadSHA != "":
+			onto, tip = db.Name, db.HeadSHA
+		default:
+			k.skip(t.ID, fmt.Sprintf("dependency %s is %s; waiting for it", dep, dt.Status))
+			return nil
+		}
+	}
+	if tip == "" {
+		if tip, err = gitx.RevParse(ctx, k.Paths.Root, "refs/remotes/"+k.upstream); err != nil {
+			return fmt.Errorf("remote %s has no branch %s: %w", k.Cfg.Remote, k.Cfg.BaseBranch, err)
+		}
+	}
+	if br.HeadSHA == "" {
+		k.skip(t.ID, "no recorded head commit")
+		return nil
+	}
+
+	// KP4/KP5: a branch that still merges cleanly is left alone.
+	root := k.Paths.Root
+	in, err := gitx.IsAncestor(ctx, root, tip, br.HeadSHA)
+	if err != nil {
+		return fmt.Errorf("compare %s with %s: %w", t.ID, onto, err)
+	}
+	if in {
+		return nil
+	}
+	files, err := gitx.MergeConflicts(ctx, root, tip, br.HeadSHA)
+	if err != nil {
+		return fmt.Errorf("conflict check of %s against %s: %w", t.ID, onto, err)
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	k.logf("%s: conflicts with %s (%s) in %s; rebasing", t.ID, onto, short(tip), strings.Join(files, ", "))
+	return k.rebase(ctx, t, br, onto, tip, landed)
+}
+
+func (k *keeper) skip(id, reason string) {
+	k.res.Skipped = append(k.res.Skipped, Skipped{TaskID: id, Reason: reason})
+	k.logf("%s: skipped: %s", id, reason)
+}
+
+func (k *keeper) block(ctx context.Context, id, reason string) error {
+	if err := k.Store.SetTaskStatus(ctx, id, store.TaskBlocked, "", reason); err != nil {
+		return fmt.Errorf("block %s (%s): %w", id, reason, err)
+	}
+	k.res.Blocked = append(k.res.Blocked, Blocked{TaskID: id, Reason: reason})
+	k.logf("%s: blocked: %s", id, reason)
+	return nil
+}
+
+// rebase replays the task's own commits onto tip (KP6), resolving stops with rerere or the
+// resolver agent. Any failure puts the branch back where it was and blocks the task.
+func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto, tip string, landed bool) error {
+	oldStart := br.StartSHA
+	if oldStart == "" {
+		oldStart = br.BaseSHA
+	}
+	if oldStart == "" {
+		return k.block(ctx, t.ID, "keeper: no recorded starting point, so its own commits cannot be told apart; rebase it by hand")
+	}
+	if !gitx.IsWorktreeOn(ctx, br.Worktree, br.Name) {
+		return k.block(ctx, t.ID, fmt.Sprintf("keeper: worktree %s is not a checkout of %s, so it cannot be rebased onto %s; restore it", br.Worktree, br.Name, onto))
+	}
+	dirty, err := gitx.HasChanges(ctx, br.Worktree)
+	if err != nil {
+		return err
+	}
+	if dirty {
+		return k.block(ctx, t.ID, fmt.Sprintf("keeper: worktree %s has uncommitted changes, so it cannot be rebased onto %s; commit or discard them", br.Worktree, onto))
+	}
+	head, err := gitx.RevParse(ctx, br.Worktree, "HEAD")
+	if err != nil {
+		return err
+	}
+	if head != br.HeadSHA {
+		return k.block(ctx, t.ID, fmt.Sprintf("keeper: branch %s is at %s but mill recorded head %s; it was not rebased", br.Name, short(head), short(br.HeadSHA)))
+	}
+	oldBase := br.BaseSHA
+	if oldBase == "" {
+		oldBase = oldStart
+	}
+	sums, err := gitx.CommitSummaries(ctx, k.Paths.Root, oldBase, tip)
+	if err != nil {
+		return err
+	}
+	var baseCommits []prompt.BaseCommit
+	for _, c := range sums {
+		baseCommits = append(baseCommits, prompt.BaseCommit{SHA: c.SHA, Subject: c.Subject, Trailers: strings.Join(c.Trailers, "\n")})
+	}
+
+	old := br
+	wasPublished := t.Status == store.TaskPublished
+	wt := br.Worktree
+	// fail undoes the rebase and blocks the task; step names what failed.
+	fail := func(step string, files []string, detail string) error {
+		if err := k.restore(ctx, old); err != nil {
+			return fmt.Errorf("%s: rebasing onto %s failed (%s: %s) and the branch could not be restored: %w", t.ID, onto, step, detail, err)
+		}
+		where := ""
+		if len(files) > 0 {
+			where = " in " + strings.Join(files, ", ")
+		}
+		return k.block(ctx, t.ID, fmt.Sprintf("keeper: rebasing onto %s (%s) failed at %s%s: %s; the branch is unchanged. Resolve the conflict by hand, then run `mill task rebase %s` or `mill run --retry-blocked`",
+			onto, short(tip), step, where, detail, t.ID))
+	}
+
+	st, err := gitx.RebaseStart(ctx, wt, tip, oldStart, true)
+	if err != nil {
+		return fail("the rebase", nil, err.Error())
+	}
+	agent := false
+	rerere := st.RerereResolved
+	for !st.Done {
+		files := st.Files
+		in := prompt.ResolverInput{Task: t.Spec, BaseCommits: baseCommits, Onto: onto}
+		for _, f := range files {
+			h, err := gitx.ConflictHunks(ctx, wt, f)
+			if err != nil {
+				return fail("reading the conflicts", files, err.Error())
+			}
+			in.Conflicts = append(in.Conflicts, prompt.ConflictFile{Path: f, Hunks: h})
+		}
+		k.logf("%s: stopped at %s on conflicts in %s; running the resolver", t.ID, short(st.Stopped), strings.Join(files, ", "))
+		out, err := k.Pipeline.Resolve(ctx, t.ID, in, wt)
+		agent = true
+		if err != nil {
+			return fail("the resolver", files, err.Error())
+		}
+		if out.Stop != "" {
+			return fail("the resolver", files, "it stopped: "+out.Stop)
+		}
+		if out.Reason != "" {
+			return fail("the resolver", files, out.Reason)
+		}
+		marked, err := gitx.HasConflictMarkers(ctx, wt, files)
+		if err != nil {
+			return fail("checking the resolution", files, err.Error())
+		}
+		if len(marked) > 0 {
+			return fail("the resolver", marked, "conflict markers are left")
+		}
+		if st, err = gitx.RebaseContinue(ctx, wt, files, true); err != nil {
+			return fail("continuing the rebase", files, err.Error())
+		}
+		rerere += st.RerereResolved
+	}
+	newHead := st.Head
+	by := ResolvedByNone
+	switch {
+	case agent:
+		by = ResolvedByAgent
+	case rerere > 0:
+		by = ResolvedByRerere
+	}
+
+	if landed {
+		br.Base = k.Cfg.BaseBranch
+	}
+	br.BaseSHA, br.StartSHA, br.HeadSHA = tip, tip, newHead
+	if err := k.Store.SaveBranch(ctx, br); err != nil {
+		return fail("recording the new head", nil, err.Error())
+	}
+	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: t.ID}
+	if agent {
+		// The agent changed code: the gate and the verifier both check it.
+		g, err := publish.GateAtHead(ctx, po, t, br, "keeper")
+		if err != nil {
+			return fail("the gate", nil, err.Error())
+		}
+		if !g.Passed {
+			return fail("the gate", nil, "it failed after the resolution:\n"+publish.FailedCommands(g))
+		}
+		v, stop, err := k.Pipeline.Verify(ctx, t.ID)
+		if err != nil {
+			return fail("the verifier", nil, err.Error())
+		}
+		if stop != "" {
+			return fail("the verifier", nil, "it stopped: "+stop)
+		}
+		if v.Verdict != "pass" {
+			return fail("the verifier", nil, fmt.Sprintf("verdict %s: %s", v.Verdict, oneLine(v.Summary)))
+		}
+		br.GateSHA = newHead
+		if err := k.Store.SaveBranch(ctx, br); err != nil {
+			return fail("recording the new head", nil, err.Error())
+		}
+	}
+
+	goalID, _ := store.SplitTaskID(t.ID)
+	if _, err := k.Store.AppendEvent(ctx, "task-restacked", goalID, t.ID, map[string]string{
+		"onto": onto, "onto_sha": tip, "old_start": oldStart, "old_head": old.HeadSHA, "new_head": newHead, "resolved_by": by}); err != nil {
+		return err
+	}
+	k.res.Rebased = append(k.res.Rebased, Rebased{TaskID: t.ID, Onto: onto, OntoSHA: tip, OldHead: old.HeadSHA, NewHead: newHead, ResolvedBy: by})
+	switch by {
+	case ResolvedByAgent:
+		k.res.ResolvedAgent = append(k.res.ResolvedAgent, t.ID)
+	case ResolvedByRerere:
+		k.res.ResolvedRerere = append(k.res.ResolvedRerere, t.ID)
+	}
+	k.logf("%s: rebased onto %s (%s), head %s -> %s (resolved by %s)", t.ID, onto, short(tip), short(old.HeadSHA), short(newHead), by)
+
+	if !agent {
+		// KP3: after a rebase without the agent the gate is re-run, the verifier is not.
+		g, err := publish.GateAtHead(ctx, po, t, br, "keeper")
+		if err != nil {
+			return k.block(ctx, t.ID, fmt.Sprintf("keeper: the gate could not be re-run after the rebase: %v", err))
+		}
+		if !g.Passed {
+			return k.fix(ctx, t, g, wasPublished)
+		}
+		br.GateSHA = newHead
+		if err := k.Store.SaveBranch(ctx, br); err != nil {
+			return fmt.Errorf("record the gate result of %s at %s: %w", t.ID, short(newHead), err)
+		}
+	}
+	if !wasPublished {
+		return nil
+	}
+	return k.republish(ctx, t.ID)
+}
+
+// restore puts the branch back at the old head: it aborts a rebase in progress, resets a
+// finished one, restores the branch row and checks the worktree is clean at the old head.
+func (k *keeper) restore(ctx context.Context, old store.Branch) error {
+	wt := old.Worktree
+	in, err := rebaseInProgress(ctx, wt)
+	if err != nil {
+		return err
+	}
+	if in {
+		if err := gitx.RebaseAbort(ctx, wt); err != nil {
+			return err
+		}
+	}
+	head, err := gitx.RevParse(ctx, wt, "HEAD")
+	if err != nil {
+		return fmt.Errorf("read the head of %s: %w", old.Name, err)
+	}
+	if head != old.HeadSHA {
+		if _, err := gitx.Run(ctx, wt, "reset", "-q", "--hard", old.HeadSHA); err != nil {
+			return fmt.Errorf("reset %s to %s: %w", old.Name, short(old.HeadSHA), err)
+		}
+	}
+	if head, err = gitx.RevParse(ctx, wt, "HEAD"); err != nil {
+		return fmt.Errorf("read the head of %s: %w", old.Name, err)
+	}
+	if head != old.HeadSHA {
+		return fmt.Errorf("branch %s is at %s, not at its old head %s; reset it by hand", old.Name, short(head), short(old.HeadSHA))
+	}
+	if !gitx.IsWorktreeOn(ctx, wt, old.Name) {
+		return fmt.Errorf("worktree %s is not on %s after the restore; check it out by hand", wt, old.Name)
+	}
+	dirty, err := gitx.HasChanges(ctx, wt)
+	if err != nil {
+		return err
+	}
+	if dirty {
+		return fmt.Errorf("worktree %s has changes after the restore; inspect it with `git status`", wt)
+	}
+	if err := k.Store.SaveBranch(ctx, old); err != nil {
+		return fmt.Errorf("record %s back at %s: %w", old.Name, short(old.HeadSHA), err)
+	}
+	return nil
+}
+
+// rebaseInProgress reports whether a rebase is in progress in dir.
+func rebaseInProgress(ctx context.Context, dir string) (bool, error) {
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		p, err := gitx.Run(ctx, dir, "rev-parse", "--git-path", name)
+		if err != nil {
+			return false, fmt.Errorf("locating %s in %s: %w", name, dir, err)
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
+		if _, err := os.Stat(p); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("checking %s: %w", p, err)
+		}
+	}
+	return false, nil
+}
+
+// fix runs the fixer for a task whose gate turned red after a restack (KP7): the gate
+// failure becomes the findings of an implement attempt.
+func (k *keeper) fix(ctx context.Context, t store.Task, g gate.Result, wasPublished bool) error {
+	if err := k.Pipeline.RecordGateFailure(ctx, t.ID, g); err != nil {
+		return k.block(ctx, t.ID, fmt.Sprintf("keeper: the gate failed after the restack and its failure could not be recorded for the fixer: %v", err))
+	}
+	k.logf("%s: the gate failed after the restack; running the fixer", t.ID)
+	out, err := k.Pipeline.Run(ctx, t.ID)
+	if err != nil {
+		return fmt.Errorf("fixer for %s: %w", t.ID, err)
+	}
+	if out.Status != store.TaskVerified {
+		// The pipeline already recorded the task's status and reason.
+		k.res.Blocked = append(k.res.Blocked, Blocked{TaskID: t.ID, Reason: "keeper: the fixer did not get the gate green: " + out.Reason})
+		return nil
+	}
+	k.res.Fixed = append(k.res.Fixed, t.ID)
+	k.logf("%s: fixed at %s", t.ID, short(out.HeadSHA))
+	if !wasPublished {
+		return nil
+	}
+	return k.republish(ctx, t.ID)
+}
+
+// republish pushes a changed published task again. A refusal by the dependency rule is
+// reported as waiting for its parent; any other failure blocks it.
+func (k *keeper) republish(ctx context.Context, id string) error {
+	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: id}
+	pr, err := publish.Publish(ctx, po)
+	if parent, ok := publish.ParentRefusal(err); ok {
+		k.res.NeedsRepublish = append(k.res.NeedsRepublish, syncer.NeedsRepublish{TaskID: id, After: parent, Reason: err.Error()})
+		k.logf("%s: not re-published yet: %v", id, err)
+		return nil
+	}
+	if err != nil {
+		return k.block(ctx, id, fmt.Sprintf("keeper: re-publishing failed: %v", err))
+	}
+	k.res.Republished = append(k.res.Republished, syncer.Republished{TaskID: id, Ref: pr.Ref, SHA: pr.SHA, Parent: pr.Parent})
+	k.logf("%s: republished %s at %s", id, pr.Ref, short(pr.SHA))
+	return nil
+}
+
+func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+func short(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
