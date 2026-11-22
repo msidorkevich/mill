@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -372,4 +373,9 @@ func repoKey(root string) string {
 		h *= 16777619
 	}
 	return fmt.Sprintf("%s-%08x", filepath.Base(root), h)
+}
+
+// RenderDefaultTOML returns DefaultTOML with base_branch set to branch, keeping its comments.
+func RenderDefaultTOML(branch string) string {
+	return strings.Replace(DefaultTOML, `base_branch = "main"`, "base_branch = "+strconv.Quote(branch), 1)
 }

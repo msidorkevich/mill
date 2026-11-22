@@ -128,7 +128,7 @@ func TestInitCreatesLayoutFromSubdirectory(t *testing.T) {
 	if fi, err := os.Stat(p.Runs); err != nil || !fi.IsDir() {
 		t.Errorf("runs/ not created: %v", err)
 	}
-	if got, _ := os.ReadFile(p.Config); string(got) != config.DefaultTOML {
+	if got, _ := os.ReadFile(p.Config); string(got) != config.RenderDefaultTOML(gitBranch(t, root)) {
 		t.Error("config.toml is not the default template")
 	}
 
@@ -163,6 +163,75 @@ func TestInitGitignoreKeepsStateOutOfGit(t *testing.T) {
 		if !want[f] {
 			t.Errorf("git sees %q; only config.toml and .gitignore should be visible:\n%s", f, out)
 		}
+	}
+}
+
+func gitBranch(t *testing.T, root string) string {
+	t.Helper()
+	out, err := exec.Command("git", "-C", root, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func TestInitWritesCurrentBranchAsBase(t *testing.T) {
+	for _, name := range []string{"master", "main", "trunk"} {
+		root := gitRepo(t) // no commits: unborn branch
+		if out, err := exec.Command("git", "-C", root, "symbolic-ref", "HEAD", "refs/heads/"+name).CombinedOutput(); err != nil {
+			t.Fatalf("symbolic-ref: %v: %s", err, out)
+		}
+		r := run(t, root, nil, "init")
+		if r.code != ExitOK || !strings.Contains(r.stdout, name) {
+			t.Fatalf("init on %s: %+v", name, r)
+		}
+		cfg, err := config.Load(project.PathsAt(root).Config)
+		if err != nil || cfg.BaseBranch != name {
+			t.Fatalf("base_branch on %s = %q, %v", name, cfg.BaseBranch, err)
+		}
+		if got, _ := os.ReadFile(project.PathsAt(root).Config); !strings.Contains(string(got), "# The gate") {
+			t.Errorf("template comments lost: %q", got)
+		}
+	}
+}
+
+func TestInitDetachedHeadKeepsMainAndAsksToCheck(t *testing.T) {
+	root := gitRepo(t)
+	git := func(args ...string) {
+		t.Helper()
+		a := append([]string{"-C", root, "-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)
+		if out, err := exec.Command("git", a...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("commit", "-q", "--allow-empty", "-m", "x")
+	git("checkout", "-q", "--detach")
+	r := run(t, root, nil, "init")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Check base_branch") {
+		t.Fatalf("init detached: %+v", r)
+	}
+	cfg, err := config.Load(project.PathsAt(root).Config)
+	if err != nil || cfg.BaseBranch != "main" {
+		t.Fatalf("base_branch = %q, %v", cfg.BaseBranch, err)
+	}
+}
+
+func TestInitExistingConfigKeepsBranchAndReportsIt(t *testing.T) {
+	root := gitRepo(t)
+	p := project.PathsAt(root)
+	if err := os.MkdirAll(p.MillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	custom := "base_branch = \"develop\"\n"
+	if err := os.WriteFile(p.Config, []byte(custom), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "init")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "develop") {
+		t.Fatalf("init: %+v", r)
+	}
+	if got, _ := os.ReadFile(p.Config); string(got) != custom {
+		t.Fatalf("config changed: %q", got)
 	}
 }
 
