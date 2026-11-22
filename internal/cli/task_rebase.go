@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/fanin"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/store"
@@ -89,7 +91,7 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 			return fail(fmt.Errorf("dependency branch %q: %w", db.Name, err))
 		}
 	default:
-		return fail(fmt.Errorf("task %s has %d dependencies (%s): rebasing fan-in tasks is not supported yet", id, len(deps), strings.Join(deps, ", ")))
+		return rebaseFanIn(ctx, env, s, cfg, paths.Root, t, br, oldStart)
 	}
 
 	if !gitx.IsWorktreeOn(ctx, br.Worktree, br.Name) {
@@ -143,6 +145,99 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stdout, "Next: mill run %s --retry-blocked\n", goalID)
 	} else {
 		fmt.Fprintln(env.Stdout, "Next: mill task run --file <file> --retry")
+	}
+	return ExitOK
+}
+
+// rebaseFanIn restacks a task with several dependencies: it resets the branch to its deepest
+// dependency (or the remote base branch when that one landed), merges the other dependencies
+// that have not landed and replays the task's own commits. A conflict aborts and leaves the
+// branch unchanged.
+func rebaseFanIn(ctx context.Context, env Env, s *store.Store, cfg config.Config, root string, t store.Task, br store.Branch, oldStart string) int {
+	id := t.ID
+	fail := func(err error) int {
+		fmt.Fprintf(env.Stderr, "mill task rebase: %v\n", err)
+		return ExitError
+	}
+	tg, err := fanin.Plan(ctx, s, cfg, root, t)
+	if err != nil {
+		return fail(err)
+	}
+	if tg.Wait != "" {
+		return fail(fmt.Errorf("task %s cannot be rebased yet: %s; run it first", id, tg.Wait))
+	}
+	// Like a task with one dependency, use the dependencies' branches as they are in git.
+	for i, p := range tg.Parents {
+		if p.Landed {
+			continue
+		}
+		tip, err := gitx.RevParse(ctx, root, p.Branch)
+		if err != nil {
+			return fail(fmt.Errorf("dependency branch %q: %w", p.Branch, err))
+		}
+		tg.Parents[i].Head = tip
+		if i == 0 {
+			tg.BaseSHA = tip
+		}
+	}
+
+	if !gitx.IsWorktreeOn(ctx, br.Worktree, br.Name) {
+		return fail(fmt.Errorf("worktree %s is not a checkout of %s; restore it before rebasing", br.Worktree, br.Name))
+	}
+	dirty, err := gitx.HasChanges(ctx, br.Worktree)
+	if err != nil {
+		return fail(err)
+	}
+	if dirty {
+		return fail(fmt.Errorf("worktree %s has uncommitted changes; commit or discard them, then rebase again", br.Worktree))
+	}
+	head, err := gitx.RevParse(ctx, br.Worktree, "HEAD")
+	if err != nil {
+		return fail(err)
+	}
+	if head != br.HeadSHA {
+		return fail(fmt.Errorf("branch %s is at %s but mill recorded head %s; reset it to the recorded head before rebasing", br.Name, short(head), short(br.HeadSHA)))
+	}
+	moved, err := tg.Moved(ctx, root, br)
+	if err != nil {
+		return fail(err)
+	}
+	if !moved {
+		fmt.Fprintf(env.Stdout, "%s is already up to date: %s already contains its dependencies. Nothing changed.\n", id, br.Name)
+		return ExitOK
+	}
+
+	fr, err := fanin.Restack(ctx, fanin.Options{Branch: br, Target: tg})
+	var ce *fanin.ConflictError
+	if errors.As(err, &ce) {
+		fmt.Fprintf(env.Stderr, "mill task rebase: restacking %s onto %s (%s) conflicts at %s; the restack was aborted and the branch is unchanged.\nConflicting files:\n", id, tg.Onto, short(tg.BaseSHA), ce.Step)
+		for _, f := range ce.Files {
+			fmt.Fprintf(env.Stderr, "  %s\n", f)
+		}
+		fmt.Fprintf(env.Stderr, "Resolve by hand in %s, or edit the task and run it again from scratch.\n", br.Worktree)
+		return ExitError
+	}
+	if err != nil {
+		return fail(err)
+	}
+
+	br.Base, br.BaseSHA, br.StartSHA, br.HeadSHA = tg.Base, tg.BaseSHA, fr.StartSHA, fr.Head
+	if err := s.SaveBranch(ctx, br); err != nil {
+		return fail(fmt.Errorf("the branch was restacked to %s but recording it failed: %w; reset %s to %s by hand, or record the new head", short(fr.Head), err, br.Name, short(head)))
+	}
+	goalID, _ := store.SplitTaskID(id)
+	if _, err := s.AppendEvent(ctx, "task-rebased", goalID, id, map[string]any{"old_start": oldStart, "new_start": fr.StartSHA, "onto": tg.Onto, "merged": fr.Merged}); err != nil {
+		return fail(err)
+	}
+
+	merged := "none"
+	if len(fr.Merged) > 0 {
+		merged = strings.Join(fr.Merged, ", ")
+	}
+	fmt.Fprintf(env.Stdout, "Restacked %s onto %s and merged %s.\n  starting point  %s -> %s\n  head            %s -> %s\n",
+		id, tg.Onto, merged, short(oldStart), short(fr.StartSHA), short(head), short(fr.Head))
+	if goalID != "" {
+		fmt.Fprintf(env.Stdout, "Next: mill run %s --retry-blocked\n", goalID)
 	}
 	return ExitOK
 }
