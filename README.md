@@ -49,11 +49,22 @@ mill task show add-reverse                          # status, attempts, spend, f
 mill task list                                      # every task, oldest first (--status S, --json)
 mill task run --file ../add-reverse.json --retry    # after editing the spec or raising a budget
 mill task edit <id> [--file spec.json]              # change a pending, blocked or failed task's spec
+mill task rebase <id>                                # move a pending, blocked or failed task's own commits onto its base's current tip
 ```
 
 `mill task edit` opens the task's current spec (id, title, kind, spec, acceptance, checks, owns,
 depends_on, size) in `$EDITOR`, or reads `--file`. Running and verified tasks are refused. The id
 and `depends_on` cannot change. An invalid edit prints the problems and keeps the file.
+
+`mill task rebase <id>` fixes a task that gate triage blocked because a check also fails on its
+starting point: after you fix the base branch, it replays only the task's own commits (from its
+recorded start) onto the base branch's current tip, or, for a goal task with one dependency, onto
+that verified dependency's branch head. It prints the old and new starting points and the next
+step (`mill task run --file <file> --retry`, or `mill run <goal> --retry-blocked`). It refuses
+running and verified tasks, tasks without a branch, a worktree with uncommitted changes, and
+tasks with several dependencies (not supported yet). On a conflict it aborts, leaves the branch
+unchanged, lists the conflicting files and exits 1. A branch that already contains the new tip is
+reported as up to date and left alone.
 
 A verified task is a branch `mill/t/<id>` in a worktree outside your checkout; mill prints the
 command to review its diff. mill never pushes and never touches `main`.
