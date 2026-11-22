@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gate"
@@ -397,18 +398,22 @@ func message(ctx context.Context, s *store.Store, cfg config.Config, t store.Tas
 	if len(t.Acceptance) > 0 {
 		b.WriteString("\nAcceptance:\n")
 		for _, a := range t.Acceptance {
-			fmt.Fprintf(&b, "- [ ] %s\n", oneLine(a))
+			fmt.Fprintf(&b, "- [x] %s\n", oneLine(a))
 		}
 	}
 	fmt.Fprintf(&b, "\nGate: gate passed at %s\n", short(br.HeadSHA))
 	for _, c := range gateCmds {
 		fmt.Fprintf(&b, "  %s\n", oneLine(c))
 	}
-	summary, err := verifierSummary(ctx, s, t.ID)
+	verdict, summary, err := verifierSummary(ctx, s, t.ID)
 	if err != nil {
 		return "", err
 	}
-	fmt.Fprintf(&b, "\nVerifier: %s\n", summary)
+	text, cut := trimSummary(summary)
+	fmt.Fprintf(&b, "\nVerifier: %s: %s\n", verdict, text)
+	if cut {
+		fmt.Fprintf(&b, "Full verdict: mill review show %s\n", t.ID)
+	}
 	usage, err := s.TaskUsage(ctx, t.ID)
 	if err != nil {
 		return "", err
@@ -426,11 +431,11 @@ func message(ctx context.Context, s *store.Store, cfg config.Config, t store.Tas
 	return b.String(), nil
 }
 
-// verifierSummary is the summary of the task's last verdict.
-func verifierSummary(ctx context.Context, s *store.Store, id string) (string, error) {
+// verifierSummary is the verdict and summary of the task's last verdict.
+func verifierSummary(ctx context.Context, s *store.Store, id string) (string, string, error) {
 	evs, err := s.TaskEvents(ctx, id)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	for i := len(evs) - 1; i >= 0; i-- {
 		if evs[i].Kind != "task-verdict" {
@@ -440,11 +445,39 @@ func verifierSummary(ctx context.Context, s *store.Store, id string) (string, er
 			Verdict prompt.VerifierOutput `json:"verdict"`
 		}
 		if err := json.Unmarshal(evs[i].Data, &d); err != nil {
-			return "", fmt.Errorf("corrupt task-verdict event %d: %w", evs[i].Seq, err)
+			return "", "", fmt.Errorf("corrupt task-verdict event %d: %w", evs[i].Seq, err)
 		}
-		return fmt.Sprintf("%s: %s", d.Verdict.Verdict, oneLine(d.Verdict.Summary)), nil
+		return string(d.Verdict.Verdict), oneLine(d.Verdict.Summary), nil
 	}
-	return "", errors.New("task " + id + " has no recorded verdict")
+	return "", "", errors.New("task " + id + " has no recorded verdict")
+}
+
+// summaryLimit is how many characters of the verifier summary the description keeps.
+const summaryLimit = 600
+
+// trimSummary keeps the first summaryLimit characters of s, cut at a word
+// boundary and ended with "…"; cut reports whether anything was dropped.
+func trimSummary(s string) (string, bool) {
+	r := []rune(s)
+	if len(r) <= summaryLimit {
+		return s, false
+	}
+	head := r[:summaryLimit]
+	if !unicode.IsSpace(r[summaryLimit]) {
+		if i := lastSpace(head); i > 0 {
+			head = head[:i]
+		}
+	}
+	return strings.TrimRightFunc(string(head), unicode.IsSpace) + "…", true
+}
+
+func lastSpace(r []rune) int {
+	for i := len(r) - 1; i >= 0; i-- {
+		if unicode.IsSpace(r[i]) {
+			return i
+		}
+	}
+	return -1
 }
 
 func nonEmpty(cmds []string) []string {
