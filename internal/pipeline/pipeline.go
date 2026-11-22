@@ -22,6 +22,7 @@ import (
 	"mill/internal/gitx"
 	"mill/internal/host"
 	"mill/internal/plan"
+	"mill/internal/price"
 	"mill/internal/project"
 	"mill/internal/prompt"
 	"mill/internal/runner"
@@ -528,6 +529,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	var over string
 	var startErr error
 	started := p.now()
+	live := p.startLiveUsage(ctx, id, t.ID, p.Cfg.Model(t.Size))
 	res, runErr := p.Runner.Run(rctx, runner.Request{
 		Role: role, TaskID: t.ID, Prompt: promptText, Dir: dir, Schema: schema, Tools: tools,
 		Model: p.Cfg.Model(t.Size), Budget: limits, Count: p.Cfg.Budget.Count,
@@ -544,12 +546,14 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 			mu.Lock()
 			defer mu.Unlock()
 			spent = spent.Add(d)
+			live.offer(spent)
 			if exceeded, why := budget.Exceeded(spent, limits, p.Cfg.Budget.Count); exceeded && over == "" {
 				over = why
 				cancel()
 			}
 		},
 	})
+	live.stop()
 	mu.Lock()
 	overReason := over
 	recErr := startErr
@@ -602,6 +606,67 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 		return ar, fmt.Errorf("%s run: %w", role, recErr)
 	}
 	return ar, nil
+}
+
+// liveUsageInterval is the minimum time between live usage writes for one attempt.
+var liveUsageInterval = 2 * time.Second
+
+// liveUsage writes a running attempt's usage total to the store, at most once per interval,
+// from its own goroutine so the agent's usage callback never waits on the database.
+type liveUsage struct {
+	latest chan budget.Usage // capacity 1: holds the newest unwritten total
+	quit   chan struct{}
+	done   chan struct{}
+}
+
+func (p *Pipeline) startLiveUsage(ctx context.Context, id int64, taskID, model string) *liveUsage {
+	l := &liveUsage{latest: make(chan budget.Usage, 1), quit: make(chan struct{}), done: make(chan struct{})}
+	wctx := context.WithoutCancel(ctx)
+	go func() {
+		defer close(l.done)
+		warned := false
+		for {
+			select {
+			case <-l.quit:
+				return
+			case u := <-l.latest:
+				est := false
+				if usd, ok := price.Estimate(model, u, p.Cfg.Prices); ok {
+					u.CostUSD, est = usd, true
+				} else {
+					u.CostUSD = 0
+				}
+				if err := p.Store.UpdateAttemptUsage(wctx, id, u, est); err != nil && !warned {
+					warned = true
+					p.logf("%s: live usage not recorded: %v", taskID, err)
+				}
+				select {
+				case <-l.quit:
+					return
+				case <-time.After(liveUsageInterval):
+				}
+			}
+		}
+	}()
+	return l
+}
+
+// offer hands the writer the latest running total without blocking.
+func (l *liveUsage) offer(u budget.Usage) {
+	select {
+	case <-l.latest: // drop the stale total
+	default:
+	}
+	select {
+	case l.latest <- u:
+	default:
+	}
+}
+
+// stop ends the writer and waits for any write in flight, so it cannot land after FinishAttempt.
+func (l *liveUsage) stop() {
+	close(l.quit)
+	<-l.done
 }
 
 // checkBudgets blocks when the task budget, or for a goal task the goal budget, cannot cover

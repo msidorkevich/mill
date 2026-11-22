@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"mill/internal/budget"
 	"mill/internal/gitx"
 	"mill/internal/plan"
 	"mill/internal/project"
@@ -388,5 +389,29 @@ func TestRunningPublishedOrLandedTaskIsRefused(t *testing.T) {
 		if got, _ := openStore(t, root).GetTask(context.Background(), "hello"); got.Status != st {
 			t.Errorf("status after refusal = %s, want %s", got.Status, st)
 		}
+	}
+}
+
+func TestTaskShowRunningAttemptShowsLiveUsage(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+		t.Fatalf("task run: %+v", r)
+	}
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.StartAttempt(ctx, "hello", 99, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAttemptUsage(ctx, id, budget.Usage{InputTokens: 1234, OutputTokens: 56, CostUSD: 0.07}, true); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	r := run(t, root, nil, "task", "show", "hello")
+	if !strings.Contains(r.stdout, "running") || !strings.Contains(r.stdout, "1,234") || !strings.Contains(r.stdout, "~$0.07") {
+		t.Fatalf("show lacks the running attempt's live usage:\n%s", r.stdout)
 	}
 }

@@ -660,3 +660,34 @@ func TestTaskDescendantsAreTransitiveAndRejectHoldsNonLanded(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateAttemptUsageOnlyWhileRunning(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.StartAttempt(ctx, "t1", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := budget.Usage{InputTokens: 10, OutputTokens: 2, CacheWriteTokens: 3, CacheReadTokens: 4, CostUSD: 0.01}
+	if err := s.UpdateAttemptUsage(ctx, id, live, true); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := s.Attempts(ctx, "t1")
+	if list[0].Usage != live || !list[0].CostEstimated {
+		t.Fatalf("running attempt = %+v", list[0])
+	}
+	final := budget.Usage{InputTokens: 100, CostUSD: 0.5}
+	if err := s.FinishAttempt(ctx, id, "ok", final, false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAttemptUsage(ctx, id, budget.Usage{InputTokens: 1}, true); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = s.Attempts(ctx, "t1")
+	if list[0].Usage != final || list[0].CostEstimated {
+		t.Fatalf("finished attempt changed: %+v", list[0])
+	}
+}

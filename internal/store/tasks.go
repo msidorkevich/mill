@@ -166,6 +166,18 @@ func (s *Store) FinishAttempt(ctx context.Context, id int64, status string, u bu
 	return err
 }
 
+// UpdateAttemptUsage records the usage so far of a running attempt. It leaves a finished
+// attempt untouched: FinishAttempt holds the final numbers.
+func (s *Store) UpdateAttemptUsage(ctx context.Context, id int64, u budget.Usage, costEstimated bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE attempts SET cost_estimated = ?, input_tokens = ?, output_tokens = ?,
+		cache_write_tokens = ?, cache_read_tokens = ?, cost_usd = ? WHERE id = ? AND status = ?`,
+		costEstimated, u.InputTokens, u.OutputTokens, u.CacheWriteTokens, u.CacheReadTokens, u.CostUSD, id, AttemptRunning)
+	if err != nil {
+		return fmt.Errorf("update usage of attempt %d: %w", id, err)
+	}
+	return nil
+}
+
 // SetAttemptProcess records the worker process (and its raw output file) of a running attempt.
 func (s *Store) SetAttemptProcess(ctx context.Context, id int64, pid int, command, logPath string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE attempts SET pid = ?, command = ?, log_path = ? WHERE id = ? AND status = ?`,

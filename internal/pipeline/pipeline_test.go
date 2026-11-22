@@ -17,6 +17,7 @@ import (
 	"mill/internal/gitx"
 	"mill/internal/host"
 	"mill/internal/plan"
+	"mill/internal/price"
 	"mill/internal/project"
 	"mill/internal/prompt"
 	"mill/internal/runner"
@@ -929,5 +930,156 @@ func TestOperatorFindingsStartTheNextAttemptPrompt(t *testing.T) {
 	ip := prompts(e.fake, runner.RoleImplementer)
 	if len(ip) != 2 || !strings.Contains(ip[1], "[operator] say hello world") {
 		t.Fatalf("second implementer prompt lacks the operator finding:\n%v", ip)
+	}
+}
+
+// liveRunner reports usage, then holds the run open until released.
+type liveRunner struct {
+	reported chan struct{}
+	release  chan struct{}
+	burst    time.Duration
+	once     sync.Once
+}
+
+func (l *liveRunner) Name() string { return "live" }
+func (l *liveRunner) Run(ctx context.Context, req runner.Request) (runner.Result, error) {
+	if req.Role != runner.RoleImplementer {
+		return runner.Result{Status: runner.StatusOK, Output: json.RawMessage(`{}`)}, nil
+	}
+	first := false
+	l.once.Do(func() { first = true })
+	if !first {
+		return runner.Result{Status: runner.StatusOK, Output: json.RawMessage(`{}`)}, nil
+	}
+	u := budget.Usage{InputTokens: 1000, OutputTokens: 500}
+	start := time.Now()
+	req.OnUsage(u)
+	for i := 0; i < 1000; i++ { // a burst must not block the callback
+		req.OnUsage(budget.Usage{OutputTokens: 1})
+	}
+	l.burst = time.Since(start)
+	close(l.reported)
+	<-l.release
+	return runner.Result{Status: runner.StatusOK, Output: json.RawMessage(`{}`), Usage: budget.Usage{InputTokens: 1000, OutputTokens: 1500, CostUSD: 1.25}}, nil
+}
+
+func TestRunningAttemptShowsLiveUsageThenFinalUsage(t *testing.T) {
+	e := setup(t, "true", runner.Script{}, func(c *config.Config) {
+		c.Prices = map[string]price.Rates{c.Model("S"): {Input: 1, Output: 2}}
+	})
+	e.task(t, "live")
+	lr := &liveRunner{reported: make(chan struct{}), release: make(chan struct{})}
+	e.p.Runner = lr
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.p.Run(context.Background(), "live")
+	}()
+	<-lr.reported
+	if lr.burst > time.Second {
+		t.Fatalf("usage callbacks took %s; store writes must not block them", lr.burst)
+	}
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	var a store.Attempt
+	for {
+		as, err := e.p.Store.Attempts(ctx, "live")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(as) > 0 && as[0].Usage.InputTokens > 0 {
+			a = as[0]
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no live usage recorded while the agent was running; attempts %+v log:\n%s", as, e.out)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if a.Status != store.AttemptRunning || !a.CostEstimated || a.Usage.CostUSD <= 0 {
+		t.Fatalf("live attempt = %+v", a)
+	}
+	close(lr.release)
+	<-done
+	as, _ := e.p.Store.Attempts(ctx, "live")
+	if as[0].Usage.OutputTokens != 1500 || as[0].Usage.CostUSD != 1.25 || as[0].CostEstimated {
+		t.Fatalf("final attempt = %+v", as[0])
+	}
+}
+
+// trickleRunner reports one token every 10ms for a while, then a marked final delta, then holds.
+type trickleRunner struct {
+	steps   int
+	last    int64
+	sent    chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *trickleRunner) Name() string { return "trickle" }
+func (r *trickleRunner) Run(ctx context.Context, req runner.Request) (runner.Result, error) {
+	first := false
+	r.once.Do(func() { first = true })
+	if req.Role != runner.RoleImplementer || !first {
+		return runner.Result{Status: runner.StatusOK, Output: json.RawMessage(`{}`)}, nil
+	}
+	for i := 0; i < r.steps; i++ {
+		req.OnUsage(budget.Usage{OutputTokens: 1})
+		time.Sleep(10 * time.Millisecond)
+	}
+	req.OnUsage(budget.Usage{OutputTokens: r.last})
+	close(r.sent)
+	<-r.release
+	return runner.Result{Status: runner.StatusOK, Output: json.RawMessage(`{}`)}, nil
+}
+
+func TestLiveUsageWritesAreThrottledAndNewestTotalLands(t *testing.T) {
+	old := liveUsageInterval
+	liveUsageInterval = 250 * time.Millisecond
+	t.Cleanup(func() { liveUsageInterval = old })
+	e := setup(t, "true", runner.Script{}, nil)
+	e.task(t, "trickle")
+	tr := &trickleRunner{steps: 100, last: 1000, sent: make(chan struct{}), release: make(chan struct{})}
+	e.p.Runner = tr
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.p.Run(context.Background(), "trickle")
+	}()
+	ctx := context.Background()
+	seen := map[int64]bool{}
+	var first, lastSeen time.Time
+	want := int64(100 + 1000)
+	deadline := time.Now().Add(10 * time.Second)
+	for !seen[want] {
+		as, err := e.p.Store.Attempts(ctx, "trickle")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(as) > 0 && as[0].Status == store.AttemptRunning && as[0].Usage.OutputTokens > 0 {
+			if n := as[0].Usage.OutputTokens; !seen[n] {
+				seen[n] = true
+				if first.IsZero() {
+					first = time.Now()
+				}
+				lastSeen = time.Now()
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("newest total %d never written; saw %v", want, seen)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(tr.release)
+	<-done
+	// Distinct values observed cannot exceed the writes made; writes are one per interval
+	// (plus the first), so over the observed span the count is bounded.
+	span := lastSeen.Sub(first)
+	max := int(span/liveUsageInterval) + 2
+	if len(seen) > max {
+		t.Fatalf("saw %d distinct live totals over %s with a %s interval (max %d): %v", len(seen), span, liveUsageInterval, max, seen)
+	}
+	if len(seen) < 2 {
+		t.Fatalf("expected several live writes, saw %v", seen)
 	}
 }
