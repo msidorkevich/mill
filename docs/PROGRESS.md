@@ -499,13 +499,23 @@ made the CLI task size S.
       Consider publishing a fan-in on top of a temporary merge of its unlanded parents, or a
       documented "land in waves" helper that says which PRs can be merged now.
 
-## Approval queue (goal `g10`): in progress
+## Approval queue (goal `g10`): done (landed 2026-11-22)
 
 Approve once, and `mill keep` publishes each task as soon as the publish rules allow, so
 landing a stacked or fan-in goal needs no round-trips (asked for after the four M4 rounds).
 Planned by mill's planner ($0.26): three tasks, `store-approval` → `review-approve-queue` →
 `keep-publishes-queue`. Approvals are cleared in the store whenever an implementer run starts,
 so any new code needs a new approval; restacks keep it.
+
+3/3 verified on the first attempt, $4.52. **Landed with its own feature:** one `mill review
+approve --goal g10` published `store-approval` and `review-approve-queue` (stacked) and queued
+the fan-in `keep-publishes-queue`; `mill keep g10 --watch --interval 1m` then ran unattended.
+After the operator merged the stack on GitHub, the next pass marked both landed, restacked the
+queued task onto master, re-gated it and published it from the queue by itself; after its merge
+the following pass marked goal `g10` landed. No relaying between the merges.
+
+Afterwards `mill clean --remote` removed the landed tasks' worktrees and branches, including the
+`review/g9/*` and `review/g10/*` branches on GitHub.
 
 ### Follow-ups found while planning g10
 
@@ -518,3 +528,13 @@ so any new code needs a new approval; restacks keep it.
       a test.
 - [ ] When reviewing a plan, flag dependencies that exist only because of a test, and consider
       splitting the test out before approving.
+
+### Follow-ups found while landing g10
+
+- [ ] `mill keep --watch` re-runs the combined check on every pass with two or more ready
+      branches, even when nothing changed since the last green check; on mill that is a full
+      gate (several minutes) per pass, so `--interval 1m` became 5+ minutes. Remember the last
+      green result per set of ready branches and their heads; re-run only when the set changes.
+- [ ] Process note (mine): I checked GitHub once, just before the operator's merge landed, and
+      wrongly said the wrong PR had been merged. Check what the base branch contains (which
+      tasks landed), not the top PR number, and re-fetch before concluding.
