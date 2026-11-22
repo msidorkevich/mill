@@ -12,17 +12,17 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/config"
-	"mill/internal/gitx"
-	"mill/internal/host"
-	"mill/internal/plan"
-	"mill/internal/price"
-	"mill/internal/project"
-	"mill/internal/prompt"
-	"mill/internal/runner"
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/price"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/prompt"
+	"github.com/msidorkevich/mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 type env struct {

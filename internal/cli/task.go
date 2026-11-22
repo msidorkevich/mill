@@ -13,17 +13,17 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/config"
-	"mill/internal/host"
-	"mill/internal/pipeline"
-	"mill/internal/price"
-	"mill/internal/project"
-	"mill/internal/prompt"
-	"mill/internal/runlock"
-	"mill/internal/runner"
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/pipeline"
+	"github.com/msidorkevich/mill/internal/price"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/prompt"
+	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 // ExitNotVerified means the task ran but ended blocked or failed.

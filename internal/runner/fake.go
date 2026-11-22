@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/budget"
 )
 
 // Step is one scripted response of the fake runner.

@@ -13,13 +13,13 @@ import (
 	"io"
 	"strings"
 
-	"mill/internal/config"
-	"mill/internal/gitx"
-	"mill/internal/host"
-	"mill/internal/plan"
-	"mill/internal/project"
-	"mill/internal/publish"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/publish"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // Merge detection methods, in the order they are tried.

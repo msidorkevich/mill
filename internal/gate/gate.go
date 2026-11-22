@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"mill/internal/host"
+	"github.com/msidorkevich/mill/internal/host"
 )
 
 // CmdResult is the outcome of one gate command.

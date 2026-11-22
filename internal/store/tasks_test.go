@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 func spec(id string) taskspec.Spec {
@@ -580,6 +580,31 @@ func TestBranchRoundTripsPublishedAndGateSHA(t *testing.T) {
 	}
 	if got, _ := s.GetBranch(ctx, "t1"); got.PublishedSHA != "p2" || got.GateSHA != "g2" {
 		t.Fatalf("after update = %+v", got)
+	}
+}
+
+func TestMarkTaskCleanedClearsWorktreeKeepsRowAndRecordsEvent(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveBranch(ctx, Branch{TaskID: "t1", Name: "mill/t1", Base: "main", Worktree: "/w", PublishedSHA: "p1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkTaskCleaned(ctx, "t1", map[string]string{"branch": "mill/t1"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetBranch(ctx, "t1")
+	if err != nil || got.Worktree != "" || got.Name != "mill/t1" || got.PublishedSHA != "p1" {
+		t.Fatalf("GetBranch = %+v, %v", got, err)
+	}
+	evs, _ := s.TaskEvents(ctx, "t1")
+	if last := evs[len(evs)-1]; last.Kind != "task-cleaned" {
+		t.Errorf("last event = %q, want task-cleaned", last.Kind)
+	}
+	if err := s.MarkTaskCleaned(ctx, "nope", nil); !errors.Is(err, ErrNotFound) {
+		t.Errorf("MarkTaskCleaned(unknown) = %v, want ErrNotFound", err)
 	}
 }
 

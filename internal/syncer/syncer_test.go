@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/config"
-	"mill/internal/gitx"
-	"mill/internal/project"
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 func git(t *testing.T, dir string, args ...string) string {

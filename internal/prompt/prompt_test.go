@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/gate"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/gate"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 var task = taskspec.Spec{

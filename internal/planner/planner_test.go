@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/gitx"
-	"mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/runner"
 )
 
 const validPlan = `{"goal": "Add greeting", "assumptions": [], "tasks": [

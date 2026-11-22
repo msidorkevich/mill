@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/gitx"
-	"mill/internal/project"
-	"mill/internal/runlock"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // crashScript is the fan-in script where b's implementer waits bDelayMS before finishing.
@@ -32,7 +32,7 @@ func TestCrashKilledRunRecoversWithoutDuplicates(t *testing.T) {
 		t.Skip("go tool not available")
 	}
 	bin := filepath.Join(t.TempDir(), "mill")
-	if out, err := exec.Command("go", "build", "-o", bin, "mill/cmd/mill").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", "build", "-o", bin, "github.com/msidorkevich/mill/cmd/mill").CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 

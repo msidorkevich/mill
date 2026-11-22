@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 func task(id string, deps ...string) taskspec.Spec {

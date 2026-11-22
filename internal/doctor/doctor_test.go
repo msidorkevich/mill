@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/config"
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 func TestParseGitVersion(t *testing.T) {

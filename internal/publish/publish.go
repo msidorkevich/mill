@@ -13,14 +13,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"mill/internal/config"
-	"mill/internal/gate"
-	"mill/internal/gitx"
-	"mill/internal/host"
-	"mill/internal/plan"
-	"mill/internal/project"
-	"mill/internal/prompt"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gate"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/prompt"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // Options configure one publish.

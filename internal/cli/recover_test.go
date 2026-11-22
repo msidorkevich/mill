@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/host"
-	"mill/internal/price"
-	"mill/internal/store"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/price"
+	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 func recoverStore(t *testing.T) (*store.Store, int64) {

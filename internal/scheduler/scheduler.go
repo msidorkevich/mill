@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"mill/internal/pipeline"
-	"mill/internal/plan"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/pipeline"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // Reasons the scheduler writes.

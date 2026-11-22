@@ -10,7 +10,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/budget"
 )
 
 // Role names the job an agent does.

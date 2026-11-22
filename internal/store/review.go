@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/budget"
 )
 
 // ReviewTask is a task awaiting review (verified) or a merge (published).

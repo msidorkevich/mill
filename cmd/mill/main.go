@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"mill/internal/cli"
+	"github.com/msidorkevich/mill/internal/cli"
 )
 
 func main() {

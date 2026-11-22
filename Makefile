@@ -1,5 +1,5 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -X mill/internal/cli.Version=$(VERSION)
+LDFLAGS := -X github.com/msidorkevich/mill/internal/cli.Version=$(VERSION)
 # The mill gate passes GOTESTFLAGS=-count=1 so a cached test pass never stands in for a run.
 GOTESTFLAGS ?=
 

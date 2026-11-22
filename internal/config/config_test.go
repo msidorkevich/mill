@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/price"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/price"
 )
 
 func TestDefaultTOMLMatchesDefault(t *testing.T) {

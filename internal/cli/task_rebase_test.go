@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/gitx"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 const chainPlan = `{

@@ -11,13 +11,13 @@ import (
 	"os"
 	"strings"
 
-	"mill/internal/config"
-	"mill/internal/doctor"
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/doctor"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
-// Version is set at build time: -ldflags "-X mill/internal/cli.Version=v0.1.0".
+// Version is set at build time: -ldflags "-X github.com/msidorkevich/mill/internal/cli.Version=v0.1.0".
 var Version = "dev"
 
 // Exit codes are stable (CL2).
@@ -56,6 +56,7 @@ func init() {
 		{"run", "run an approved goal's tasks in dependency order (--retry-blocked)", runRun},
 		{"review", "list tasks awaiting review; show, changes, reject", runReview},
 		{"sync", "detect merged reviews, mark them landed, restack and re-publish children (--json)", runSync},
+		{"clean", "remove worktrees and branches of landed tasks (--remote, --dry-run)", runClean},
 		{"watch", "show running agents, live spend and their latest action (--once, --interval)", runWatch},
 		{"version", "print the mill version", runVersion},
 		{"help", "show this help", func(_ context.Context, env Env, _ []string) int {

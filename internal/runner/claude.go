@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"mill/internal/budget"
-	"mill/internal/host"
-	"mill/internal/price"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/price"
 )
 
 // ClaudeEnvAllow lists the variables the claude CLI may need for authentication and provider

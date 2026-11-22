@@ -427,6 +427,18 @@ func TestPushReviewRefusesNonReviewBranchesWithoutGit(t *testing.T) {
 	}
 }
 
+func TestDeleteReviewRefusesNonReviewBranchesWithoutGit(t *testing.T) {
+	ctx := context.Background()
+	// Not a repository: any git call would fail with git's own error.
+	dir := filepath.Join(t.TempDir(), "missing")
+	for _, b := range []string{"main", "refs/heads/review/x", "reviews/x", "mill/g1/a", "review/", "Review/x", ""} {
+		err := DeleteReview(ctx, dir, "origin", b, "0123456789012345678901234567890123456789")
+		if err == nil || !strings.Contains(err.Error(), "only deletes review/") || strings.Contains(err.Error(), "git ") {
+			t.Errorf("DeleteReview(%q) = %v", b, err)
+		}
+	}
+}
+
 func TestPatchLanded(t *testing.T) {
 	ctx := context.Background()
 	r := repo(t)

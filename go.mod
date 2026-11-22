@@ -1,4 +1,4 @@
-module mill
+module github.com/msidorkevich/mill
 
 go 1.24.0
 

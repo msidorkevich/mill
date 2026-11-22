@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // chainPublished runs the chain plan as g2 (b depends on a), adds a bare remote and, when

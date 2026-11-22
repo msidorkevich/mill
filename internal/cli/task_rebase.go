@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"mill/internal/gitx"
-	"mill/internal/runlock"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 func runTaskRebase(ctx context.Context, env Env, args []string) int {

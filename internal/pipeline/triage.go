@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"mill/internal/gate"
-	"mill/internal/gitx"
-	"mill/internal/prompt"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/gate"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/prompt"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // triageResult says what a failed gate means after triage.

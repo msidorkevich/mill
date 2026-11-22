@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/gitx"
-	"mill/internal/project"
-	"mill/internal/store"
+	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 // e2ePlan has a, b (depends on a), c and d; c and d are independent of everything.

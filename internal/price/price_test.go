@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/budget"
 )
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }

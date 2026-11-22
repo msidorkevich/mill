@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
-	"mill/internal/budget"
-	"mill/internal/plan"
-	"mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/plan"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 func goalPlan() plan.Plan {

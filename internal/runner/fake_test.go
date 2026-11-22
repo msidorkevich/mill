@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/budget"
 )
 
 func TestFakePlaysStepsInOrderPerRole(t *testing.T) {
