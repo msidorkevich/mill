@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"mill/internal/config"
@@ -101,6 +102,9 @@ func initRepo(t *testing.T, dir, cfgText string) project.Paths {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p.Config, []byte(cfgText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.GitIgnore, []byte(GitignoreText()), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	s, err := store.Open(context.Background(), p.DB, store.Options{})
@@ -222,5 +226,30 @@ func TestHostAutoInsideHerdrWarns(t *testing.T) {
 	r = Run(context.Background(), fakeEnv{tools: tools}.opts(dir))
 	if c := byName(r)["host"]; c.Status != OK {
 		t.Fatalf("outside herdr: host = %+v, want ok", c)
+	}
+}
+
+func TestGitignoreMissingLinesWarn(t *testing.T) {
+	dir := gitRepo(t)
+	p := initRepo(t, dir, `check_cmd = "go test ./..."`)
+	if err := os.WriteFile(p.GitIgnore, []byte("runs/\nmill.db\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
+	c := byName(r)["gitignore"]
+	if c.Status != Warn || !strings.Contains(c.Detail, "mill.db-*") || !strings.Contains(c.Detail, "run.lock") ||
+		!strings.Contains(c.Detail, "run `mill init`") || strings.Contains(c.Detail, "runs/,") {
+		t.Fatalf("gitignore check = %+v", c)
+	}
+	if !r.OK {
+		t.Errorf("a gitignore warning must not fail the report")
+	}
+}
+
+func TestGitignoreSkippedWhenNotInitialized(t *testing.T) {
+	dir := gitRepo(t)
+	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
+	if c := byName(r)["gitignore"]; c.Status != Skip {
+		t.Fatalf("gitignore check = %+v", c)
 	}
 }
