@@ -418,3 +418,36 @@ func TestUsageFromStreamMissingFileFails(t *testing.T) {
 		t.Fatal("missing stream accepted")
 	}
 }
+
+func TestLastActionDescribesLatestToolCallOrText(t *testing.T) {
+	tool := func(name, input string) string {
+		return `{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"` + name + `","input":` + input + `}]}}` + "\n"
+	}
+	text := func(s string) string {
+		return `{"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"` + s + `"}]}}` + "\n"
+	}
+	result := `{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}` + "\n"
+	cases := []struct{ name, stream, want string }{
+		{"bash", text("hi") + tool("Bash", `{"command":"go test ./..."}`) + result, "Bash go test ./..."},
+		{"read", tool("Read", `{"file_path":"internal/x.go"}`), "Read internal/x.go"},
+		{"grep", tool("Grep", `{"pattern":"func Foo"}`), "Grep func Foo"},
+		{"text last", tool("Bash", `{"command":"ls"}`) + text("All done"), "All done"},
+		{"truncated last line", tool("Read", `{"file_path":"a.go"}`) + `{"type":"assistant","message":{"content":[{"type":"tool_use","na`, "Read a.go"},
+		{"nothing yet", `{"type":"system","subtype":"init"}` + "\n", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "s.jsonl")
+			if err := os.WriteFile(path, []byte(c.stream), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LastAction(path)
+			if err != nil || got != c.want {
+				t.Fatalf("LastAction = %q, %v; want %q", got, err, c.want)
+			}
+		})
+	}
+	if _, err := LastAction(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("missing file: want an error")
+	}
+}

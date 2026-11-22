@@ -86,6 +86,7 @@ mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, CO
 mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
 mill run g1                     # run the approved goal's tasks in dependency order
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
+mill watch [g1|g1/a]            # running attempts: task, attempt, role, elapsed, tokens, cost, latest action; redraws every 2s (--once, --interval 5s)
 mill review                     # verified and published tasks, oldest first: ID, STATUS, ATTEMPTS, COST, TITLE, BRANCH (--json)
 mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat (--diff, --json)
 mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
@@ -163,7 +164,10 @@ The commands are listed above; this is the order to use them in.
 3. **Edit.** `mill plan edit g1` changes the draft. Repeat show and edit until the plan is right.
 4. **Approve.** `mill plan approve g1` creates the tasks and freezes the plan.
 5. **Run.** `mill run g1` runs the tasks in dependency order. Check progress any time, from
-   another terminal, with `mill goal show g1`.
+   another terminal, with `mill goal show g1`, or watch the running agents live with
+   `mill watch g1`: one line per running attempt with elapsed time, billable tokens, estimated
+   cost and the agent's latest action. It redraws every `--interval` (default 2s) until Ctrl-C;
+   with `--once`, or when stdout is not a terminal, it prints once and exits.
 6. **Review the branches.** Each verified task is a branch `mill/g1/<task>`. Inspect it with git
    (for example `git log main..mill/g1/<task>` and `git diff main...mill/g1/<task>`), then merge
    it in your forge. mill never pushes and never touches `main`.
