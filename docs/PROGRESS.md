@@ -385,3 +385,23 @@ commit, rebase, squash), and mill detects each one.
 - [ ] Minor (from the verifier): if `Runner.Run` panics, the live-usage writer goroutine leaks.
 - [ ] GT7 (rebuild state from git) stays deferred, see the design notes.
 
+
+## M3 follow-ups through GitHub: in progress (goal `g7`)
+
+Onboarded to GitHub: `origin` is `git@github.com:msidorkevich/mill.git` (the local forge stays as
+remote `forge` for now); `master` pushed once, by hand; from here on `master` changes only
+through merged PRs (then `git pull`).
+
+Goal `g7`: `module-path` first (it touches nearly every file), the others stacked on it, so
+their PRs target `review/g7/module-path` until it merges; then GitHub retargets them to
+`master` and `mill sync` should restack and re-publish them.
+
+- [ ] `module-path`: module `github.com/msidorkevich/mill`
+- [ ] `init-base-branch`: `mill init` writes the repo's current branch
+- [ ] `publish-polish`: `- [x]` checklist, trimmed verifier summary
+- [ ] `mill-clean`: remove landed tasks' worktrees and branches; `--remote` deletes their review
+      branches (lease, review/* only)
+- [ ] `livewriter-panic`: writer stops even if the runner panics
+
+Not in this goal: gate speed (mostly my specs adding a full `-race` run on top of `make check`;
+I now write narrower checks), GT7 (deferred).
