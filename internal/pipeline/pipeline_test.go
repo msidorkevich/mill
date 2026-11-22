@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -1081,5 +1082,53 @@ func TestLiveUsageWritesAreThrottledAndNewestTotalLands(t *testing.T) {
 	}
 	if len(seen) < 2 {
 		t.Fatalf("expected several live writes, saw %v", seen)
+	}
+}
+
+type panicRunner struct{}
+
+func (panicRunner) Name() string { return "panic" }
+
+func (panicRunner) Run(ctx context.Context, req runner.Request) (runner.Result, error) {
+	req.OnUsage(budget.Usage{OutputTokens: 1})
+	panic("runner exploded")
+}
+
+func liveWriterGoroutines() int {
+	buf := make([]byte, 1<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	return strings.Count(string(buf), "startLiveUsage.func")
+}
+
+func TestLiveUsageWriterStopsWhenRunnerPanics(t *testing.T) {
+	e := setup(t, "true", runner.Script{}, nil)
+	e.task(t, "boom")
+	e.p.Runner = panicRunner{}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected the runner panic to propagate")
+			}
+		}()
+		e.p.Run(context.Background(), "boom")
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for liveWriterGoroutines() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("live usage writer goroutine still running after the runner panicked")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestLiveUsageStopIsIdempotent(t *testing.T) {
+	e := setup(t, "true", runner.Script{}, nil)
+	l := e.p.startLiveUsage(context.Background(), 1, "x", "m")
+	l.stop()
+	l.stop()
+	select {
+	case <-l.done:
+	default:
+		t.Fatal("writer not stopped")
 	}
 }

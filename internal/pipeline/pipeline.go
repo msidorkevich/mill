@@ -530,6 +530,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	var startErr error
 	started := p.now()
 	live := p.startLiveUsage(ctx, id, t.ID, p.Cfg.Model(t.Size))
+	defer live.stop() // also on a runner panic; the normal path stops it explicitly below
 	res, runErr := p.Runner.Run(rctx, runner.Request{
 		Role: role, TaskID: t.ID, Prompt: promptText, Dir: dir, Schema: schema, Tools: tools,
 		Model: p.Cfg.Model(t.Size), Budget: limits, Count: p.Cfg.Budget.Count,
@@ -617,6 +618,7 @@ type liveUsage struct {
 	latest chan budget.Usage // capacity 1: holds the newest unwritten total
 	quit   chan struct{}
 	done   chan struct{}
+	once   sync.Once
 }
 
 func (p *Pipeline) startLiveUsage(ctx context.Context, id int64, taskID, model string) *liveUsage {
@@ -665,7 +667,7 @@ func (l *liveUsage) offer(u budget.Usage) {
 
 // stop ends the writer and waits for any write in flight, so it cannot land after FinishAttempt.
 func (l *liveUsage) stop() {
-	close(l.quit)
+	l.once.Do(func() { close(l.quit) })
 	<-l.done
 }
 
