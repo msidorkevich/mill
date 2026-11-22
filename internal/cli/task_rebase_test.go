@@ -206,15 +206,88 @@ func TestTaskRebaseGoalTaskOntoDependencyHead(t *testing.T) {
 	}
 }
 
-func TestTaskRebaseRefusesFanInTask(t *testing.T) {
+func TestTaskRebaseRestacksFanInTaskOntoMovedDependencies(t *testing.T) {
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
 	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
+	ctx := context.Background()
+	s := openStore(t, root)
+	a, _ := s.GetBranch(ctx, "g1/a")
+	b, _ := s.GetBranch(ctx, "g1/b")
+	before, _ := s.GetBranch(ctx, "g1/c")
+	// b is c's deepest dependency (the last listed); move it forward in its worktree.
+	if err := os.WriteFile(filepath.Join(b.Worktree, "extra.txt"), []byte("e\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitC(t, b.Worktree, "add", "extra.txt")
+	gitC(t, b.Worktree, "commit", "-q", "-m", "extra")
+	bTip := gitC(t, b.Worktree, "rev-parse", "HEAD")
 	setStatus(t, root, "g1/c", store.TaskBlocked)
+
 	r := run(t, root, nil, "task", "rebase", "g1/c")
-	if r.code != ExitError || !strings.Contains(r.stderr, "rebasing fan-in tasks is not supported yet") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Restacked g1/c onto mill/g1/b and merged g1/a") || !strings.Contains(r.stdout, "mill run g1 --retry-blocked") {
 		t.Fatalf("rebase: %+v", r)
+	}
+	after, _ := s.GetBranch(ctx, "g1/c")
+	if after.Base != "mill/g1/b" || after.BaseSHA != bTip || after.StartSHA == before.StartSHA || after.HeadSHA == before.HeadSHA {
+		t.Fatalf("row = %+v (before %+v), b tip %s", after, before, bTip)
+	}
+	if got := gitC(t, root, "rev-parse", "mill/g1/c"); got != after.HeadSHA {
+		t.Errorf("git branch at %s, recorded %s", got, after.HeadSHA)
+	}
+	// The start is the merge of a into b's new tip; c's own commit is replayed on it.
+	if got := gitC(t, root, "rev-list", "--parents", "-n1", after.StartSHA); got != after.StartSHA+" "+bTip+" "+a.HeadSHA {
+		t.Errorf("start parents = %q, want b tip %s and a head %s", got, bTip, a.HeadSHA)
+	}
+	if got := gitC(t, root, "rev-list", after.StartSHA+".."+after.HeadSHA); got == "" || strings.Contains(got, "\n") {
+		t.Errorf("own commits after the start = %q, want one", got)
+	}
+	if files := gitC(t, root, "diff", "--name-only", after.StartSHA, after.HeadSHA); files != "c.txt" {
+		t.Errorf("own changes = %q", files)
+	}
+	for _, f := range []string{"a.txt", "b.txt", "c.txt", "extra.txt"} {
+		if _, err := os.Stat(filepath.Join(after.Worktree, f)); err != nil {
+			t.Errorf("restacked worktree lacks %s", f)
+		}
+	}
+
+	// A second rebase has nothing to do.
+	if r := run(t, root, nil, "task", "rebase", "g1/c"); r.code != ExitOK || !strings.Contains(r.stdout, "already up to date") {
+		t.Fatalf("second rebase: %+v", r)
+	}
+}
+
+func TestTaskRebaseFanInConflictLeavesBranchUnchanged(t *testing.T) {
+	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
+	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+		t.Fatalf("run: %+v", r)
+	}
+	ctx := context.Background()
+	s := openStore(t, root)
+	b, _ := s.GetBranch(ctx, "g1/b")
+	before, _ := s.GetBranch(ctx, "g1/c")
+	// b's new commit writes c.txt differently, so replaying c's own commit conflicts.
+	if err := os.WriteFile(filepath.Join(b.Worktree, "c.txt"), []byte("from b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitC(t, b.Worktree, "add", "c.txt")
+	gitC(t, b.Worktree, "commit", "-q", "-m", "b writes c.txt")
+	setStatus(t, root, "g1/c", store.TaskBlocked)
+
+	r := run(t, root, nil, "task", "rebase", "g1/c")
+	if r.code != ExitError || !strings.Contains(r.stderr, "conflicts") || !strings.Contains(r.stderr, "c.txt") || !strings.Contains(r.stderr, "branch is unchanged") {
+		t.Fatalf("rebase: %+v", r)
+	}
+	after, _ := s.GetBranch(ctx, "g1/c")
+	if after != before {
+		t.Errorf("row changed: %+v -> %+v", before, after)
+	}
+	if got := gitC(t, after.Worktree, "rev-parse", "HEAD"); got != before.HeadSHA {
+		t.Errorf("head = %s, want %s", got, before.HeadSHA)
+	}
+	if got := gitC(t, after.Worktree, "status", "--porcelain"); got != "" {
+		t.Errorf("worktree not clean: %q", got)
 	}
 }
 

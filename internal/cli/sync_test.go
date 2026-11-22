@@ -313,7 +313,7 @@ func TestSyncRedGateAfterRestackBlocksChild(t *testing.T) {
 	}
 }
 
-func TestSyncReportsFanInTasksWithoutRestacking(t *testing.T) {
+func TestSyncRestacksFanInTaskWhenDependencyLanded(t *testing.T) {
 	root, bare := publishedGoal(t)
 	for _, id := range []string{"g1/a", "g1/b"} {
 		if r := run(t, root, nil, "review", "approve", id); r.code != ExitOK {
@@ -323,22 +323,80 @@ func TestSyncReportsFanInTasksWithoutRestacking(t *testing.T) {
 	ctx := context.Background()
 	s := openStore(t, root)
 	before, _ := s.GetBranch(ctx, "g1/c")
+	b, _ := s.GetBranch(ctx, "g1/b")
 	f := forge(t, bare)
 	gitC(t, f, "fetch", "-q", "origin")
 	gitC(t, f, "merge", "-q", "--no-ff", "-m", "Merge review/g1/a", "origin/review/g1/a")
+	merge := gitC(t, f, "rev-parse", "HEAD")
 	gitC(t, f, "push", "-q", "origin", "main")
 
 	r := run(t, root, nil, "sync")
-	if r.code != ExitOK || !strings.Contains(r.stdout, "g1/a  ancestor") || !strings.Contains(r.stdout, "Not restacked") ||
-		!strings.Contains(r.stdout, "g1/c  depends on g1/a, g1/b") || strings.Contains(r.stdout, "Restacked:") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "g1/a  ancestor") || !strings.Contains(r.stdout, "Restacked:") ||
+		!strings.Contains(r.stdout, "g1/c  onto mill/g1/b") || strings.Contains(r.stdout, "Not restacked") {
 		t.Fatalf("sync: %+v", r)
 	}
+	// c stays on its deepest dependency b; a's changes now come from the base branch, so the
+	// landed a is not merged again.
 	after, _ := s.GetBranch(ctx, "g1/c")
-	if after.HeadSHA != before.HeadSHA || after.BaseSHA != before.BaseSHA {
-		t.Errorf("fan-in branch changed: %+v -> %+v", before, after)
+	if after.Base != "mill/g1/b" || after.BaseSHA != b.HeadSHA || after.HeadSHA == before.HeadSHA || after.GateSHA != after.HeadSHA {
+		t.Fatalf("fan-in branch = %+v (before %+v)", after, before)
+	}
+	if got := gitC(t, root, "rev-list", "--parents", "-n1", after.StartSHA); got != after.StartSHA+" "+b.HeadSHA+" "+merge {
+		t.Errorf("start parents = %q, want b head %s and the base tip %s", got, b.HeadSHA, merge)
+	}
+	if in := gitC(t, root, "merge-base", "--is-ancestor", merge, after.HeadSHA); in != "" {
+		t.Errorf("merge-base output %q", in)
+	}
+	if files := gitC(t, root, "diff", "--name-only", after.StartSHA, after.HeadSHA); files != "c.txt" {
+		t.Errorf("own changes = %q", files)
 	}
 	if tk, _ := s.GetTask(ctx, "g1/c"); tk.Status != store.TaskVerified {
 		t.Errorf("g1/c status = %s", tk.Status)
+	}
+	if ev := lastEvent(t, s, "g1/c", "task-restacked"); ev["new_start"] != after.StartSHA {
+		t.Errorf("task-restacked = %v", ev)
+	}
+
+	// Nothing moved since: a second sync leaves it alone.
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || strings.Contains(r.stdout, "Restacked:") {
+		t.Fatalf("second sync: %+v", r)
+	}
+}
+
+func TestSyncBlocksFanInTaskOnRestackConflict(t *testing.T) {
+	root, _ := publishedGoal(t)
+	ctx := context.Background()
+	s := openStore(t, root)
+	b, _ := s.GetBranch(ctx, "g1/b")
+	before, _ := s.GetBranch(ctx, "g1/c")
+	// b moves with a commit that writes c.txt differently from c's own commit.
+	if err := os.WriteFile(filepath.Join(b.Worktree, "c.txt"), []byte("from b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitC(t, b.Worktree, "add", "c.txt")
+	gitC(t, b.Worktree, "commit", "-q", "-m", "b writes c.txt")
+	b.HeadSHA = gitC(t, b.Worktree, "rev-parse", "HEAD")
+	if err := s.SaveBranch(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Blocked:") || strings.Contains(r.stdout, "Restacked:") {
+		t.Fatalf("sync: %+v", r)
+	}
+	tk, _ := s.GetTask(ctx, "g1/c")
+	if tk.Status != store.TaskBlocked || !strings.Contains(tk.Reason, "c.txt") || !strings.Contains(tk.Reason, "branch is unchanged") {
+		t.Errorf("g1/c = %s %q", tk.Status, tk.Reason)
+	}
+	after, _ := s.GetBranch(ctx, "g1/c")
+	if after != before {
+		t.Errorf("fan-in branch changed: %+v -> %+v", before, after)
+	}
+	if got := gitC(t, after.Worktree, "rev-parse", "HEAD"); got != before.HeadSHA {
+		t.Errorf("head = %s, want %s", got, before.HeadSHA)
+	}
+	if got := gitC(t, after.Worktree, "status", "--porcelain"); got != "" {
+		t.Errorf("worktree not clean: %q", got)
 	}
 }
 

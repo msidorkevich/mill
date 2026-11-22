@@ -54,7 +54,7 @@ func runSync(ctx context.Context, env Env, args []string) int {
 
 func printSync(w io.Writer, r syncer.Result) {
 	fmt.Fprintf(w, "\nSynced with %s/%s at %s.\n", r.Remote, r.BaseBranch, short(r.BaseSHA))
-	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.Manual)+len(r.GoalsLanded) == 0 {
+	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.GoalsLanded) == 0 {
 		fmt.Fprintln(w, "Nothing changed.")
 		return
 	}
@@ -90,12 +90,6 @@ func printSync(w io.Writer, r syncer.Result) {
 		fmt.Fprintln(w, "Blocked:")
 		for _, b := range r.Blocked {
 			fmt.Fprintf(w, "  %s  %s\n", b.TaskID, strings.ReplaceAll(b.Reason, "\n", "\n    "))
-		}
-	}
-	if len(r.Manual) > 0 {
-		fmt.Fprintln(w, "Not restacked (several dependencies; rebase by hand or let the keeper do it):")
-		for _, m := range r.Manual {
-			fmt.Fprintf(w, "  %s  depends on %s\n", m.TaskID, strings.Join(m.Deps, ", "))
 		}
 	}
 	if len(r.GoalsLanded) > 0 {

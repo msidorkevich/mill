@@ -59,12 +59,16 @@ and `depends_on` cannot change. An invalid edit prints the problems and keeps th
 `mill task rebase <id>` fixes a task that gate triage blocked because a check also fails on its
 starting point: after you fix the base branch, it replays only the task's own commits (from its
 recorded start) onto the base branch's current tip, or, for a goal task with one dependency, onto
-that verified dependency's branch head. It prints the old and new starting points and the next
+that verified dependency's branch head. A task with several dependencies is restacked: its branch
+is reset to its deepest dependency's branch head (or to the remote base branch tip when that
+dependency landed), the other dependencies that have not landed are merged again, and its own
+commits (the non-merge commits after its recorded start) are replayed on top; the commit after
+the merges becomes its new starting point. It prints the old and new starting points and the next
 step (`mill task run --file <file> --retry`, or `mill run <goal> --retry-blocked`). It refuses
 running and verified tasks, tasks without a branch, a worktree with uncommitted changes, and
-tasks with several dependencies (not supported yet). On a conflict it aborts, leaves the branch
-unchanged, lists the conflicting files and exits 1. A branch that already contains the new tip is
-reported as up to date and left alone.
+dependencies that are not verified, published or landed. On a conflict it aborts, leaves the
+branch unchanged, lists the conflicting files and exits 1. A branch that already contains the new
+tip (or every dependency) is reported as up to date and left alone.
 
 A verified task is a branch `mill/t/<id>` in a worktree outside your checkout; mill prints the
 command to review its diff. mill pushes only `review/<task>` branches, on `mill review approve`, and never touches `main`.
@@ -104,7 +108,10 @@ A verified or published single-dependency task whose parent landed is rebased on
 `<remote>/<base_branch>`; one whose parent got new commits is rebased onto the parent's new
 head. The gate is re-run (not the verifier) and published tasks are re-published with the lease.
 A conflict or a red gate blocks the task with the files or commands, leaving its branch as it
-was. Fan-in tasks are only reported. A goal whose tasks have all landed becomes `landed`.
+was. A fan-in task whose dependencies moved or landed is restacked like `mill task rebase` does
+(onto its deepest dependency, or the remote base branch once that landed, with the other
+dependencies that have not landed merged again); a conflict blocks it and leaves its branch
+unchanged. A goal whose tasks have all landed becomes `landed`.
 
 `mill run` starts a task once all its dependencies are verified, up to `max_parallel` at a
 time, and never runs two tasks whose `owns` overlap together. Each task gets the branch

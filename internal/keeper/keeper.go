@@ -104,7 +104,7 @@ func Pass(ctx context.Context, o Options) (Result, error) {
 	if o.Pipeline == nil {
 		return res, errors.New("keeper: no pipeline to run the resolver, verifier and fixer with")
 	}
-	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true})
+	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true, LeaveFanIn: true})
 	res.Sync = sr
 	if err != nil {
 		return res, err
@@ -266,48 +266,104 @@ func (k *keeper) block(ctx context.Context, id, reason string) error {
 	return nil
 }
 
-// rebase replays the task's own commits onto tip (KP6), resolving stops with rerere or the
-// resolver agent. Any failure puts the branch back where it was and blocks the task.
-func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto, tip string, landed bool) error {
-	oldStart := br.StartSHA
-	if oldStart == "" {
-		oldStart = br.BaseSHA
-	}
-	if oldStart == "" {
-		return k.block(ctx, t.ID, "keeper: no recorded starting point, so its own commits cannot be told apart; rebase it by hand")
+// preflight checks the task's worktree can be rebased onto onto: it has a starting point and
+// is a clean checkout of the branch at the recorded head. A failed check blocks the task and
+// returns ok false.
+func (k *keeper) preflight(ctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
+	if br.StartSHA == "" && br.BaseSHA == "" {
+		return false, k.block(ctx, t.ID, "keeper: no recorded starting point, so its own commits cannot be told apart; rebase it by hand")
 	}
 	if !gitx.IsWorktreeOn(ctx, br.Worktree, br.Name) {
-		return k.block(ctx, t.ID, fmt.Sprintf("keeper: worktree %s is not a checkout of %s, so it cannot be rebased onto %s; restore it", br.Worktree, br.Name, onto))
+		return false, k.block(ctx, t.ID, fmt.Sprintf("keeper: worktree %s is not a checkout of %s, so it cannot be rebased onto %s; restore it", br.Worktree, br.Name, onto))
 	}
 	dirty, err := gitx.HasChanges(ctx, br.Worktree)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if dirty {
-		return k.block(ctx, t.ID, fmt.Sprintf("keeper: worktree %s has uncommitted changes, so it cannot be rebased onto %s; commit or discard them", br.Worktree, onto))
+		return false, k.block(ctx, t.ID, fmt.Sprintf("keeper: worktree %s has uncommitted changes, so it cannot be rebased onto %s; commit or discard them", br.Worktree, onto))
 	}
 	head, err := gitx.RevParse(ctx, br.Worktree, "HEAD")
 	if err != nil {
-		return err
+		return false, err
 	}
 	if head != br.HeadSHA {
-		return k.block(ctx, t.ID, fmt.Sprintf("keeper: branch %s is at %s but mill recorded head %s; it was not rebased", br.Name, short(head), short(br.HeadSHA)))
+		return false, k.block(ctx, t.ID, fmt.Sprintf("keeper: branch %s is at %s but mill recorded head %s; it was not rebased", br.Name, short(head), short(br.HeadSHA)))
+	}
+	return true, nil
+}
+
+// baseCommits summarises the commits in each of tips that the branch head lacks, for the
+// resolver's prompt.
+func (k *keeper) baseCommits(ctx context.Context, from string, tips ...string) ([]prompt.BaseCommit, error) {
+	var out []prompt.BaseCommit
+	seen := map[string]bool{}
+	for _, tip := range tips {
+		sums, err := gitx.CommitSummaries(ctx, k.Paths.Root, from, tip)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range sums {
+			if !seen[c.SHA] {
+				seen[c.SHA] = true
+				out = append(out, prompt.BaseCommit{SHA: c.SHA, Subject: c.Subject, Trailers: strings.Join(c.Trailers, "\n")})
+			}
+		}
+	}
+	return out, nil
+}
+
+// resolve asks the resolver agent to resolve the conflicted files in wt and checks no
+// conflict markers are left. The returned step and detail say what failed.
+func (k *keeper) resolve(ctx context.Context, t store.Task, wt, onto string, baseCommits []prompt.BaseCommit, files []string) (step string, marked []string, detail string) {
+	in := prompt.ResolverInput{Task: t.Spec, BaseCommits: baseCommits, Onto: onto}
+	for _, f := range files {
+		h, err := gitx.ConflictHunks(ctx, wt, f)
+		if err != nil {
+			return "reading the conflicts", files, err.Error()
+		}
+		in.Conflicts = append(in.Conflicts, prompt.ConflictFile{Path: f, Hunks: h})
+	}
+	out, err := k.Pipeline.Resolve(ctx, t.ID, in, wt)
+	if err != nil {
+		return "the resolver", files, err.Error()
+	}
+	if out.Stop != "" {
+		return "the resolver", files, "it stopped: " + out.Stop
+	}
+	if out.Reason != "" {
+		return "the resolver", files, out.Reason
+	}
+	left, err := gitx.HasConflictMarkers(ctx, wt, files)
+	if err != nil {
+		return "checking the resolution", files, err.Error()
+	}
+	if len(left) > 0 {
+		return "the resolver", left, "conflict markers are left"
+	}
+	return "", nil, ""
+}
+
+// rebase replays the task's own commits onto tip (KP6), resolving stops with rerere or the
+// resolver agent. Any failure puts the branch back where it was and blocks the task.
+func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto, tip string, landed bool) error {
+	if ok, err := k.preflight(ctx, t, br, onto); err != nil || !ok {
+		return err
+	}
+	oldStart := br.StartSHA
+	if oldStart == "" {
+		oldStart = br.BaseSHA
 	}
 	oldBase := br.BaseSHA
 	if oldBase == "" {
 		oldBase = oldStart
 	}
-	sums, err := gitx.CommitSummaries(ctx, k.Paths.Root, oldBase, tip)
+	baseCommits, err := k.baseCommits(ctx, oldBase, tip)
 	if err != nil {
 		return err
 	}
-	var baseCommits []prompt.BaseCommit
-	for _, c := range sums {
-		baseCommits = append(baseCommits, prompt.BaseCommit{SHA: c.SHA, Subject: c.Subject, Trailers: strings.Join(c.Trailers, "\n")})
-	}
 
 	old := br
-	wasPublished := t.Status == store.TaskPublished
 	wt := br.Worktree
 	// fail undoes the rebase and blocks the task; step names what failed.
 	fail := func(step string, files []string, detail string) error {
@@ -330,56 +386,50 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	rerere := st.RerereResolved
 	for !st.Done {
 		files := st.Files
-		in := prompt.ResolverInput{Task: t.Spec, BaseCommits: baseCommits, Onto: onto}
-		for _, f := range files {
-			h, err := gitx.ConflictHunks(ctx, wt, f)
-			if err != nil {
-				return fail("reading the conflicts", files, err.Error())
-			}
-			in.Conflicts = append(in.Conflicts, prompt.ConflictFile{Path: f, Hunks: h})
-		}
 		k.logf("%s: stopped at %s on conflicts in %s; running the resolver", t.ID, short(st.Stopped), strings.Join(files, ", "))
-		out, err := k.Pipeline.Resolve(ctx, t.ID, in, wt)
 		agent = true
-		if err != nil {
-			return fail("the resolver", files, err.Error())
-		}
-		if out.Stop != "" {
-			return fail("the resolver", files, "it stopped: "+out.Stop)
-		}
-		if out.Reason != "" {
-			return fail("the resolver", files, out.Reason)
-		}
-		marked, err := gitx.HasConflictMarkers(ctx, wt, files)
-		if err != nil {
-			return fail("checking the resolution", files, err.Error())
-		}
-		if len(marked) > 0 {
-			return fail("the resolver", marked, "conflict markers are left")
+		if step, marked, detail := k.resolve(ctx, t, wt, onto, baseCommits, files); step != "" {
+			return fail(step, marked, detail)
 		}
 		if st, err = gitx.RebaseContinue(ctx, wt, files, true); err != nil {
 			return fail("continuing the rebase", files, err.Error())
 		}
 		rerere += st.RerereResolved
 	}
-	newHead := st.Head
-	by := ResolvedByNone
-	switch {
-	case agent:
-		by = ResolvedByAgent
-	case rerere > 0:
-		by = ResolvedByRerere
-	}
 
 	if landed {
 		br.Base = k.Cfg.BaseBranch
 	}
-	br.BaseSHA, br.StartSHA, br.HeadSHA = tip, tip, newHead
+	br.BaseSHA, br.StartSHA, br.HeadSHA = tip, tip, st.Head
+	return k.settle(ctx, t, old, br, restacked{onto: onto, tip: tip, oldStart: oldStart, agent: agent, rerere: rerere}, fail)
+}
+
+// restacked describes a finished rebase or fan-in restack for settle.
+type restacked struct {
+	onto, tip, oldStart string
+	agent               bool // the resolver agent resolved at least one stop
+	rerere              int  // stops rerere resolved
+}
+
+// settle records the restacked branch br (formerly old) and checks it: after the resolver the
+// gate and the verifier run and a failure goes through fail; otherwise the gate runs and a red
+// gate goes to the fixer. A published task is re-published.
+func (k *keeper) settle(ctx context.Context, t store.Task, old, br store.Branch, r restacked, fail func(step string, files []string, detail string) error) error {
+	newHead := br.HeadSHA
+	wasPublished := t.Status == store.TaskPublished
+	by := ResolvedByNone
+	switch {
+	case r.agent:
+		by = ResolvedByAgent
+	case r.rerere > 0:
+		by = ResolvedByRerere
+	}
+
 	if err := k.Store.SaveBranch(ctx, br); err != nil {
 		return fail("recording the new head", nil, err.Error())
 	}
 	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: t.ID}
-	if agent {
+	if r.agent {
 		// The agent changed code: the gate and the verifier both check it.
 		g, err := publish.GateAtHead(ctx, po, t, br, "keeper")
 		if err != nil {
@@ -405,20 +455,23 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	}
 
 	goalID, _ := store.SplitTaskID(t.ID)
-	if _, err := k.Store.AppendEvent(ctx, "task-restacked", goalID, t.ID, map[string]string{
-		"onto": onto, "onto_sha": tip, "old_start": oldStart, "old_head": old.HeadSHA, "new_head": newHead, "resolved_by": by}); err != nil {
+	data := map[string]string{"onto": r.onto, "onto_sha": r.tip, "old_start": r.oldStart, "old_head": old.HeadSHA, "new_head": newHead, "resolved_by": by}
+	if br.StartSHA != r.tip {
+		data["new_start"] = br.StartSHA
+	}
+	if _, err := k.Store.AppendEvent(ctx, "task-restacked", goalID, t.ID, data); err != nil {
 		return err
 	}
-	k.res.Rebased = append(k.res.Rebased, Rebased{TaskID: t.ID, Onto: onto, OntoSHA: tip, OldHead: old.HeadSHA, NewHead: newHead, ResolvedBy: by})
+	k.res.Rebased = append(k.res.Rebased, Rebased{TaskID: t.ID, Onto: r.onto, OntoSHA: r.tip, OldHead: old.HeadSHA, NewHead: newHead, ResolvedBy: by})
 	switch by {
 	case ResolvedByAgent:
 		k.res.ResolvedAgent = append(k.res.ResolvedAgent, t.ID)
 	case ResolvedByRerere:
 		k.res.ResolvedRerere = append(k.res.ResolvedRerere, t.ID)
 	}
-	k.logf("%s: rebased onto %s (%s), head %s -> %s (resolved by %s)", t.ID, onto, short(tip), short(old.HeadSHA), short(newHead), by)
+	k.logf("%s: rebased onto %s (%s), head %s -> %s (resolved by %s)", t.ID, r.onto, short(r.tip), short(old.HeadSHA), short(newHead), by)
 
-	if !agent {
+	if !r.agent {
 		// KP3: after a rebase without the agent the gate is re-run, the verifier is not.
 		g, err := publish.GateAtHead(ctx, po, t, br, "keeper")
 		if err != nil {
