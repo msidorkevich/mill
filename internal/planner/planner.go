@@ -207,6 +207,29 @@ func (e *InvalidPlanError) Error() string {
 	return "the planner's plan is invalid after a retry:\n  - " + strings.Join(e.Problems, "\n  - ")
 }
 
+// RateLimitedError reports a planner call that hit the account's usage limit.
+type RateLimitedError struct {
+	LimitType string    // e.g. five_hour; "" when unknown
+	ResetsAt  time.Time // zero when unknown
+	now       time.Time
+}
+
+func (e *RateLimitedError) Error() string {
+	what := "a usage limit was reached"
+	if e.LimitType != "" {
+		what = "the " + e.LimitType + " usage limit was reached"
+	}
+	if e.ResetsAt.IsZero() {
+		return "planner stopped: rate limited: " + what + "; the reset time is unknown; run `mill plan` again later"
+	}
+	t, now := e.ResetsAt.Local(), e.now.Local()
+	at := t.Format("Jan 2 15:04")
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		at = t.Format("15:04")
+	}
+	return "planner stopped: rate limited: " + what + "; resets at " + at + "; run `mill plan` again after that"
+}
+
 // Generate asks the planner agent for a plan and validates it. An invalid plan goes back to
 // the agent once with its problems (PL4). When the second plan is invalid too, the error is
 // an *InvalidPlanError and Result.Raw holds the last plan.
@@ -286,6 +309,8 @@ func runOnce(ctx context.Context, o Options, call int, promptText, logDir string
 	case res.Status == runner.StatusOK:
 	case res.Status == runner.StatusBudgetExceeded:
 		return nil, res.Usage, fmt.Errorf("planner stopped: budget exceeded: %s", res.Error)
+	case res.Status == runner.StatusRateLimited:
+		return nil, res.Usage, &RateLimitedError{LimitType: res.LimitType, ResetsAt: res.ResetsAt, now: time.Now()}
 	case overReason != "":
 		return nil, res.Usage, fmt.Errorf("planner stopped: budget exceeded: %s", overReason)
 	default:

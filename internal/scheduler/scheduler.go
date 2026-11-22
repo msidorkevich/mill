@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/pipeline"
 	"github.com/msidorkevich/mill/internal/plan"
@@ -18,6 +19,15 @@ import (
 const (
 	ReasonRetry       = "retry requested"
 	ReasonInterrupted = "interrupted" // set by the pipeline on a cancelled task
+	ReasonLimitReset  = "usage limit reset"
+)
+
+// Waits for a usage limit to reset (--wait-on-limit).
+const (
+	// LimitResetSlack is added to a known reset time before resuming.
+	LimitResetSlack = time.Minute
+	// LimitUnknownWait is how long to wait when the reset time is unknown.
+	LimitUnknownWait = 15 * time.Minute
 )
 
 // Scheduler runs the tasks of one goal.
@@ -28,6 +38,10 @@ type Scheduler struct {
 	RunTask func(ctx context.Context, taskID string) (pipeline.Outcome, error)
 	// Out receives progress lines; nil discards. Each line is written whole under a lock.
 	Out io.Writer
+	// Now is the clock; defaults to time.Now.
+	Now func() time.Time
+	// Sleep waits for d or until ctx ends, returning ctx.Err() then; defaults to a timer.
+	Sleep func(ctx context.Context, d time.Duration) error
 
 	outMu sync.Mutex
 }
@@ -36,6 +50,9 @@ type Scheduler struct {
 type Options struct {
 	// RetryBlocked puts every blocked or failed task back to pending before scheduling.
 	RetryBlocked bool
+	// WaitOnLimit waits for a usage limit to reset and continues, instead of ending the goal
+	// blocked.
+	WaitOnLimit bool
 }
 
 // Result is how the goal ended.
@@ -62,7 +79,35 @@ func (s *Scheduler) logf(format string, a ...any) {
 
 type finished struct {
 	id  string
+	out pipeline.Outcome
 	err error
+}
+
+func (s *Scheduler) now() time.Time {
+	if s.Now != nil {
+		return s.Now()
+	}
+	return time.Now()
+}
+
+func (s *Scheduler) sleep(ctx context.Context, d time.Duration) error {
+	if s.Sleep != nil {
+		return s.Sleep(ctx, d)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// limitHit records the tasks that hit the account's usage limit and the latest known reset.
+type limitHit struct {
+	ids      []string
+	resetsAt time.Time // zero when no task knew it
 }
 
 // RunGoal runs the goal's tasks until every task is verified (the goal becomes done) or
@@ -106,19 +151,47 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 	started := map[string]bool{} // tasks started in this call; none starts twice
 	done := make(chan finished)
 	var loopErr error
+	var limit limitHit // the usage limit is account-wide: once hit, nothing new starts
 	for {
-		if loopErr == nil && ctx.Err() == nil {
+		if loopErr == nil && ctx.Err() == nil && len(limit.ids) == 0 {
 			if err := s.startReady(ctx, bg, goalID, running, started, done); err != nil {
 				loopErr = err
 			}
 		}
 		if len(running) == 0 {
-			break
+			if len(limit.ids) == 0 || !o.WaitOnLimit || loopErr != nil || ctx.Err() != nil {
+				break
+			}
+			now := s.now()
+			resume := now.Add(LimitUnknownWait)
+			if !limit.resetsAt.IsZero() {
+				resume = limit.resetsAt.Add(LimitResetSlack)
+			}
+			s.logf("goal %s: usage limit reached; waiting until %s to resume (Ctrl-C stops)", goalID, pipeline.FormatResetTime(resume, now))
+			if err := s.sleep(ctx, resume.Sub(now)); err != nil {
+				break
+			}
+			for _, id := range limit.ids {
+				if err := s.Store.SetTaskStatus(bg, id, store.TaskPending, "", ReasonLimitReset); err != nil {
+					loopErr = err
+					break
+				}
+				delete(started, id)
+				s.logf("%s: back to pending (%s)", id, ReasonLimitReset)
+			}
+			limit = limitHit{}
+			continue
 		}
 		f := <-done
 		delete(running, f.id)
 		if f.err != nil {
 			s.logf("%s: mill error: %v", f.id, f.err)
+		}
+		if f.out.RateLimited {
+			limit.ids = append(limit.ids, f.id)
+			if f.out.ResetsAt.After(limit.resetsAt) {
+				limit.resetsAt = f.out.ResetsAt
+			}
 		}
 		if t, err := s.Store.GetTask(bg, f.id); err != nil {
 			loopErr = errors.Join(loopErr, err)
@@ -150,7 +223,15 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 		if _, err := s.Store.ResetGoalTasks(bg, goalID, []string{store.TaskBlocked}, ReasonInterrupted, ReasonInterrupted); err != nil {
 			return Result{}, err
 		}
+		// Rate-limited tasks continue with the next run, like interrupted ones.
+		for _, id := range limit.ids {
+			if err := s.Store.SetTaskStatus(bg, id, store.TaskPending, "", ReasonInterrupted); err != nil {
+				return Result{}, err
+			}
+		}
 		res.Status, res.Reason = store.GoalBlocked, InterruptedReason(goalID)
+	case len(limit.ids) > 0:
+		res.Status, res.Reason = store.GoalBlocked, s.limitReason(goalID, limit)
 	default:
 		reason, err := s.blockedReason(bg, tasks, started)
 		if err != nil {
@@ -206,11 +287,21 @@ func (s *Scheduler) startReady(ctx, bg context.Context, goalID string, running m
 		started[t.ID] = true
 		s.logf("%s: started", t.ID)
 		go func(id string) {
-			_, err := s.RunTask(ctx, id)
-			done <- finished{id, err}
+			out, err := s.RunTask(ctx, id)
+			done <- finished{id, out, err}
 		}(t.ID)
 	}
 	return nil
+}
+
+// limitReason is the goal reason after a task hit the account's usage limit.
+func (s *Scheduler) limitReason(goalID string, l limitHit) string {
+	retry := fmt.Sprintf("`mill run %s --retry-blocked`", goalID)
+	head := fmt.Sprintf("rate limited: %s hit the account's usage limit", strings.Join(l.ids, ", "))
+	if l.resetsAt.IsZero() {
+		return head + "; the reset time is unknown; run " + retry + " later"
+	}
+	return head + "; resets at " + pipeline.FormatResetTime(l.resetsAt, s.now()) + "; run " + retry + " after that"
 }
 
 func overlapsRunning(t store.Task, running map[string]store.Task) bool {

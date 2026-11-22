@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/gitx"
@@ -413,5 +414,26 @@ func TestTaskShowRunningAttemptShowsLiveUsage(t *testing.T) {
 	r := run(t, root, nil, "task", "show", "hello")
 	if !strings.Contains(r.stdout, "running") || !strings.Contains(r.stdout, "1,234") || !strings.Contains(r.stdout, "~$0.07") {
 		t.Fatalf("show lacks the running attempt's live usage:\n%s", r.stdout)
+	}
+}
+
+func TestTaskRunRateLimitedExitsBlockedWithReason(t *testing.T) {
+	resets := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	script := `{"implementer": [{"rate_limit": {"type": "five_hour", "resets_at": "` + resets.Format(time.RFC3339) + `"}},
+	                            {"output": {"summary": "s", "files_changed": [], "notes": ""}, "files": {"hello.txt": "hello\n"}}],
+	            "verifier": [{"output": {"verdict": "pass", "summary": "ok", "findings": []}}]}`
+	root, tf := taskRepo(t, script, 3)
+	r := run(t, root, nil, "task", "run", "--file", tf)
+	if r.code != ExitNotVerified {
+		t.Fatalf("task run: %+v", r)
+	}
+	for _, want := range []string{"hello a1 implementer rate_limited",
+		"hello: blocked: rate limited: the five_hour usage limit was reached; resets at ", resets.Local().Format("15:04")} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
+	}
+	if strings.Contains(r.stdout, "hello a2") {
+		t.Errorf("a second attempt ran after the rate limit:\n%s", r.stdout)
 	}
 }

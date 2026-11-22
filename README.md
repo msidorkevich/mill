@@ -86,6 +86,7 @@ mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, CO
 mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
 mill run g1                     # run the approved goal's tasks in dependency order
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
+mill run g1 --wait-on-limit     # on a usage limit, wait for the reset and continue instead of stopping
 mill watch [g1|g1/a]            # running attempts: task, attempt, role, elapsed, tokens, cost, latest action; redraws every 2s (--once, --interval 5s)
 mill review                     # verified and published tasks, oldest first: ID, STATUS, ATTEMPTS, COST, TITLE, BRANCH (--json)
 mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat (--diff, --json)
@@ -186,6 +187,20 @@ blocked and failed tasks back to pending and continues. To change a stopped goal
 `mill task edit g1/<task>` (it updates the task and the stored plan; the dependencies stay fixed
 once the plan is approved), then `mill run g1 --retry-blocked`.
 Verified tasks are not run again.
+
+**Usage limits.** When an agent run hits the account's usage limit (for example Claude's
+`five_hour` or `seven_day` limit), mill does not burn attempts on it. The attempt is recorded as
+`rate_limited` with the usage it reported, no findings are recorded and no further attempt is
+made; the task is blocked with a reason such as `rate limited: the five_hour usage limit was
+reached; resets at 12:50; run again after that` (local time; "the reset time is unknown" when the
+agent did not say). Because the limit is account-wide, `mill run` then starts no new task, lets
+the running ones finish, and ends the goal blocked (exit 4) with the reset time and the hint
+`mill run g1 --retry-blocked`, which puts the rate-limited tasks back to pending. With
+`mill run g1 --wait-on-limit` mill instead prints one line with the time it will resume, waits
+until the reset time plus one minute (15 minutes when the reset time is unknown), puts the
+rate-limited tasks back to pending and continues; Ctrl-C during the wait stops like any other
+interruption. `mill task run` ends a rate-limited task blocked (exit 4) with the same reason, and
+a rate-limited `mill plan "<goal>"` prints the limit and its reset time and creates no goal.
 
 **Interrupted or killed runs.** After Ctrl-C, a crash or `kill -9`, nothing is lost. The next
 `mill run g1` recovers the half-finished tasks and continues where it stopped. Only one

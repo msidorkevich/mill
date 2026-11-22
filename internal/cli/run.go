@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/msidorkevich/mill/internal/scheduler"
@@ -26,7 +27,8 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 func runRun(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "run")
 	retry := fs.Bool("retry-blocked", false, "put blocked and failed tasks back to pending first")
-	id, code, ok := goalArg(env, "run", "mill run <goal> [--retry-blocked]", fs, args)
+	waitLimit := fs.Bool("wait-on-limit", false, "when a usage limit is reached, wait for it to reset and continue")
+	id, code, ok := goalArg(env, "run", "mill run <goal> [--retry-blocked] [--wait-on-limit]", fs, args)
 	if !ok {
 		return code
 	}
@@ -55,7 +57,7 @@ func runRun(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	sch := &scheduler.Scheduler{Store: s, MaxParallel: cfg.MaxParallel, RunTask: p.Run, Out: out}
-	res, err := sch.RunGoal(ctx, id, scheduler.Options{RetryBlocked: *retry})
+	res, err := sch.RunGoal(ctx, id, scheduler.Options{RetryBlocked: *retry, WaitOnLimit: *waitLimit})
 	if err != nil {
 		return fail(err)
 	}
@@ -73,6 +75,10 @@ func runRun(ctx context.Context, env Env, args []string) int {
 		return ExitOK
 	}
 	fmt.Fprintf(env.Stdout, "Blocked: %s\n", res.Reason)
+	if strings.HasPrefix(res.Reason, "rate limited:") {
+		fmt.Fprintf(env.Stdout, "Next: after the usage limit resets, run `mill run %s --retry-blocked` (or add --wait-on-limit to wait automatically).\n", id)
+		return ExitNotVerified
+	}
 	fmt.Fprintf(env.Stdout, "Next: inspect with `mill task show <id>`, fix the cause, then run `mill run %s --retry-blocked`.\n", id)
 	return ExitNotVerified
 }

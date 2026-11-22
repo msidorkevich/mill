@@ -1132,3 +1132,66 @@ func TestLiveUsageStopIsIdempotent(t *testing.T) {
 		t.Fatal("writer not stopped")
 	}
 }
+
+func TestRateLimitedImplementerBlocksWithoutFurtherAttempts(t *testing.T) {
+	resets := time.Date(2026, 11, 22, 12, 50, 0, 0, time.Local)
+	e := setup(t, "true", runner.Script{
+		runner.RoleImplementer: {
+			{RateLimit: &runner.RateLimit{Type: "five_hour", ResetsAt: resets}, Usage: []budget.Usage{{InputTokens: 70, CostUSD: 0.01}}},
+			impl(map[string]string{"a": "1"}),
+		},
+		runner.RoleVerifier: {verdict("pass")},
+	}, nil)
+	e.p.Now = func() time.Time { return time.Date(2026, 11, 22, 10, 0, 0, 0, time.Local) }
+	e.task(t, "limited")
+	out := e.run(t, "limited")
+	want := "rate limited: the five_hour usage limit was reached; resets at 12:50; run again after that"
+	if out.Status != store.TaskBlocked || out.Reason != want || !out.RateLimited || !out.ResetsAt.Equal(resets) {
+		t.Fatalf("outcome = %+v\n%s", out, e.out)
+	}
+	if n := len(e.fake.Calls()); n != 1 {
+		t.Fatalf("calls = %d, want 1 (no further attempts after a rate limit)", n)
+	}
+	ctx := context.Background()
+	atts, _ := e.p.Store.Attempts(ctx, "limited")
+	if len(atts) != 1 || atts[0].Status != "rate_limited" || atts[0].Usage.InputTokens != 70 {
+		t.Fatalf("attempts = %+v", atts)
+	}
+	if f, _ := LastFindings(ctx, e.p.Store, "limited"); f != nil {
+		t.Fatalf("findings = %+v, want none", f)
+	}
+	tk, _ := e.p.Store.GetTask(ctx, "limited")
+	if tk.Status != store.TaskBlocked || tk.Reason != want {
+		t.Fatalf("task = %s %q", tk.Status, tk.Reason)
+	}
+}
+
+func TestRateLimitedVerifierBlocksWithUnknownReset(t *testing.T) {
+	e := setup(t, "true", runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a": "1"}), impl(map[string]string{"a": "2"})},
+		runner.RoleVerifier:    {{RateLimit: &runner.RateLimit{}}, verdict("pass")},
+	}, nil)
+	e.task(t, "vlimited")
+	out := e.run(t, "vlimited")
+	if out.Status != store.TaskBlocked || !out.RateLimited || !out.ResetsAt.IsZero() ||
+		out.Reason != "rate limited: a usage limit was reached; the reset time is unknown; run again later" {
+		t.Fatalf("outcome = %+v\n%s", out, e.out)
+	}
+	if n := len(e.fake.Calls()); n != 2 {
+		t.Fatalf("calls = %d, want 2", n)
+	}
+	atts, _ := e.p.Store.Attempts(context.Background(), "vlimited")
+	if len(atts) != 2 || atts[1].Role != "verifier" || atts[1].Status != "rate_limited" {
+		t.Fatalf("attempts = %+v", atts)
+	}
+}
+
+func TestFormatResetTimeShowsDateWhenNotToday(t *testing.T) {
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.Local)
+	if got := FormatResetTime(now.Add(2*time.Hour), now); got != "12:00" {
+		t.Fatalf("same day = %q", got)
+	}
+	if got := FormatResetTime(now.Add(48*time.Hour), now); got != "Nov 24 10:00" {
+		t.Fatalf("other day = %q", got)
+	}
+}

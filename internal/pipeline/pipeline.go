@@ -62,6 +62,10 @@ type Outcome struct {
 	HeadSHA  string       `json:"head_sha,omitempty"`
 	Attempts int          `json:"attempts"` // implement attempts made in this run
 	Usage    budget.Usage `json:"usage"`    // total task usage, all runs
+	// RateLimited is true when an agent run hit the account's usage limit; the task is blocked.
+	RateLimited bool `json:"rate_limited,omitempty"`
+	// ResetsAt is when the usage limit resets, when RateLimited and known.
+	ResetsAt time.Time `json:"resets_at,omitempty"`
 }
 
 // BranchName is the git branch for a task: mill/<goal>/<task> for a goal's task,
@@ -169,6 +173,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		if ar.stop != "" {
+			out.RateLimited, out.ResetsAt = ar.rateLimited, ar.res.ResetsAt
 			return p.block(ctx, t.ID, store.PhaseImplement, ar.stop, out, nil)
 		}
 
@@ -315,6 +320,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		if vr.stop != "" {
+			out.RateLimited, out.ResetsAt = vr.rateLimited, vr.res.ResetsAt
 			return p.block(ctx, t.ID, store.PhaseVerify, vr.stop, out, nil)
 		}
 		if vr.res.Status != runner.StatusOK {
@@ -511,7 +517,9 @@ func (p *Pipeline) baseFor(ctx context.Context, t store.Task) (base, baseSHA str
 // agentRun is the outcome of one agent run.
 type agentRun struct {
 	res  runner.Result
-	stop string // non-empty: the task must stop (budget exceeded, interrupted, timed out)
+	stop string // non-empty: the task must stop (budget exceeded, rate limited, interrupted, timed out)
+	// rateLimited is true when the run hit the account's usage limit.
+	rateLimited bool
 }
 
 // agent runs one agent with budget enforcement (BG1) and records the attempt.
@@ -574,6 +582,9 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	case overReason != "" && res.Status != runner.StatusOK:
 		status = string(runner.StatusBudgetExceeded)
 		ar.stop = fmt.Sprintf("budget exceeded in attempt %d (%s): %s", n, role, overReason)
+	case res.Status == runner.StatusRateLimited:
+		ar.rateLimited = true
+		ar.stop = RateLimitReason(res.LimitType, res.ResetsAt, p.now())
 	case res.Status == runner.StatusCancelled && ctx.Err() != nil:
 		ar.stop = "interrupted"
 	case res.Status == runner.StatusCancelled && errors.Is(rctx.Err(), context.DeadlineExceeded):
@@ -607,6 +618,29 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 		return ar, fmt.Errorf("%s run: %w", role, recErr)
 	}
 	return ar, nil
+}
+
+// RateLimitReason is the block reason for a run that hit the account's usage limit, e.g.
+// "rate limited: the five_hour usage limit was reached; resets at 12:50; run again after that".
+func RateLimitReason(limitType string, resetsAt, now time.Time) string {
+	what := "a usage limit was reached"
+	if limitType != "" {
+		what = "the " + limitType + " usage limit was reached"
+	}
+	if resetsAt.IsZero() {
+		return "rate limited: " + what + "; the reset time is unknown; run again later"
+	}
+	return "rate limited: " + what + "; resets at " + FormatResetTime(resetsAt, now) + "; run again after that"
+}
+
+// FormatResetTime formats a reset time in local time: "15:04" when it is on the same day as
+// now, "Jan 2 15:04" otherwise.
+func FormatResetTime(t, now time.Time) string {
+	t, now = t.Local(), now.Local()
+	if t.Year() == now.Year() && t.YearDay() == now.YearDay() {
+		return t.Format("15:04")
+	}
+	return t.Format("Jan 2 15:04")
 }
 
 // liveUsageInterval is the minimum time between live usage writes for one attempt.
