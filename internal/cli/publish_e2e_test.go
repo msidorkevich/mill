@@ -145,9 +145,9 @@ func TestE2EPublishReviewAndMergeDetectionAgainstBareRemote(t *testing.T) {
 		t.Fatalf("run: %+v", r)
 	}
 
-	// 1. Publishing: b is refused until a is published; then all four are pushed, stacked.
+	// 1. Publishing: b is queued until a is published; then all four are pushed, stacked.
 	r := run(t, root, nil, "review", "approve", "g1/b")
-	if r.code != ExitError || !strings.Contains(r.stderr, "dependencies must be published or landed") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "approved g1/b: queued, will publish when parent g1/a is published or landed") {
 		t.Fatalf("approve b before a: %+v", r)
 	}
 	if _, ok := remoteRefs(t, bare)["refs/heads/review/g1/b"]; ok {

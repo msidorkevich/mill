@@ -146,7 +146,7 @@ func TestApproveStackedTaskNeedsPublishedParent(t *testing.T) {
 	before := remoteRefs(t, bare)
 
 	r := run(t, root, nil, "review", "approve", "g2/b")
-	if r.code != ExitError || !strings.Contains(r.stderr, "dependencies must be published or landed") || !strings.Contains(r.stderr, "g2/a, which is verified") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "approved g2/b: queued, will publish when parent g2/a is published or landed") {
 		t.Fatalf("approve before parent: %+v", r)
 	}
 	if _, ok := remoteRefs(t, bare)["refs/heads/review/g2/b"]; ok {
@@ -186,7 +186,7 @@ func TestApproveFanInTaskNeedsOtherDependenciesLanded(t *testing.T) {
 	before := remoteRefs(t, bare)
 	// c depends on a and b; its deepest parent is b (the last listed on a tie).
 	r := run(t, root, nil, "review", "approve", "g1/c")
-	if r.code != ExitError || !strings.Contains(r.stderr, "g1/a is verified") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "approved g1/c: queued, will publish when the other dependencies land") {
 		t.Fatalf("approve with nothing landed: %+v", r)
 	}
 	if r := run(t, root, nil, "review", "approve", "g1/b"); r.code != ExitOK {
@@ -196,7 +196,7 @@ func TestApproveFanInTaskNeedsOtherDependenciesLanded(t *testing.T) {
 		t.Fatalf("approve a: %+v", r)
 	}
 	r = run(t, root, nil, "review", "approve", "g1/c")
-	if r.code != ExitError || !strings.Contains(r.stderr, "every other dependency must have landed") || !strings.Contains(r.stderr, "g1/a is published") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "approved g1/c: queued, will publish when the other dependencies land") {
 		t.Fatalf("approve with a published, not landed: %+v", r)
 	}
 	if _, ok := remoteRefs(t, bare)["refs/heads/review/g1/c"]; ok {
@@ -432,8 +432,7 @@ func TestApproveChildOfLandedParentNeedsSyncFirst(t *testing.T) {
 	setStatus(t, root, "g2/a", store.TaskLanded)
 
 	r := run(t, root, nil, "review", "approve", "g2/b")
-	if r.code != ExitError || !strings.Contains(r.stderr, "dependencies must be published or landed") ||
-		!strings.Contains(r.stderr, "still based on mill/g2/a") || !strings.Contains(r.stderr, "run `mill sync`") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "approved g2/b: queued, will publish when `mill sync` moves it onto the base branch") {
 		t.Fatalf("approve before sync: %+v", r)
 	}
 	if _, ok := remoteRefs(t, bare)["refs/heads/review/g2/b"]; ok {
@@ -463,8 +462,7 @@ func TestApproveChildRefusedWhileParentHasUnpublishedChanges(t *testing.T) {
 	commitInWorktree(t, openStore(t, root), "g2/a", "more.txt", "m\n")
 
 	r := run(t, root, nil, "review", "approve", "g2/b")
-	if r.code != ExitError || !strings.Contains(r.stderr, "dependencies must be published or landed") ||
-		!strings.Contains(r.stderr, "g2/a, which has changes") || !strings.Contains(r.stderr, "mill review approve g2/a") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "approved g2/b: queued, will publish when parent g2/a publishes its new changes") {
 		t.Fatalf("approve child: %+v", r)
 	}
 	if _, ok := remoteRefs(t, bare)["refs/heads/review/g2/b"]; ok {
