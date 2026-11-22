@@ -336,20 +336,20 @@ commit, rebase, squash), and mill detects each one.
   M3's own branches to a local bare "forge" repo, I merge them there with different methods,
   and `mill sync` must detect each merge and restack the rest.
 
-### Subtasks (goal `g5`)
+### Subtasks (goal `g5`: 5/5 verified on the first attempt, $6.85; merged after review)
 
-- [ ] `publish-core`: statuses published/landed + `store.Done`; branch `published_sha`,
+- [x] `publish-core` ($2.03): statuses published/landed + `store.Done`; branch `published_sha`,
       `gate_sha`; git helpers (fetch, merge-tree conflicts, commit-tree, guarded push, cherry,
       trailer search)
-- [ ] `review-cli`: `mill review`, `review show`, `review changes`, `review reject`
-- [ ] `publish`: `mill review approve`: RV5 rules, re-gate, squash + description + trailers,
+- [x] `review-cli` ($0.66): `mill review`, `review show`, `review changes`, `review reject`
+- [x] `publish` ($1.83): `mill review approve`: RV5 rules, re-gate, squash + description + trailers,
       guarded push with lease
-- [ ] `sync`: `mill sync`: merge detection, landed, restack (KP2, KP3), re-gate, re-publish
-- [ ] `publish-e2e`: end-to-end test with a bare remote and a forge script (merge commit,
+- [x] `sync` ($2.05): `mill sync`: merge detection, landed, restack (KP2, KP3), re-gate, re-publish
+- [x] `publish-e2e` ($0.28): end-to-end test with a bare remote and a forge script (merge commit,
       rebase, squash, trailer-only), SE2 test, README publishing section
 - [ ] Dogfood exit: publish M3's own branches to a local bare forge, merge them there, `mill
       sync` detects each
-- [ ] `publish-guards` (found in review of g5): (1) publishing a child whose parent landed
+- [x] `publish-guards` ($1.48; found in review of g5): (1) publishing a child whose parent landed
       before `mill sync` restacked it would reuse the parent's unsquashed commits; (2) a child
       of a parent with unpublished changes would carry them; (3) sync blocked a restacked child
       only because its parent was not re-published yet; (4) tasks merged without publishing
