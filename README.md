@@ -93,6 +93,7 @@ mill review changes g1/a -m "text"   # operator comments (blank line = one findi
 mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
 mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
 mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
+mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
 ```
 
 `mill sync` fetches the remote and marks each published task landed when its published commit
@@ -215,6 +216,14 @@ other dependencies to land. Approving again force-pushes with a lease.
 (the `Mill-Task` trailer survived an edited merge). Children of a landed task are restacked
 onto `<remote>/<base_branch>`, re-gated and re-published, so their review branches track main.
 When every task of a goal has landed, the goal becomes `landed`.
+
+**Cleaning.** `mill clean` removes the worktree and local `mill/*` branch of every landed task,
+clears its recorded worktree path and records a `task-cleaned` event; the branch row and history
+stay. Tasks that are not landed are never touched. `--remote` also deletes the task's
+`review/*` branch on the remote, but only when it still points at the published commit: a branch
+the forge already deleted is skipped, and one that moved is left alone with a message.
+`--dry-run` prints what would be removed and changes nothing. It ends with a summary (worktrees,
+branches, remote branches, skipped with reasons). Running it again is harmless.
 
 **mill only ever pushes `review/*` branches.** It never pushes to `main` or any other branch;
 merging stays with you and your forge.

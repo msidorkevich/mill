@@ -351,6 +351,35 @@ func PushReview(ctx context.Context, dir, remote, sha, branch, expected string) 
 	return err
 }
 
+// DeleteReview deletes refs/heads/<branch> on remote, only if it is still at expected. Like
+// PushReview it refuses, without running git, any branch outside review/ and an empty expected sha.
+func DeleteReview(ctx context.Context, dir, remote, branch, expected string) error {
+	if !strings.HasPrefix(branch, ReviewPrefix) || len(branch) == len(ReviewPrefix) {
+		return fmt.Errorf("refusing to delete branch %q: mill only deletes review/<name> branches", branch)
+	}
+	if remote == "" || strings.HasPrefix(remote, "-") || expected == "" || strings.HasPrefix(expected, "-") {
+		return fmt.Errorf("refusing to delete %q on remote %q: invalid remote or expected sha", branch, remote)
+	}
+	ref := "refs/heads/" + branch
+	_, err := Run(ctx, dir, "push", "--quiet", "--no-verify", "--force-with-lease="+ref+":"+expected, remote, ":"+ref)
+	return err
+}
+
+// RemoteBranchSHA returns the sha of refs/heads/<branch> on remote, or ok=false when the
+// remote has no such branch.
+func RemoteBranchSHA(ctx context.Context, dir, remote, branch string) (sha string, ok bool, err error) {
+	out, err := Run(ctx, dir, "ls-remote", "--heads", remote, "refs/heads/"+branch)
+	if err != nil {
+		return "", false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[1] == "refs/heads/"+branch {
+			return f[0], true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // PatchLanded reports whether upstream contains a commit with the same patch as the single
 // commit `commit` (git cherry marks it with "-"), or contains the commit itself.
 func PatchLanded(ctx context.Context, dir, upstream, commit string) (bool, error) {

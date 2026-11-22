@@ -328,6 +328,20 @@ func (s *Store) GetBranch(ctx context.Context, taskID string) (Branch, error) {
 	return b, err
 }
 
+// MarkTaskCleaned clears a task's worktree path (the branch row and its history stay) and
+// records a task-cleaned event.
+func (s *Store) MarkTaskCleaned(ctx context.Context, taskID string, data map[string]string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE branches SET worktree = '', updated_at = ? WHERE task_id = ?`, s.ts(), taskID)
+	if err != nil {
+		return fmt.Errorf("clear worktree of %s: %w", taskID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("branch for %s: %w", taskID, ErrNotFound)
+	}
+	_, err = s.AppendEvent(ctx, "task-cleaned", "", taskID, data)
+	return err
+}
+
 // TaskEvents returns a task's events in seq order.
 func (s *Store) TaskEvents(ctx context.Context, taskID string) ([]Event, error) {
 	return s.queryEvents(ctx, `SELECT seq, at, kind, COALESCE(goal_id, ''), COALESCE(task_id, ''), data
