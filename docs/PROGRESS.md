@@ -284,17 +284,25 @@ are not inherited by children, so the lock ends exactly when mill does.
       worktree ($0.24). The first run with owns-check and gate triage active: the agent stayed
       in its owns and the gate passed, so neither path was exercised by a real agent yet.
 
-## Real-agent check of gate triage, and what it found (goal `g4`, on `main`)
+## Real-agent check of gate triage, and what it found (goal `g4`, on `main`): done
 
 On the toy repo, `main` was made red with a failing test, then a small unrelated task ran. Gate
 triage worked as designed: one implementer attempt ($0.05), the gate failed, the re-run failed
 (not flaky), the same command failed on the starting point, and the task was blocked as not
 caused by it, with no wasted attempts. Two gaps showed up:
 
-- [ ] `task-rebase`: the block reason says "fix the base branch, then retry", but a retry keeps
+- [x] `task-rebase` ($0.45): the block reason says "fix the base branch, then retry", but a retry keeps
       the task's original starting point (still red), so it blocked again (a second implementer
       run, $0.01). Add `mill task rebase <id>` to move the task's own commits onto the base's
       current tip; the block reason names it.
-- [ ] `gitignore-refresh`: repos initialized before `run.lock` existed show it as untracked;
+- [x] `gitignore-refresh` ($0.19): repos initialized before `run.lock` existed show it as untracked;
       `mill init` never updates an existing `.mill/.gitignore`. Init adds missing lines, doctor
       warns.
+
+Goal `g4`: 2/2 verified on the first attempt, $0.64. Proved on the toy repo: after fixing
+`main`, `mill task rebase triage-probe` moved the starting point from the red `ec14fe3` to the
+fixed `0d2fc4c`, the retry verified, and `mill init` added `run.lock` to the old `.gitignore`.
+The new behaviour since M2 is now written up in REQUIREMENTS.md (GR7–GR8, TP7–TP9, BG7).
+
+Still open: a real agent has not yet changed files outside its `owns`, so `owns_policy` is only
+covered by tests; restacking fan-in tasks and publishing (M3) are next.

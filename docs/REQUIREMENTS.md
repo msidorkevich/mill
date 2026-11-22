@@ -66,6 +66,12 @@ agent, and delivers each task as its own branch for a human to review and merge 
   with side exits `blocked`, `failed` and `cancelled`. Only the harness changes status.
 - **GR6.** Crash recovery: after a restart, interrupted attempts are re-queued, and nothing is
   pushed twice.
+- **GR7.** Crash recovery runs under the run lock (one mill run per repository, held with a
+  process-owned `fcntl` lock). Before tasks are re-queued, it kills workers a killed mill left
+  running: a recorded worker whose live leader matches its recorded command, and leaderless
+  members of its process group only when their working directory is inside the task's worktree.
+- **GR8.** Recovery records the usage of abandoned attempts from their raw output files,
+  estimating the cost when claude never reported one (BG7).
 
 ### Task pipeline (TP)
 
@@ -82,6 +88,18 @@ agent, and delivers each task as its own branch for a human to review and merge 
 - **TP5. Retry:** a failed gate or verify starts a new implement attempt with the findings
   attached, up to `max_attempts` (e.g. 3). After that the task is `blocked`.
 - **TP6.** Each attempt records its tokens, cost, duration, output and log path.
+- **TP7. Owns check:** files changed since the task's start that match none of its `owns` globs
+  are recorded. `owns_policy`: `warn` (default; the verifier is told and must judge whether the
+  spec needed them), `enforce` (one finding per file, the gate is skipped), `off`.
+- **TP8. Gate triage:** a failing gate command is re-run once (`gate_rerun`); if it then passes it
+  counts as flaky, the gate passes and the verifier is told. A command that still fails is run on
+  the task's starting point in a temporary worktree (`gate_check_base`): if it fails there too, the
+  task is blocked as not caused by it (no further attempts); if it passes there, the finding says
+  the task's changes cause it.
+- **TP9. Editing and rebasing tasks:** `mill task edit <id>` changes a pending, blocked or failed
+  task's spec, also after approval (dependencies stay fixed). `mill task rebase <id>` moves a task's
+  own commits onto its base's current tip (tasks with at most one dependency; fan-in needs the
+  keeper).
 
 ### Runners (RN)
 
@@ -219,6 +237,9 @@ agent, and delivers each task as its own branch for a human to review and merge 
   [budget.goal]
   tokens = 6_000_000
   ```
+- **BG7. Cost estimates:** when a run ends without a result from claude (killed, crashed), its cost
+  is estimated from tokens with a built-in price table (overridable with `[prices.<model>]` in
+  config; cache writes priced at the 1-hour rate) and shown as `~$`.
 
 ### State and storage (ST)
 
