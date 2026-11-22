@@ -386,7 +386,7 @@ commit, rebase, squash), and mill detects each one.
 - [ ] GT7 (rebuild state from git) stays deferred, see the design notes.
 
 
-## M3 follow-ups through GitHub: published, awaiting merge (goal `g7`)
+## M3 follow-ups through GitHub: done (goal `g7`)
 
 Onboarded to GitHub: `origin` is `git@github.com:msidorkevich/mill.git` (the local forge stays as
 remote `forge` for now); `master` pushed once, by hand; from here on `master` changes only
@@ -406,16 +406,34 @@ their PRs target `review/g7/module-path` until it merges; then GitHub retargets 
 Not in this goal: gate speed (mostly my specs adding a full `-race` run on top of `make check`;
 I now write narrower checks), GT7 (deferred).
 
-Goal `g7`: 5/5 verified, $1.27, all published to GitHub (`review/g7/module-path` on `master`,
-the other four stacked on it). Waiting for the PRs to be merged; `mill sync` then restacks the
-four onto `master` after `module-path` merges.
+Goal `g7`: 5/5 verified, $1.27, published to GitHub and merged there (PRs #1, #3–#5). The PRs
+were opened against `master` and merged with merge commits, so `mill sync` saw every task land
+by `ancestor` (`module-path` came in with `mill-clean`, which was stacked on it); goal `g7`
+landed. Not yet exercised on GitHub: stacked-PR retargeting and the squash/rebase buttons.
 
 ### Follow-ups found in g7
 
-- [ ] Claude usage limit: the first `g7` run hit "You've hit your 5-hour limit"; mill counted it
+- [x] Claude usage limit (goal `g8`, published): the first `g7` run hit "You've hit your 5-hour limit"; mill counted it
       as an implementer failure and burned all three attempts in seconds, then blocked the task.
       A usage or rate limit is not the agent's fault: recognise it, do not count the attempt,
       stop starting new agents, and block or pause with the reset time.
-- [ ] The workers' deny rule for `mill` also matches a locally built `./bin/mill`, so an agent
+- [x] The workers' deny rule for `mill` also matches (goal `g8`, `claude-md-note`) a locally built `./bin/mill`, so an agent
       working on mill cannot run the binary it just built (it verified another way). Fine as a
       safety rule; mention it in CLAUDE.md so agents use `go run ./cmd/mill` or tests instead.
+
+## Usage limits (goal `g8`): published, awaiting merge
+
+The real stream showed a machine-readable signal: `rate_limit_event` (`status: rejected`,
+`rateLimitType`, `resetsAt`) and a result with `api_error_status: 429`. 3/3 verified on the
+first attempt, $2.27; reviewed; published to GitHub (`limit-handling` stacked on
+`limit-detect`).
+
+- [x] `limit-detect`: runner status `rate_limited` with limit type and reset time; early
+      warning from `allowed_warning` events ($0.21)
+- [x] `limit-handling`: a rate-limited attempt is not a failure and no further attempts run;
+      the scheduler stops starting agents and blocks the goal with the reset time;
+      `mill run --wait-on-limit` waits for the reset and continues; planner and `task run`
+      report it too (Opus, $2.03)
+- [x] `claude-md-note`: CLAUDE.md tells agents not to run `mill`/`./bin/mill` ($0.04)
+- Known gap (accepted): if claude dies after a rejected event without a final result, the run
+  is reported as a plain error; the next attempt then hits the limit cleanly.
