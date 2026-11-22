@@ -451,7 +451,7 @@ not exercised on GitHub itself). The early usage warning has since shown up in r
       as `[operator]` findings), fixed in attempt 2: directories with a `.git` entry are never
       entered. $0.33.
 
-## M4. Keeper: built, publishing (goal `g9`)
+## M4. Keeper: done (goal `g9`, landed 2026-11-22)
 
 Requirements: KP1, KP4–KP8, TS2 (conflict cases). Exit criterion: scenario tests with injected
 textual and semantic conflicts are resolved or flagged correctly.
@@ -488,11 +488,33 @@ made the CLI task size S.
       reset (`--wait-on-limit`), resumed, kept the agents' work, and finished.
 - [x] Dogfood: `mill keep g9` built from the M4 branches ran on mill itself: no conflicts; the
       combined check merged all six branches onto master and the gate was green.
-- [ ] Publishing in four rounds (the fan-in rule: every dependency but the deepest must land
-      before a fan-in task is published)
+- [x] Published and merged in four rounds (the fan-in rule: every dependency but the deepest
+      must land before a fan-in task is published). Between rounds `mill sync` (built from M4)
+      marked the merged tasks landed and restacked the rest, including both fan-in tasks, which
+      sync could not restack before M4. Goal `g9` landed.
 
 ### Follow-ups found in M4
 
 - [ ] The fan-in publish rule makes a wide DAG land slowly (four merge rounds for six tasks).
       Consider publishing a fan-in on top of a temporary merge of its unlanded parents, or a
       documented "land in waves" helper that says which PRs can be merged now.
+
+## Approval queue (goal `g10`): in progress
+
+Approve once, and `mill keep` publishes each task as soon as the publish rules allow, so
+landing a stacked or fan-in goal needs no round-trips (asked for after the four M4 rounds).
+Planned by mill's planner ($0.26): three tasks, `store-approval` → `review-approve-queue` →
+`keep-publishes-queue`. Approvals are cleared in the store whenever an implementer run starts,
+so any new code needs a new approval; restacks keep it.
+
+### Follow-ups found while planning g10
+
+- [ ] The g10 plan is a strict chain although `keep-publishes-queue`'s code only needs the
+      store API; it depends on `review-approve-queue` only because its end-to-end scenario test
+      (a requirement from my goal text) approves tasks through the CLI. Putting that test in its
+      own fourth task would have run the two middle tasks in parallel (about one task's time
+      saved). Improve the planner prompt: prefer parallelism, and put end-to-end tests that span
+      several features in their own task so feature tasks do not depend on each other only for
+      a test.
+- [ ] When reviewing a plan, flag dependencies that exist only because of a test, and consider
+      splitting the test out before approving.
