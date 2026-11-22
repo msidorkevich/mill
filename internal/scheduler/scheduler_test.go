@@ -64,6 +64,8 @@ type fake struct {
 	hold    map[string]bool
 	release map[string]chan string
 	started chan string // every start, buffered
+	// limits makes a task's next run end rate limited with this reset time (zero = unknown).
+	limits map[string]time.Time
 
 	mu        sync.Mutex
 	running   []string
@@ -74,7 +76,7 @@ type fake struct {
 }
 
 func newFake(s *store.Store, hold ...string) *fake {
-	f := &fake{s: s, hold: map[string]bool{}, release: map[string]chan string{}, started: make(chan string, 100)}
+	f := &fake{s: s, hold: map[string]bool{}, release: map[string]chan string{}, started: make(chan string, 100), limits: map[string]time.Time{}}
 	for _, id := range hold {
 		f.hold[id] = true
 		f.release[id] = make(chan string, 1)
@@ -104,7 +106,13 @@ func (f *fake) run(ctx context.Context, id string) (pipeline.Outcome, error) {
 
 	status, reason := store.TaskVerified, ""
 	var runErr error
-	if f.hold[id] {
+	f.mu.Lock()
+	resets, limited := f.limits[id]
+	delete(f.limits, id)
+	f.mu.Unlock()
+	if limited {
+		status, reason = store.TaskBlocked, "rate limited: the five_hour usage limit was reached"
+	} else if f.hold[id] {
 		select {
 		case status = <-f.release[id]:
 		case <-ctx.Done():
@@ -121,7 +129,7 @@ func (f *fake) run(ctx context.Context, id string) (pipeline.Outcome, error) {
 	if err := f.s.SetTaskStatus(bg, id, status, "", reason); err != nil {
 		return pipeline.Outcome{}, err
 	}
-	return pipeline.Outcome{Status: status, Reason: reason}, runErr
+	return pipeline.Outcome{Status: status, Reason: reason, RateLimited: limited, ResetsAt: resets}, runErr
 }
 
 // waitStart returns the next started task id or fails after a deadline.
@@ -524,5 +532,139 @@ func TestBlockedReasonTreatsPublishedAndLandedAsFinished(t *testing.T) {
 	}
 	if want := x + " blocked (nope); waiting: " + b + " (needs " + x + ")"; res.Reason != want {
 		t.Fatalf("reason = %q, want %q", res.Reason, want)
+	}
+}
+
+func TestRateLimitStopsNewStartsLetsRunningFinishAndBlocksGoal(t *testing.T) {
+	ctx := context.Background()
+	s, g := newGoal(t, task{id: "a"}, task{id: "b"}, task{id: "c"})
+	a, b, c := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c")
+	f := newFake(s, b)
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.Local)
+	f.limits[a] = time.Date(2026, 11, 22, 12, 50, 0, 0, time.Local)
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Now: func() time.Time { return now }}
+	ch := runAsync(ctx, sch, g, Options{})
+	f.waitStart(t)
+	f.waitStart(t)
+	// a ended rate limited at once; b is still running and must be allowed to finish.
+	deadline := time.Now().Add(10 * time.Second)
+	for f.index("end "+a) < 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("a did not end")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	f.release[b] <- store.TaskVerified
+	r := wait(t, ch)
+	want := "rate limited: " + a + " hit the account's usage limit; resets at 12:50; run `mill run " + g + " --retry-blocked` after that"
+	if r.err != nil || r.res.Status != store.GoalBlocked || r.res.Reason != want {
+		t.Fatalf("RunGoal = %+v, want reason %q", r, want)
+	}
+	if f.index("start "+c) >= 0 {
+		t.Fatalf("c started after the rate limit: %v", f.events)
+	}
+	if got := status(t, s, b); got.Status != store.TaskVerified {
+		t.Fatalf("b = %+v, want verified", got)
+	}
+	if got := status(t, s, a); got.Status != store.TaskBlocked || !strings.HasPrefix(got.Reason, "rate limited:") {
+		t.Fatalf("a = %+v", got)
+	}
+	gl, _ := s.GetGoal(ctx, g)
+	if gl.Status != store.GoalBlocked || gl.Reason != want {
+		t.Fatalf("goal = %+v", gl)
+	}
+
+	res, err := sch.RunGoal(ctx, g, Options{RetryBlocked: true})
+	if err != nil || res.Status != store.GoalDone {
+		t.Fatalf("retry run = %+v, %v", res, err)
+	}
+	if !slices.Contains(f.seen, a+"=pending") || !slices.Contains(f.seen, c+"=pending") {
+		t.Fatalf("retry did not run a and c from pending: %v", f.seen)
+	}
+}
+
+func TestWaitOnLimitSleepsUntilResetThenFinishesGoal(t *testing.T) {
+	ctx := context.Background()
+	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
+	a, b := store.TaskID(g, "a"), store.TaskID(g, "b")
+	f := newFake(s)
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.Local)
+	f.limits[a] = time.Date(2026, 11, 22, 12, 50, 0, 0, time.Local)
+	var slept []time.Duration
+	out := &syncBuf{}
+	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run, Out: out,
+		Now: func() time.Time { return now },
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			slept = append(slept, d)
+			if f.index("start "+b) >= 0 {
+				t.Errorf("b started before the wait")
+			}
+			return nil
+		}}
+	res, err := sch.RunGoal(ctx, g, Options{WaitOnLimit: true})
+	if err != nil || res.Status != store.GoalDone {
+		t.Fatalf("RunGoal = %+v, %v\n%s", res, err, out)
+	}
+	if want := 2*time.Hour + 51*time.Minute; len(slept) != 1 || slept[0] != want {
+		t.Fatalf("slept %v, want [%v]", slept, want)
+	}
+	if !strings.Contains(out.String(), "waiting until 12:51 to resume") {
+		t.Fatalf("output:\n%s", out)
+	}
+	if !slices.Equal(f.seen, []string{a + "=pending", a + "=pending", b + "=pending"}) &&
+		!slices.Equal(f.seen, []string{a + "=pending", b + "=pending", a + "=pending"}) {
+		t.Fatalf("seen = %v", f.seen)
+	}
+	for _, id := range []string{a, b} {
+		if got := status(t, s, id); got.Status != store.TaskVerified {
+			t.Errorf("%s = %+v", id, got)
+		}
+	}
+}
+
+func TestWaitOnLimitWaitsFifteenMinutesWhenResetUnknown(t *testing.T) {
+	s, g := newGoal(t, task{id: "a"})
+	f := newFake(s)
+	f.limits[store.TaskID(g, "a")] = time.Time{}
+	var slept []time.Duration
+	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run,
+		Sleep: func(ctx context.Context, d time.Duration) error { slept = append(slept, d); return nil }}
+	res, err := sch.RunGoal(context.Background(), g, Options{WaitOnLimit: true})
+	if err != nil || res.Status != store.GoalDone {
+		t.Fatalf("RunGoal = %+v, %v", res, err)
+	}
+	if len(slept) != 1 || slept[0] != 15*time.Minute {
+		t.Fatalf("slept %v, want [15m]", slept)
+	}
+}
+
+func TestCancelDuringLimitWaitLeavesGoalInterrupted(t *testing.T) {
+	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
+	a, b := store.TaskID(g, "a"), store.TaskID(g, "b")
+	f := newFake(s)
+	f.limits[a] = time.Now().Add(time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run,
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			cancel()
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+	res, err := sch.RunGoal(ctx, g, Options{WaitOnLimit: true})
+	if err != nil || res.Status != store.GoalBlocked || res.Reason != InterruptedReason(g) {
+		t.Fatalf("RunGoal = %+v, %v", res, err)
+	}
+	if f.index("start "+b) >= 0 || len(f.seen) != 1 {
+		t.Fatalf("tasks ran after the cancel: %v", f.events)
+	}
+	for _, id := range []string{a, b} {
+		if got := status(t, s, id); got.Status != store.TaskPending {
+			t.Errorf("%s = %+v, want pending", id, got)
+		}
+	}
+	gl, _ := s.GetGoal(context.Background(), g)
+	if gl.Status != store.GoalBlocked || gl.Reason != InterruptedReason(g) {
+		t.Fatalf("goal = %+v", gl)
 	}
 }

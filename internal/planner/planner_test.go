@@ -315,3 +315,20 @@ func TestGenerateTimeoutNamesDurationCallAndSetting(t *testing.T) {
 		t.Errorf("result = %+v", res)
 	}
 }
+
+func TestGenerateRateLimitedNamesLimitAndResetTime(t *testing.T) {
+	resets := time.Now().Add(2 * time.Hour).Truncate(time.Minute)
+	f := runner.NewFake(runner.Script{runner.RolePlanner: {{RateLimit: &runner.RateLimit{Type: "five_hour", ResetsAt: resets}}, step(validPlan, 0)}})
+	res, err := Generate(context.Background(), options(t, f))
+	var rl *RateLimitedError
+	if !errors.As(err, &rl) || !rl.ResetsAt.Equal(resets) {
+		t.Fatalf("err = %v", err)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "rate limited: the five_hour usage limit was reached") ||
+		!strings.Contains(msg, "resets at ") || !strings.Contains(msg, resets.Local().Format("15:04")) {
+		t.Fatalf("err = %v", err)
+	}
+	if res.Calls != 1 || len(f.Calls()) != 1 {
+		t.Fatalf("calls = %d/%d, want 1 (no retry after a rate limit)", res.Calls, len(f.Calls()))
+	}
+}

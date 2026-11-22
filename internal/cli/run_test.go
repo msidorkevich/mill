@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/project"
@@ -189,5 +190,48 @@ func TestRunGoalRefusesDraftAndUsageErrors(t *testing.T) {
 	}
 	if r := run(t, root, nil, "run", "g1", "--bogus"); r.code != ExitUsage {
 		t.Fatalf("bad flag: %+v", r)
+	}
+}
+
+// limitedFanInScript makes g1/a hit a usage limit that reset at resetsAt, then succeed.
+func limitedFanInScript(resetsAt time.Time) string {
+	return `{"tasks": {
+  "g1/a": {"implementer": [
+             {"rate_limit": {"type": "five_hour", "resets_at": "` + resetsAt.Format(time.RFC3339) + `"}},
+             {"output": {"summary": "s", "files_changed": [], "notes": ""}, "files": {"a.txt": "a\n"}}],
+           "verifier": [{"output": {"verdict": "pass", "summary": "ok", "findings": []}}]},
+  "g1/b": ` + taskSteps(`{"b.txt": "b\n"}`) + `,
+  "g1/c": ` + taskSteps(`{"c.txt": "c\n"}`) + `
+}}`
+}
+
+func TestRunGoalRateLimitBlocksThenWaitOnLimitFinishes(t *testing.T) {
+	// The limit reset two minutes ago, so --wait-on-limit resumes at once.
+	resets := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	root := goalRepo(t, limitedFanInScript(resets), "")
+	r := run(t, root, nil, "run", "g1")
+	if r.code != ExitNotVerified {
+		t.Fatalf("run: %+v", r)
+	}
+	for _, want := range []string{"Blocked: rate limited: g1/a hit the account's usage limit; resets at ",
+		resets.Local().Format("15:04"), "mill run g1 --retry-blocked", "--wait-on-limit"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
+	}
+	if strings.Contains(r.stdout, "g1/c: started") {
+		t.Errorf("g1/c started after the rate limit:\n%s", r.stdout)
+	}
+
+	r = run(t, root, nil, "run", "g1", "--retry-blocked", "--wait-on-limit")
+	if r.code != ExitOK {
+		t.Fatalf("run --wait-on-limit: %+v", r)
+	}
+	resume := resets.Add(time.Minute).Local().Format("15:04")
+	for _, want := range []string{"usage limit reached; waiting until " + resume + " to resume",
+		"g1/a: back to pending (usage limit reset)", "goal g1: done"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
 	}
 }

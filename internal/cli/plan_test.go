@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
@@ -344,5 +345,27 @@ func TestGoalListCountsPublishedAndLandedTasksAsDone(t *testing.T) {
 	setStatus(t, root, "g1/b", store.TaskPublished)
 	if h := run(t, root, nil, "goal", "list"); h.code != ExitOK || !strings.Contains(h.stdout, "2/2") {
 		t.Errorf("list:\n%+v", h)
+	}
+}
+
+func TestPlanGoalTextRateLimitedPrintsResetAndCreatesNoGoal(t *testing.T) {
+	root := plannerRepo(t) // configures the fake runner; the script is replaced below
+	resets := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	script := `{"planner": [{"rate_limit": {"type": "seven_day", "resets_at": "` + resets.Format(time.RFC3339) + `"}}]}`
+	if err := os.WriteFile(filepath.Join(root, "script.json"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "plan", "add a greeting")
+	if r.code != ExitError {
+		t.Fatalf("code = %d: %+v", r.code, r)
+	}
+	for _, want := range []string{"rate limited: the seven_day usage limit was reached; resets at ",
+		resets.Local().Format("15:04"), "No goal was created"} {
+		if !strings.Contains(r.stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, r.stderr)
+		}
+	}
+	if l := run(t, root, nil, "goal", "list"); !strings.Contains(l.stdout, "no goals") {
+		t.Errorf("a goal was created:\n%s", l.stdout)
 	}
 }

@@ -9,6 +9,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
 )
@@ -67,6 +68,7 @@ const (
 	StatusError          Status = "error"           // the agent or its process failed
 	StatusCancelled      Status = "cancelled"       // the context was cancelled
 	StatusBudgetExceeded Status = "budget_exceeded" // stopped because a limit was reached
+	StatusRateLimited    Status = "rate_limited"    // the account hit a usage limit
 )
 
 // Result is the outcome of a Request.
@@ -80,6 +82,11 @@ type Result struct {
 	Error         string // human-readable reason when Status is not ok
 	// Warnings are non-fatal observations, e.g. tool calls the permission rules denied.
 	Warnings []string
+	// LimitType names the usage limit (five_hour, seven_day, ...) when Status is rate_limited;
+	// empty when unknown.
+	LimitType string
+	// ResetsAt is when the usage limit resets when Status is rate_limited; zero when unknown.
+	ResetsAt time.Time
 	// RawPath is the file holding the agent's raw output, when there is one.
 	RawPath string
 }

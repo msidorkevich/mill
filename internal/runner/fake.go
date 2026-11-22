@@ -24,6 +24,14 @@ type Step struct {
 	Files map[string]string `json:"files,omitempty"`
 	// DelayMS makes the fake wait this long before returning (cancelled early with the context).
 	DelayMS int `json:"delay_ms,omitempty"`
+	// RateLimit, when set, makes the run end with StatusRateLimited after reporting Usage.
+	RateLimit *RateLimit `json:"rate_limit,omitempty"`
+}
+
+// RateLimit describes the usage limit a scripted run hits.
+type RateLimit struct {
+	Type     string    `json:"type,omitempty"`      // e.g. five_hour; "" = unknown
+	ResetsAt time.Time `json:"resets_at,omitempty"` // zero = unknown
 }
 
 // Script maps each role to the responses it returns, in order.
@@ -137,6 +145,10 @@ func (f *Fake) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{Status: StatusCancelled, Usage: total, Error: err.Error()}, nil
+	}
+	if rl := step.RateLimit; rl != nil {
+		return Result{Status: StatusRateLimited, Usage: total, Error: "usage limit reached",
+			LimitType: rl.Type, ResetsAt: rl.ResetsAt}, nil
 	}
 	if step.Error != "" {
 		return Result{Status: StatusError, Usage: total, Error: step.Error}, nil
