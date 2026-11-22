@@ -416,3 +416,77 @@ func TestApproveRefusesUnverifiedTaskAndHeldLock(t *testing.T) {
 		t.Fatalf("approve after release: %+v", r)
 	}
 }
+
+func TestApproveChildOfLandedParentNeedsSyncFirst(t *testing.T) {
+	root, bare := chainPublished(t, false)
+	if r := run(t, root, nil, "review", "approve", "g2/a"); r.code != ExitOK {
+		t.Fatalf("approve parent: %+v", r)
+	}
+	// The forge squash-merges the parent: its branch commits are not in main.
+	f := forge(t, bare)
+	gitC(t, f, "fetch", "-q", "origin")
+	gitC(t, f, "merge", "-q", "--squash", "origin/review/g2/a")
+	gitC(t, f, "commit", "-q", "-m", "A (squashed)")
+	squash := gitC(t, f, "rev-parse", "HEAD")
+	gitC(t, f, "push", "-q", "origin", "main")
+	setStatus(t, root, "g2/a", store.TaskLanded)
+
+	r := run(t, root, nil, "review", "approve", "g2/b")
+	if r.code != ExitError || !strings.Contains(r.stderr, "dependencies must be published or landed") ||
+		!strings.Contains(r.stderr, "still based on mill/g2/a") || !strings.Contains(r.stderr, "run `mill sync`") {
+		t.Fatalf("approve before sync: %+v", r)
+	}
+	if _, ok := remoteRefs(t, bare)["refs/heads/review/g2/b"]; ok {
+		t.Fatal("refused approve pushed a branch")
+	}
+
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || !strings.Contains(r.stdout, "g2/b  onto main ("+squash[:8]) {
+		t.Fatalf("sync: %+v", r)
+	}
+	if r := run(t, root, nil, "review", "approve", "g2/b"); r.code != ExitOK {
+		t.Fatalf("approve after sync: %+v", r)
+	}
+	pub := remoteRefs(t, bare)["refs/heads/review/g2/b"]
+	if got := gitC(t, bare, "rev-list", "--parents", "-n1", pub); got != pub+" "+squash {
+		t.Errorf("child parents = %q, want main's tip %s", got, squash)
+	}
+	if files := gitC(t, bare, "diff", "--name-only", squash, pub); files != "b.txt" {
+		t.Errorf("child diff files = %q", files)
+	}
+}
+
+func TestApproveChildRefusedWhileParentHasUnpublishedChanges(t *testing.T) {
+	root, bare := chainPublished(t, false)
+	if r := run(t, root, nil, "review", "approve", "g2/a"); r.code != ExitOK {
+		t.Fatalf("approve parent: %+v", r)
+	}
+	commitInWorktree(t, openStore(t, root), "g2/a", "more.txt", "m\n")
+
+	r := run(t, root, nil, "review", "approve", "g2/b")
+	if r.code != ExitError || !strings.Contains(r.stderr, "dependencies must be published or landed") ||
+		!strings.Contains(r.stderr, "g2/a, which has changes") || !strings.Contains(r.stderr, "mill review approve g2/a") {
+		t.Fatalf("approve child: %+v", r)
+	}
+	if _, ok := remoteRefs(t, bare)["refs/heads/review/g2/b"]; ok {
+		t.Fatal("refused approve pushed a branch")
+	}
+	if tk, _ := openStore(t, root).GetTask(context.Background(), "g2/b"); tk.Status != store.TaskVerified {
+		t.Errorf("g2/b status = %s", tk.Status)
+	}
+
+	// Once the parent is published again and sync restacked the child, it publishes on top.
+	if r := run(t, root, nil, "review", "approve", "g2/a"); r.code != ExitOK {
+		t.Fatalf("republish parent: %+v", r)
+	}
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || !strings.Contains(r.stdout, "g2/b  onto mill/g2/a") {
+		t.Fatalf("sync: %+v", r)
+	}
+	if r := run(t, root, nil, "review", "approve", "g2/b"); r.code != ExitOK {
+		t.Fatalf("approve child after parent: %+v", r)
+	}
+	refs := remoteRefs(t, bare)
+	parentPub, childPub := refs["refs/heads/review/g2/a"], refs["refs/heads/review/g2/b"]
+	if files := gitC(t, bare, "diff", "--name-only", parentPub, childPub); files != "b.txt" {
+		t.Errorf("child diff files = %q", files)
+	}
+}

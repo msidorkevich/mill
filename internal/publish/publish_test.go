@@ -3,6 +3,7 @@ package publish
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,5 +142,17 @@ func TestPublishRefusalsAreRefusedErrors(t *testing.T) {
 	o.Cfg.Remote = "nowhere"
 	if _, err := Publish(ctx, o); !errors.As(err, &re) || re.Rule != ruleRemote {
 		t.Fatalf("remote refusal = %v", err)
+	}
+}
+
+func TestParentRefusalRecognisesOnlyTheDependencyRule(t *testing.T) {
+	parentErr := fmt.Errorf("wrapped: %w", &RefusedError{Rule: ruleParent, Parent: "g/a", Msg: "publish g/a first"})
+	if p, ok := ParentRefusal(parentErr); !ok || p != "g/a" {
+		t.Errorf("ParentRefusal(parent rule) = %q, %v", p, ok)
+	}
+	for _, err := range []error{&RefusedError{Rule: ruleGate, Msg: "red"}, errors.New("push failed"), nil} {
+		if _, ok := ParentRefusal(err); ok {
+			t.Errorf("ParentRefusal(%v) = true", err)
+		}
 	}
 }

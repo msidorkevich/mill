@@ -54,7 +54,7 @@ func runSync(ctx context.Context, env Env, args []string) int {
 
 func printSync(w io.Writer, r syncer.Result) {
 	fmt.Fprintf(w, "\nSynced with %s/%s at %s.\n", r.Remote, r.BaseBranch, short(r.BaseSHA))
-	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.Blocked)+len(r.Manual)+len(r.GoalsLanded) == 0 {
+	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.Manual)+len(r.GoalsLanded) == 0 {
 		fmt.Fprintln(w, "Nothing changed.")
 		return
 	}
@@ -74,6 +74,16 @@ func printSync(w io.Writer, r syncer.Result) {
 		fmt.Fprintln(w, "Republished:")
 		for _, p := range r.Republished {
 			fmt.Fprintf(w, "  %s  %s at %s\n", p.TaskID, p.Ref, short(p.SHA))
+		}
+	}
+	if len(r.NeedsRepublish) > 0 {
+		fmt.Fprintln(w, "Needs re-publishing after its parent (restacked; the review branch still shows the old commit):")
+		for _, n := range r.NeedsRepublish {
+			after := n.After
+			if after == "" {
+				after = "<parent>"
+			}
+			fmt.Fprintf(w, "  %s  after %s: run `mill review approve %s`, then `mill sync`\n", n.TaskID, after, after)
 		}
 	}
 	if len(r.Blocked) > 0 {

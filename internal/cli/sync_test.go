@@ -352,3 +352,101 @@ func TestSyncNeedsConfiguredRemote(t *testing.T) {
 		t.Errorf("sync with argument: %+v", r)
 	}
 }
+
+func TestSyncLeavesChildPublishedWhenParentHasUnpublishedChanges(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	ctx := context.Background()
+	s := openStore(t, root)
+	pubBefore := remoteRefs(t, bare)["refs/heads/review/g2/b"]
+	parent := commitInWorktree(t, s, "g2/a", "more.txt", "m\n")
+
+	r := run(t, root, nil, "sync", "--json")
+	if r.code != ExitOK {
+		t.Fatalf("sync: %+v", r)
+	}
+	var doc struct {
+		Restacked []struct {
+			TaskID string `json:"task_id"`
+		} `json:"restacked"`
+		Republished    []json.RawMessage `json:"republished"`
+		NeedsRepublish []struct {
+			TaskID string `json:"task_id"`
+			After  string `json:"after"`
+			Reason string `json:"reason"`
+		} `json:"needs_republish"`
+		Blocked []json.RawMessage `json:"blocked"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v\n%s", err, r.stdout)
+	}
+	if len(doc.Restacked) != 1 || doc.Restacked[0].TaskID != "g2/b" || len(doc.Republished) != 0 || len(doc.Blocked) != 0 ||
+		len(doc.NeedsRepublish) != 1 || doc.NeedsRepublish[0].TaskID != "g2/b" || doc.NeedsRepublish[0].After != "g2/a" ||
+		!strings.Contains(doc.NeedsRepublish[0].Reason, "mill review approve g2/a") {
+		t.Fatalf("doc = %+v", doc)
+	}
+	tk, _ := s.GetTask(ctx, "g2/b")
+	child, _ := s.GetBranch(ctx, "g2/b")
+	if tk.Status != store.TaskPublished || child.BaseSHA != parent.HeadSHA || child.PublishedSHA != pubBefore {
+		t.Errorf("g2/b = %s, branch %+v", tk.Status, child)
+	}
+	if got := remoteRefs(t, bare)["refs/heads/review/g2/b"]; got != pubBefore {
+		t.Error("child was re-published on top of the parent's unpublished changes")
+	}
+	if ev := lastEvent(t, s, "g2/b", "task-restacked"); ev["new_head"] != child.HeadSHA {
+		t.Errorf("task-restacked = %v", ev)
+	}
+
+	// The text summary says what to do; it stays pending until the parent is published.
+	r = run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Needs re-publishing after its parent") ||
+		!strings.Contains(r.stdout, "g2/b  after g2/a: run `mill review approve g2/a`, then `mill sync`") || strings.Contains(r.stdout, "Blocked:") {
+		t.Fatalf("second sync: %+v", r)
+	}
+
+	// Publishing the parent and syncing re-publishes the child on top of it.
+	if r := run(t, root, nil, "review", "approve", "g2/a"); r.code != ExitOK {
+		t.Fatalf("republish parent: %+v", r)
+	}
+	r = run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Republished:") || !strings.Contains(r.stdout, "g2/b  review/g2/b") {
+		t.Fatalf("sync after parent: %+v", r)
+	}
+	refs := remoteRefs(t, bare)
+	parentPub, childPub := refs["refs/heads/review/g2/a"], refs["refs/heads/review/g2/b"]
+	if got := gitC(t, bare, "rev-list", "--parents", "-n1", childPub); got != childPub+" "+parentPub {
+		t.Errorf("child parents = %q, want %s", got, parentPub)
+	}
+	if files := gitC(t, bare, "diff", "--name-only", parentPub, childPub); files != "b.txt" {
+		t.Errorf("child diff files = %q", files)
+	}
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || !strings.Contains(r.stdout, "Nothing changed.") {
+		t.Errorf("idle sync: %+v", r)
+	}
+}
+
+func TestSyncLandsVerifiedTaskWhoseBranchWasMergedDirectly(t *testing.T) {
+	root, bare := chainPublished(t, false)
+	ctx := context.Background()
+	gitC(t, root, "push", "-q", "origin", "mill/g2/a:refs/heads/feature")
+	f := forge(t, bare)
+	gitC(t, f, "fetch", "-q", "origin")
+	gitC(t, f, "merge", "-q", "--no-ff", "-m", "Merge feature", "origin/feature")
+	merge := gitC(t, f, "rev-parse", "HEAD")
+	gitC(t, f, "push", "-q", "origin", "main")
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Landed:") || !strings.Contains(r.stdout, "g2/a  merged in "+merge[:8]) ||
+		!strings.Contains(r.stdout, "g2/b  onto main ("+merge[:8]) {
+		t.Fatalf("sync: %+v", r)
+	}
+	s := openStore(t, root)
+	if tk, _ := s.GetTask(ctx, "g2/a"); tk.Status != store.TaskLanded {
+		t.Errorf("g2/a status = %s", tk.Status)
+	}
+	if ev := lastEvent(t, s, "g2/a", "task-landed"); ev["method"] != "merged" || ev["commit"] != merge {
+		t.Errorf("task-landed = %v", ev)
+	}
+	if tk, _ := s.GetTask(ctx, "g2/b"); tk.Status != store.TaskVerified {
+		t.Errorf("g2/b status = %s", tk.Status)
+	}
+}
