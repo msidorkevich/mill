@@ -129,7 +129,21 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 	case store.GoalDraft:
 		return Result{}, fmt.Errorf("goal %s is a draft: review it with `mill plan show %s` and approve it with `mill plan approve %s` first", goalID, goalID, goalID)
 	case store.GoalDone:
-		return Result{}, fmt.Errorf("goal %s is already done: all its tasks are verified", goalID)
+		// Safety net: a done goal with an unfinished task (sent back for changes) runs as approved.
+		tasks, err := s.Store.GoalTasks(bg, goalID)
+		if err != nil {
+			return Result{}, err
+		}
+		unfinished := false
+		for _, t := range tasks {
+			if !store.Done(t.Status) {
+				unfinished = true
+				break
+			}
+		}
+		if !unfinished {
+			return Result{}, fmt.Errorf("goal %s is already done: all its tasks are verified", goalID)
+		}
 	default:
 		return Result{}, fmt.Errorf("goal %s has unknown status %q", goalID, g.Status)
 	}
