@@ -67,7 +67,7 @@ unchanged, lists the conflicting files and exits 1. A branch that already contai
 reported as up to date and left alone.
 
 A verified task is a branch `mill/t/<id>` in a worktree outside your checkout; mill prints the
-command to review its diff. mill never pushes and never touches `main`.
+command to review its diff. mill pushes only `review/<task>` branches, on `mill review approve`, and never touches `main`.
 
 ### Plans and goals
 
@@ -90,6 +90,7 @@ mill review                     # verified and published tasks, oldest first: ID
 mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat (--diff, --json)
 mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
 mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
+mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
 ```
 
 `mill run` starts a task once all its dependencies are verified, up to `max_parallel` at a

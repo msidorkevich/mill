@@ -14,10 +14,12 @@ import (
 	"mill/internal/gate"
 	"mill/internal/gitx"
 	"mill/internal/prompt"
+	"mill/internal/publish"
+	"mill/internal/runlock"
 	"mill/internal/store"
 )
 
-const reviewUsage = "Usage: mill review [--json] | show <id> [--diff] [--json] | changes <id> (-m <text> | --file <path>) | reject <id> -m <reason>"
+const reviewUsage = "Usage: mill review [--json] | show <id> [--diff] [--json] | changes <id> (-m <text> | --file <path>) | reject <id> -m <reason> | approve <id>"
 
 func runReview(ctx context.Context, env Env, args []string) int {
 	if len(args) > 0 {
@@ -28,6 +30,8 @@ func runReview(ctx context.Context, env Env, args []string) int {
 			return runReviewChanges(ctx, env, args[1:])
 		case "reject":
 			return runReviewReject(ctx, env, args[1:])
+		case "approve":
+			return runReviewApprove(ctx, env, args[1:])
 		}
 		if !strings.HasPrefix(args[0], "-") {
 			fmt.Fprintf(env.Stderr, "mill review: unknown subcommand %q\n%s\n", args[0], reviewUsage)
@@ -386,5 +390,46 @@ func runReviewReject(ctx context.Context, env Env, args []string) int {
 	for _, h := range held {
 		fmt.Fprintf(env.Stdout, "  %s\n", h)
 	}
+	return ExitOK
+}
+
+func runReviewApprove(ctx context.Context, env Env, args []string) int {
+	fs := newFlags(env, "review approve")
+	id, code, ok := goalArg(env, "review approve", "mill review approve <id>", fs, args)
+	if !ok {
+		return code
+	}
+	fail := func(err error) int {
+		fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
+		return ExitError
+	}
+	paths, cfg, s, err := openProject(ctx, env)
+	if err != nil {
+		return fail(err)
+	}
+	defer s.Close()
+	lock, err := runlock.Acquire(paths.RunLock)
+	if err != nil {
+		return fail(err)
+	}
+	defer func() {
+		if err := lock.Release(); err != nil {
+			fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
+		}
+	}()
+
+	res, err := publish.Publish(ctx, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id})
+	if res.GateRerun != nil && err == nil {
+		fmt.Fprintf(env.Stdout, "Gate re-run at the head: passed (%d command(s)).\n", len(res.GateRerun.Commands))
+	}
+	if err != nil {
+		return fail(err)
+	}
+	verb := "Published"
+	if res.Republish {
+		verb = "Republished"
+	}
+	fmt.Fprintf(env.Stdout, "%s %s as %s on %s at %s (parent %s).\n", verb, id, res.Ref, res.Remote, short(res.SHA), short(res.Parent))
+	fmt.Fprintf(env.Stdout, "\nNext: open a pull request from %s into %s.\n", res.Ref, res.Onto)
 	return ExitOK
 }
