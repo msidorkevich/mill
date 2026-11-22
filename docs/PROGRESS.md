@@ -539,3 +539,43 @@ skipped.
 - [ ] Process note (mine): I checked GitHub once, just before the operator's merge landed, and
       wrongly said the wrong PR had been merged. Check what the base branch contains (which
       tasks landed), not the top PR number, and re-fetch before concluding.
+
+## Cheaper keep, goal graph, reopening goals (goal `g11` + task `goal-reopen`): published
+
+- [x] `combined-cache` ($0.56, 3 attempts): the combined check is cached by fingerprint (base
+      tip + ready branches and heads); an unchanged `mill keep` pass reports the cached result
+      instead of running a full gate; `--combined` forces a run. Attempt 1 failed review (no CLI
+      test for `--combined`), attempt 2 hit the five-hour limit (waited, resumed), attempt 3
+      passed. First real use of the `owns` check in warn mode: the task changed three files
+      outside its owns, mill listed them for the verifier, and the verifier judged them needed.
+- [x] `goal-graph` ($1.85, 2 attempts): `mill goal graph <g>` draws the task graph (lanes like
+      `git log --graph`, status marks, `← dependencies` on each row, independent tasks
+      separated) and `--mermaid` prints a flowchart that GitHub renders. Sent back once with
+      `mill review changes`: trying it on real goals showed independent tasks looked chained and
+      dense fan-ins were hard to read.
+- [x] `goal-reopen` ($0.26): found while sending `goal-graph` back. `review changes` left the
+      goal `done`, so `mill run` refused to re-run the task. Sending a goal task back now
+      reopens its goal, and the scheduler no longer refuses a done goal with unfinished tasks.
+      The re-run of `g11` used a binary built from this fix.
+
+M4 graph as `mill goal graph g9 --mermaid` renders it:
+
+```mermaid
+flowchart TD
+  gitx_rebase_steps["gitx-rebase-steps<br/>landed"]
+  resolver_agent["resolver-agent<br/>landed"]
+  keeper_pass["keeper-pass<br/>landed"]
+  fanin_restack["fanin-restack<br/>landed"]
+  combined_check["combined-check<br/>landed"]
+  keep_command["keep-command<br/>landed"]
+  gitx_rebase_steps --> keeper_pass
+  gitx_rebase_steps --> combined_check
+  resolver_agent --> keeper_pass
+  keeper_pass --> fanin_restack
+  keeper_pass --> combined_check
+  keeper_pass --> keep_command
+  fanin_restack --> keep_command
+  combined_check --> keep_command
+  classDef landed fill:#2da44e,stroke:#1a7f37,color:#ffffff
+  class gitx_rebase_steps,resolver_agent,keeper_pass,fanin_restack,combined_check,keep_command landed
+```
