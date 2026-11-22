@@ -247,6 +247,42 @@ the forge already deleted is skipped, and one that moved is left alone with a me
 `--dry-run` prints what would be removed and changes nothing. It ends with a summary (worktrees,
 branches, remote branches, skipped with reasons). Running it again is harmless.
 
+### Keeping branches mergeable: `mill keep`
+
+```
+mill keep [<goal>] [--watch] [--interval 5m] [--combined] [--json]
+```
+
+`mill keep` keeps verified and published branches mergeable while main moves. It takes the run
+lock (recovering after a crash, like `mill sync`), so it refuses to start while another `mill`
+command holds it. One pass does the following:
+
+- **Fetches and syncs** like `mill sync`: detects merged reviews and marks them landed.
+- **Rebases lazily.** Only branches that would conflict with their base are rebased; the others
+  are left alone. Fan-in tasks are restacked onto their moved dependencies.
+- **Reuses recorded resolutions (rerere).** Conflicts that were resolved before are replayed.
+- **Asks the resolver agent** for the conflicts rerere does not know.
+- **Fixes red gates.** When a restacked branch's gate turns red, the fixer agent runs.
+- **Re-publishes** published tasks whose branch changed, so `review/*` follows.
+- **Runs the combined check** when at least two branches are ready (or with `--combined`): all
+  ready branches are merged onto `<remote>/<base_branch>` in a throwaway worktree and the gate
+  runs there. When it fails, mill reports the culprit and its partner with the failed commands.
+  Neither task is blocked.
+
+The summary lists Landed, Rebased, Resolved by rerere, Resolved by agent, Fixed, Republished,
+Blocked (with the reason; inspect with `mill task show <id>`) and Combined check, or prints
+`Nothing to do.`. A pass that completes exits 0, even with blocked tasks.
+
+Flags:
+
+- `<goal>`: only keep this goal's tasks. An unknown goal fails and lists the existing goals.
+- `--watch`: repeat the pass every `--interval` until interrupted (Ctrl-C), then exit 0. The
+  lock is released between passes.
+- `--interval <duration>`: time between passes with `--watch` (default `5m`, at least `10s`).
+- `--combined`: only fetch and run the combined check; nothing is rebased.
+- `--json`: print one document per pass with `"schema": "mill/keep@1"`, holding the keeper
+  result (`keeper`, null with `--combined`) and the `combined` result. Progress goes to stderr.
+
 **mill only ever pushes `review/*` branches.** It never pushes to `main` or any other branch;
 merging stays with you and your forge.
 
