@@ -514,8 +514,9 @@ After the operator merged the stack on GitHub, the next pass marked both landed,
 queued task onto master, re-gated it and published it from the queue by itself; after its merge
 the following pass marked goal `g10` landed. No relaying between the merges.
 
-Afterwards `mill clean --remote` removed the landed tasks' worktrees and branches, including the
-`review/g9/*` and `review/g10/*` branches on GitHub.
+Afterwards `mill clean --remote` removed the landed tasks' local worktrees and branches; their
+`review/*` branches on GitHub were already gone (deleted on GitHub), which clean reported and
+skipped.
 
 ### Follow-ups found while planning g10
 
