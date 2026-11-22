@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -153,5 +154,108 @@ func TestCleanRemoteDeletesUnmovedSkipsGoneAndLeavesMoved(t *testing.T) {
 	r = run(t, root, nil, "clean", "--remote")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "g2/a: "+a.PublishedRef+" already deleted") {
 		t.Errorf("second clean --remote: %+v", r)
+	}
+}
+
+func TestCleanRemovesEmptyDirsUnderWorktreeRoot(t *testing.T) {
+	root, _ := chainPublished(t, true)
+	setStatus(t, root, "g2/a", store.TaskLanded)
+	a := branchRow(t, root, "g2/a")
+	wtRoot := filepath.Dir(filepath.Dir(a.Worktree))
+	mk := func(p string) string {
+		p = filepath.Join(wtRoot, p)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mk("g1")
+	mk(".base/g1-x/deep")
+	keepDir := mk("keep/a/b")
+	if err := os.WriteFile(filepath.Join(keepDir, "f"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	linkDir := mk("linked")
+	if err := os.Symlink(outside, filepath.Join(linkDir, "l")); err != nil {
+		t.Fatal(err)
+	}
+	emptyTarget := filepath.Join(outside, "empty")
+	if err := os.Mkdir(emptyTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	r := run(t, root, nil, "clean", "--dry-run")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "would remove empty directory "+filepath.Join(wtRoot, "g1")) {
+		t.Fatalf("dry run: %+v", r)
+	}
+	for _, p := range []string{"g1", ".base/g1-x/deep"} {
+		if _, err := os.Stat(filepath.Join(wtRoot, p)); err != nil {
+			t.Errorf("dry run removed %s: %v", p, err)
+		}
+	}
+
+	r = run(t, root, nil, "clean")
+	if r.code != ExitOK {
+		t.Fatalf("clean: %+v", r)
+	}
+	for _, p := range []string{"g1", ".base"} {
+		if _, err := os.Stat(filepath.Join(wtRoot, p)); !os.IsNotExist(err) {
+			t.Errorf("%s still exists (err=%v)", p, err)
+		}
+	}
+	for _, p := range []string{"", "keep/a/b/f", "linked/l"} {
+		if _, err := os.Lstat(filepath.Join(wtRoot, p)); err != nil {
+			t.Errorf("%s was removed: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(emptyTarget); err != nil {
+		t.Errorf("symlink target was touched: %v", err)
+	}
+	if !strings.Contains(r.stdout, ", 4 empty director(ies)") {
+		t.Errorf("summary lacks empty directory count:\n%s", r.stdout)
+	}
+	if r := run(t, root, nil, "clean"); r.code != ExitOK || !strings.Contains(r.stdout, ", 0 empty director(ies)") {
+		t.Errorf("second clean: %+v", r)
+	}
+}
+
+func TestCleanLeavesEmptyDirsInsideLiveWorktrees(t *testing.T) {
+	root, _ := chainPublished(t, true)
+	setStatus(t, root, "g2/a", store.TaskLanded)
+	a := branchRow(t, root, "g2/a")
+	wtRoot := filepath.Dir(filepath.Dir(a.Worktree))
+	live := filepath.Join(wtRoot, "g3", "live")
+	outDir := filepath.Join(live, "out", "nested")
+	for _, d := range []string{outDir, filepath.Join(wtRoot, "g1"), filepath.Join(wtRoot, ".base", "g1-x")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(live, ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if r := run(t, root, nil, "clean"); r.code != ExitOK {
+		t.Fatalf("clean: %+v", r)
+	}
+	if _, err := os.Stat(outDir); err != nil {
+		t.Errorf("empty directory inside live worktree was removed: %v", err)
+	}
+	for _, p := range []string{"g1", ".base"} {
+		if _, err := os.Stat(filepath.Join(wtRoot, p)); !os.IsNotExist(err) {
+			t.Errorf("%s still exists (err=%v)", p, err)
+		}
+	}
+}
+
+func TestCleanMissingWorktreeRootIsNotAnError(t *testing.T) {
+	root, _ := chainPublished(t, true)
+	a := branchRow(t, root, "g2/a")
+	if err := os.RemoveAll(filepath.Dir(filepath.Dir(a.Worktree))); err != nil {
+		t.Fatal(err)
+	}
+	if r := run(t, root, nil, "clean"); r.code != ExitOK || !strings.Contains(r.stdout, "0 empty director(ies)") {
+		t.Fatalf("clean: %+v", r)
 	}
 }
