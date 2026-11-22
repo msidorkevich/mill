@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/store"
@@ -13,6 +14,7 @@ import (
 // cleanCounts is what one `mill clean` did (or, with --dry-run, would do).
 type cleanCounts struct {
 	worktrees, branches, remote int
+	dirs                        int
 	skipped                     []string
 }
 
@@ -106,8 +108,25 @@ func runClean(ctx context.Context, env Env, args []string) int {
 		}
 	}
 
-	fmt.Fprintf(env.Stdout, "\n%s: %d worktree(s), %d branch(es), %d remote branch(es).\n",
-		verb("Cleaned", "Would clean"), c.worktrees, c.branches, c.remote)
+	home := env.Home
+	if home == "" {
+		if home, err = os.UserHomeDir(); err != nil {
+			return fail(fmt.Errorf("find home directory: %w", err))
+		}
+	}
+	wtRoot := cfg.Worktrees(paths.Root, home)
+	if _, err := os.Lstat(wtRoot); err == nil {
+		if _, err := pruneEmptyDirs(env, wtRoot, wtRoot, *dry, &c); err != nil {
+			failures++
+			fmt.Fprintf(env.Stderr, "mill clean: remove empty directories under %s: %v\n", wtRoot, err)
+		}
+	} else if !os.IsNotExist(err) {
+		failures++
+		fmt.Fprintf(env.Stderr, "mill clean: inspect worktree root %s: %v\n", wtRoot, err)
+	}
+
+	fmt.Fprintf(env.Stdout, "\n%s: %d worktree(s), %d branch(es), %d remote branch(es), %d empty director(ies).\n",
+		verb("Cleaned", "Would clean"), c.worktrees, c.branches, c.remote, c.dirs)
 	if len(c.skipped) > 0 {
 		fmt.Fprintln(env.Stdout, "Skipped:")
 		for _, sk := range c.skipped {
@@ -119,6 +138,51 @@ func runClean(ctx context.Context, env Env, args []string) int {
 		return ExitError
 	}
 	return ExitOK
+}
+
+// pruneEmptyDirs removes (or with dry, reports) every empty directory under dir, bottom-up,
+// keeping top itself. It reports whether dir is empty afterwards (or would be, when dry).
+// Symlinks are never followed: a symlink counts as content.
+// A directory holding a .git entry (file or directory) is a git worktree or checkout: it counts
+// as content and is never descended into.
+func pruneEmptyDirs(env Env, top, dir string, dry bool, c *cleanCounts) (bool, error) {
+	if dir != top {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return false, nil
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	empty := true
+	for _, e := range entries {
+		if !e.IsDir() { // DirEntry type comes from lstat: symlinks are not dirs
+			empty = false
+			continue
+		}
+		sub := filepath.Join(dir, e.Name())
+		subEmpty, err := pruneEmptyDirs(env, top, sub, dry, c)
+		if err != nil {
+			return false, err
+		}
+		if !subEmpty {
+			empty = false
+			continue
+		}
+		if dry {
+			fmt.Fprintf(env.Stdout, "would remove empty directory %s\n", sub)
+		} else {
+			if err := os.Remove(sub); err != nil {
+				return false, err
+			}
+			fmt.Fprintf(env.Stdout, "removed empty directory %s\n", sub)
+		}
+		c.dirs++
+	}
+	return empty, nil
 }
 
 // cleanRemote deletes a landed task's review branch when it is still at the published sha.
