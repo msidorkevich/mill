@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -536,5 +537,315 @@ func TestContainingCommitFindsMergeOrFastForward(t *testing.T) {
 	commitFile(t, r, "after.txt", "a\n", "after")
 	if got, err := ContainingCommit(ctx, r, "main", d); err != nil || got != d {
 		t.Fatalf("ContainingCommit after fast-forward = %s, %v; want %s", got, err, d)
+	}
+}
+
+// divergedRepo returns a repo with branch feat (two commits after base: one changing
+// shared.txt, one adding feat.txt) checked out, main changing shared.txt differently when
+// conflict is set, and the shas of base, main and feat.
+func divergedRepo(t *testing.T, conflict bool) (dir, base, main, feat string) {
+	t.Helper()
+	ctx := context.Background()
+	dir = repo(t)
+	base = commitFile(t, dir, "shared.txt", "a\nb\nbase\nc\nd\n", "add shared")
+	mustRun(t, ctx, dir, "checkout", "-q", "-b", "feat")
+	commitFile(t, dir, "shared.txt", "a\nb\nfeat\nc\nd\n", "feat shared\n\nMill-Task: g1/feat\n")
+	feat = commitFile(t, dir, "feat.txt", "feat\n", "add feat.txt\n\nMill-Task: g1/feat\nMill-Attempt: 2\n")
+	mustRun(t, ctx, dir, "checkout", "-q", "main")
+	if conflict {
+		main = commitFile(t, dir, "shared.txt", "a\nb\nmain\nc\nd\n", "main shared")
+	} else {
+		main = commitFile(t, dir, "main.txt", "main\n", "main file")
+	}
+	mustRun(t, ctx, dir, "checkout", "-q", "feat")
+	return dir, base, main, feat
+}
+
+func TestRebaseStartWithoutConflictFinishes(t *testing.T) {
+	ctx := context.Background()
+	dir, base, main, _ := divergedRepo(t, false)
+	st, err := RebaseStart(ctx, dir, main, base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := mustRun(t, ctx, dir, "rev-parse", "HEAD")
+	if !st.Done || st.Head != head || len(st.Files) != 0 {
+		t.Fatalf("state = %+v, HEAD = %s", st, head)
+	}
+	if parent := mustRun(t, ctx, dir, "rev-parse", "HEAD~2"); parent != main {
+		t.Fatalf("HEAD~2 = %s, want onto %s", parent, main)
+	}
+	if subjects := mustRun(t, ctx, dir, "log", "--format=%s", main+"..HEAD"); subjects != "add feat.txt\nfeat shared" {
+		t.Fatalf("replayed commits = %q", subjects)
+	}
+}
+
+func TestRebaseStartStopsOnConflictWithoutAborting(t *testing.T) {
+	ctx := context.Background()
+	dir, base, main, _ := divergedRepo(t, true)
+	featShared := mustRun(t, ctx, dir, "rev-parse", "feat~1")
+	st, err := RebaseStart(ctx, dir, main, base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Done || st.Stopped != featShared || len(st.Files) != 1 || st.Files[0] != "shared.txt" {
+		t.Fatalf("state = %+v, want stop at %s on shared.txt", st, featShared)
+	}
+	if rh := mustRun(t, ctx, dir, "rev-parse", "REBASE_HEAD"); rh != featShared {
+		t.Fatalf("REBASE_HEAD = %s: rebase not in progress", rh)
+	}
+	if in, err := rebaseInProgress(ctx, dir); err != nil || !in {
+		t.Fatalf("rebase in progress = %v, %v", in, err)
+	}
+}
+
+func TestRebaseContinueFinishesWithoutEditor(t *testing.T) {
+	ctx := context.Background()
+	dir, base, main, _ := divergedRepo(t, true)
+	t.Setenv("EDITOR", "false") // an editor would fail the continue
+	t.Setenv("VISUAL", "false")
+	if _, err := RebaseStart(ctx, dir, main, base, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("a\nb\nmain feat\nc\nd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := RebaseContinue(ctx, dir, []string{"shared.txt"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Done || st.Head != mustRun(t, ctx, dir, "rev-parse", "HEAD") {
+		t.Fatalf("state = %+v", st)
+	}
+	if branch := mustRun(t, ctx, dir, "symbolic-ref", "--short", "HEAD"); branch != "feat" {
+		t.Fatalf("on %q after rebase, want feat", branch)
+	}
+	if got := mustRun(t, ctx, dir, "show", "HEAD~1:shared.txt"); got != "a\nb\nmain feat\nc\nd" {
+		t.Fatalf("resolved shared.txt = %q", got)
+	}
+	if parent := mustRun(t, ctx, dir, "rev-parse", "HEAD~2"); parent != main {
+		t.Fatalf("HEAD~2 = %s, want %s", parent, main)
+	}
+}
+
+func TestRebaseAbortRestoresOriginalHead(t *testing.T) {
+	ctx := context.Background()
+	dir, base, main, feat := divergedRepo(t, true)
+	if _, err := RebaseStart(ctx, dir, main, base, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := RebaseAbort(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if head := mustRun(t, ctx, dir, "rev-parse", "HEAD"); head != feat {
+		t.Fatalf("HEAD = %s, want %s", head, feat)
+	}
+	if in, err := rebaseInProgress(ctx, dir); err != nil || in {
+		t.Fatalf("rebase in progress = %v, %v", in, err)
+	}
+	if err := RebaseAbort(ctx, dir); err == nil || !strings.Contains(err.Error(), dir) {
+		t.Fatalf("abort without a rebase: err = %v, want it to name %s", err, dir)
+	}
+}
+
+func TestRebaseStartReusesRecordedResolutionWithRerere(t *testing.T) {
+	ctx := context.Background()
+	dir, base, main, feat := divergedRepo(t, true)
+	st, err := RebaseStart(ctx, dir, main, base, true)
+	if err != nil || st.Done {
+		t.Fatalf("first rebase = %+v, %v; want a stop", st, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("a\nb\nmain feat\nc\nd\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = RebaseContinue(ctx, dir, st.Files, true); err != nil || !st.Done {
+		t.Fatalf("continue = %+v, %v", st, err)
+	}
+	first := st.Head
+
+	// Same conflict again: rerere resolves it and the rebase finishes by itself.
+	mustRun(t, ctx, dir, "reset", "-q", "--hard", feat)
+	st, err = RebaseStart(ctx, dir, main, base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Done || st.RerereResolved < 1 || len(st.Files) != 0 {
+		t.Fatalf("state = %+v, want Done with RerereResolved >= 1", st)
+	}
+	if got, want := mustRun(t, ctx, dir, "rev-parse", "HEAD^{tree}"), mustRun(t, ctx, dir, "rev-parse", first+"^{tree}"); got != want {
+		t.Fatalf("tree = %s, want the recorded resolution's %s", got, want)
+	}
+}
+
+func TestMergeStartReportsConflictAndContinueCommits(t *testing.T) {
+	ctx := context.Background()
+	dir, _, _, feat := divergedRepo(t, true)
+	mustRun(t, ctx, dir, "checkout", "-q", "main")
+	st, err := MergeStart(ctx, dir, "feat", "merge feat", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Done || len(st.Files) != 1 || st.Files[0] != "shared.txt" {
+		t.Fatalf("state = %+v", st)
+	}
+	if _, err := Run(ctx, dir, "rev-parse", "-q", "--verify", "MERGE_HEAD"); err != nil {
+		t.Fatal("merge not left in progress")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("merged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := MergeContinue(ctx, dir, st.Files, "merge feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head := mustRun(t, ctx, dir, "rev-parse", "HEAD"); head != sha {
+		t.Fatalf("HEAD = %s, want %s", head, sha)
+	}
+	if parents := strings.Fields(mustRun(t, ctx, dir, "log", "-1", "--format=%P")); len(parents) != 2 || parents[1] != feat {
+		t.Fatalf("parents = %v, want a merge of %s", parents, feat)
+	}
+	if msg := mustRun(t, ctx, dir, "log", "-1", "--format=%s"); msg != "merge feat" {
+		t.Fatalf("message = %q", msg)
+	}
+	if has, _ := HasChanges(ctx, dir); has {
+		t.Fatal("work tree dirty after the merge")
+	}
+	if _, err := MergeContinue(ctx, dir, nil, "again"); err == nil {
+		t.Fatal("MergeContinue without a merge in progress succeeded")
+	}
+}
+
+func TestMergeStartWithoutConflictCommits(t *testing.T) {
+	ctx := context.Background()
+	dir, _, _, _ := divergedRepo(t, false)
+	mustRun(t, ctx, dir, "checkout", "-q", "main")
+	st, err := MergeStart(ctx, dir, "feat", "merge feat", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Done || st.Head != mustRun(t, ctx, dir, "rev-parse", "HEAD") {
+		t.Fatalf("state = %+v", st)
+	}
+	if parents := mustRun(t, ctx, dir, "log", "-1", "--format=%P"); len(strings.Fields(parents)) != 2 {
+		t.Fatalf("not a merge commit, parents = %q", parents)
+	}
+}
+
+func TestMergeAbortRestoresOriginalHead(t *testing.T) {
+	ctx := context.Background()
+	dir, _, main, _ := divergedRepo(t, true)
+	mustRun(t, ctx, dir, "checkout", "-q", "main")
+	if _, err := MergeStart(ctx, dir, "feat", "merge feat", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := MergeAbort(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if head := mustRun(t, ctx, dir, "rev-parse", "HEAD"); head != main {
+		t.Fatalf("HEAD = %s, want %s", head, main)
+	}
+	if has, _ := HasChanges(ctx, dir); has {
+		t.Fatal("work tree dirty after abort")
+	}
+}
+
+func TestMergeStartReusesRecordedResolutionWithRerere(t *testing.T) {
+	ctx := context.Background()
+	dir, _, main, _ := divergedRepo(t, true)
+	mustRun(t, ctx, dir, "checkout", "-q", "main")
+	st, err := MergeStart(ctx, dir, "feat", "merge feat", true)
+	if err != nil || st.Done {
+		t.Fatalf("first merge = %+v, %v; want conflicts", st, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("merged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeContinue(ctx, dir, st.Files, "merge feat"); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, ctx, dir, "reset", "-q", "--hard", main)
+	st, err = MergeStart(ctx, dir, "feat", "merge feat", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Done || !st.RerereResolved {
+		t.Fatalf("state = %+v, want Done by rerere", st)
+	}
+	if got := mustRun(t, ctx, dir, "show", "HEAD:shared.txt"); got != "merged" {
+		t.Fatalf("shared.txt = %q", got)
+	}
+}
+
+func TestConflictHunksShowsOnlyMarkerRegionsWithContext(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	var lines []string
+	for i := 1; i <= 30; i++ {
+		lines = append(lines, "line"+strconv.Itoa(i))
+	}
+	lines = append(lines[:10], append([]string{"<<<<<<< HEAD", "ours", "=======", "theirs", ">>>>>>> feat"}, lines[10:]...)...)
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ConflictHunks(ctx, dir, "f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "@@ f.txt lines 8-18 @@\nline8\nline9\nline10\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feat\nline11\nline12\nline13\n"
+	if got != want {
+		t.Fatalf("hunks =\n%s\nwant\n%s", got, want)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "clean.txt"), []byte("no conflict\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ConflictHunks(ctx, dir, "clean.txt"); err != nil || got != "" {
+		t.Fatalf("clean file hunks = %q, %v", got, err)
+	}
+	if _, err := ConflictHunks(ctx, dir, "missing.txt"); err == nil {
+		t.Fatal("missing file accepted")
+	}
+}
+
+func TestHasConflictMarkersListsFilesStillMarked(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	files := map[string]string{
+		"open.txt":   "x\n<<<<<<< HEAD\na\n",
+		"middle.txt": "x\n=======\ny\n",
+		"close.txt":  "x\n>>>>>>> feat\n",
+		"clean.txt":  "x\n== not a marker ==\n<<<<<<<< eight\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := HasConflictMarkers(ctx, dir, []string{"open.txt", "clean.txt", "middle.txt", "gone.txt", "close.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "open.txt,middle.txt,close.txt" {
+		t.Fatalf("marked = %v", got)
+	}
+}
+
+func TestCommitSummariesListsSubjectsAndTrailersOldestFirst(t *testing.T) {
+	ctx := context.Background()
+	dir, base, _, feat := divergedRepo(t, false)
+	got, err := CommitSummaries(ctx, dir, base, feat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("summaries = %+v", got)
+	}
+	if got[0].Subject != "feat shared" || strings.Join(got[0].Trailers, "|") != "Mill-Task: g1/feat" {
+		t.Fatalf("first = %+v", got[0])
+	}
+	if got[1].SHA != feat || got[1].Subject != "add feat.txt" || strings.Join(got[1].Trailers, "|") != "Mill-Task: g1/feat|Mill-Attempt: 2" {
+		t.Fatalf("second = %+v", got[1])
+	}
+	if none, err := CommitSummaries(ctx, dir, feat, feat); err != nil || len(none) != 0 {
+		t.Fatalf("empty range = %+v, %v", none, err)
 	}
 }

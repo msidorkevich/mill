@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -21,9 +22,14 @@ func Run(ctx context.Context, dir string, args ...string) (string, error) {
 
 // RunInput is Run with stdin.
 func RunInput(ctx context.Context, dir, stdin string, args ...string) (string, error) {
+	return runEnv(ctx, dir, stdin, nil, args...)
+}
+
+// runEnv is RunInput with extra environment variables (added after cleanEnv's).
+func runEnv(ctx context.Context, dir, stdin string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = cleanEnv()
+	cmd.Env = append(cleanEnv(), env...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -506,4 +512,394 @@ func patchIDs(ctx context.Context, dir string, args ...string) (map[string]strin
 		}
 	}
 	return out, nil
+}
+
+// RebaseState is where a step-wise rebase (RebaseStart, RebaseContinue) stands.
+type RebaseState struct {
+	Done           bool     // the rebase finished
+	Head           string   // the new HEAD sha, when Done
+	Stopped        string   // REBASE_HEAD: the commit being replayed, when stopped
+	Files          []string // the conflicted files, when stopped
+	RerereResolved int      // stops that rerere resolved completely and that were continued automatically
+}
+
+// rebaseOpts returns the -c options of a rebase without hooks or signing (as RebaseOnto),
+// plus rerere with autoupdate when rerere is set.
+func rebaseOpts(ctx context.Context, dir string, rerere bool) []string {
+	args := append(identity(ctx, dir), "-c", "core.hooksPath=/dev/null")
+	if rerere {
+		args = append(args, "-c", "rerere.enabled=true", "-c", "rerere.autoupdate=true")
+	}
+	return args
+}
+
+// RebaseStart replays the commits after `upstream` on the branch checked out in dir onto
+// `onto`, like RebaseOnto, but it does not abort on conflicts: it returns the stop (REBASE_HEAD
+// and the conflicted files) and leaves the rebase in progress for RebaseContinue or
+// RebaseAbort. With rerere set, recorded resolutions are reused; a stop that rerere resolves
+// completely is staged and continued automatically.
+func RebaseStart(ctx context.Context, dir, onto, upstream string, rerere bool) (RebaseState, error) {
+	args := append(rebaseOpts(ctx, dir, rerere), "rebase", "--no-verify", "--onto", onto, upstream)
+	_, err := runEnv(ctx, dir, "", []string{"GIT_EDITOR=true"}, args...)
+	return rebaseSteps(ctx, dir, rerere, err)
+}
+
+// RebaseContinue stages files (the resolved conflicts) and continues the rebase in progress in
+// dir without opening an editor. It returns the next stop, or Done.
+func RebaseContinue(ctx context.Context, dir string, files []string, rerere bool) (RebaseState, error) {
+	in, err := rebaseInProgress(ctx, dir)
+	if err != nil {
+		return RebaseState{}, err
+	}
+	if !in {
+		return RebaseState{}, fmt.Errorf("continue rebase: no rebase is in progress in %s", dir)
+	}
+	if err := addFiles(ctx, dir, files); err != nil {
+		return RebaseState{}, fmt.Errorf("%w; fix the files and continue again, or run `git rebase --abort` in %s", err, dir)
+	}
+	return rebaseSteps(ctx, dir, rerere, rebaseContinue(ctx, dir, rerere))
+}
+
+// RebaseAbort aborts the rebase in progress in dir, restoring the original branch head.
+func RebaseAbort(ctx context.Context, dir string) error {
+	if _, err := Run(ctx, dir, "rebase", "--abort"); err != nil {
+		return fmt.Errorf("aborting the rebase in %s: %w; inspect it with `git status` in %s", dir, err, dir)
+	}
+	return nil
+}
+
+func rebaseContinue(ctx context.Context, dir string, rerere bool) error {
+	args := append(rebaseOpts(ctx, dir, rerere), "rebase", "--continue")
+	_, err := runEnv(ctx, dir, "", []string{"GIT_EDITOR=true"}, args...)
+	return err
+}
+
+// rebaseSteps reports the outcome of a rebase command that returned runErr, continuing by
+// itself over stops that rerere resolved completely.
+func rebaseSteps(ctx context.Context, dir string, rerere bool, runErr error) (RebaseState, error) {
+	var st RebaseState
+	last := ""
+	for {
+		in, err := rebaseInProgress(ctx, dir)
+		if err != nil {
+			return st, err
+		}
+		if !in {
+			if runErr != nil {
+				return st, fmt.Errorf("rebase in %s failed and is not in progress: %w", dir, runErr)
+			}
+			head, err := RevParse(ctx, dir, "HEAD")
+			if err != nil {
+				return st, fmt.Errorf("rebase in %s finished but HEAD cannot be read: %w", dir, err)
+			}
+			st.Done, st.Head = true, head
+			return st, nil
+		}
+		stopped, err := RevParse(ctx, dir, "REBASE_HEAD")
+		if err != nil {
+			return st, fmt.Errorf("rebase in %s stopped but REBASE_HEAD cannot be read (%v): %w; run `git rebase --abort` in %s", dir, runErr, err, dir)
+		}
+		files, err := unmergedFiles(ctx, dir)
+		if err != nil {
+			return st, fmt.Errorf("%w; run `git rebase --abort` in %s", err, dir)
+		}
+		if len(files) > 0 {
+			st.Stopped, st.Files = stopped, files
+			return st, nil
+		}
+		if !rerere || stopped == last {
+			return st, fmt.Errorf("rebase in %s stopped at %s without conflicted files: %v; resolve it by hand or run `git rebase --abort` in %s", dir, stopped, runErr, dir)
+		}
+		// rerere resolved and staged every conflicted file; continue unless markers remain.
+		marked, err := rerereMarkedFiles(ctx, dir)
+		if err != nil {
+			return st, fmt.Errorf("%w; run `git rebase --abort` in %s", err, dir)
+		}
+		if len(marked) > 0 {
+			st.Stopped, st.Files = stopped, marked
+			return st, nil
+		}
+		st.RerereResolved++
+		last = stopped
+		runErr = rebaseContinue(ctx, dir, rerere)
+	}
+}
+
+// rebaseInProgress reports whether a rebase is in progress in dir.
+func rebaseInProgress(ctx context.Context, dir string) (bool, error) {
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		ok, err := gitPathExists(ctx, dir, name)
+		if err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
+}
+
+// gitPathExists reports whether the git-dir path name (git rev-parse --git-path) exists in dir.
+func gitPathExists(ctx context.Context, dir, name string) (bool, error) {
+	p, err := Run(ctx, dir, "rev-parse", "--git-path", name)
+	if err != nil {
+		return false, fmt.Errorf("locating %s in %s: %w", name, dir, err)
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	if _, err := os.Stat(p); err == nil {
+		return true, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("checking %s: %w", p, err)
+	}
+	return false, nil
+}
+
+// unmergedFiles lists the conflicted (unmerged) files in dir.
+func unmergedFiles(ctx context.Context, dir string) ([]string, error) {
+	out, err := Run(ctx, dir, "diff", "--name-only", "-z", "--diff-filter=U")
+	if err != nil {
+		return nil, fmt.Errorf("listing conflicted files in %s: %w", dir, err)
+	}
+	return splitNUL(out), nil
+}
+
+// rerereMarkedFiles returns the files rerere is tracking for the current conflict that still
+// contain conflict markers.
+func rerereMarkedFiles(ctx context.Context, dir string) ([]string, error) {
+	out, err := Run(ctx, dir, "-c", "rerere.enabled=true", "rerere", "status")
+	if err != nil {
+		return nil, fmt.Errorf("listing rerere's files in %s: %w", dir, err)
+	}
+	var files []string
+	for _, f := range strings.Split(out, "\n") {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	return HasConflictMarkers(ctx, dir, files)
+}
+
+func splitNUL(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, "\x00") {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func addFiles(ctx context.Context, dir string, files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+	_, err := Run(ctx, dir, append([]string{"add", "--"}, files...)...)
+	return err
+}
+
+// MergeState is where a step-wise merge (MergeStart) stands.
+type MergeState struct {
+	Done           bool     // the merge commit was created
+	Head           string   // the merge commit, when Done
+	Files          []string // the conflicted files, when not Done
+	RerereResolved bool     // rerere resolved every conflict and the merge was committed
+}
+
+// MergeStart merges branch into the branch checked out in dir with a merge commit, like Merge,
+// but it leaves conflicts in place for MergeContinue or MergeAbort and reports the conflicted
+// files. With rerere set, recorded resolutions are reused; when rerere resolves every conflict
+// the merge is committed.
+func MergeStart(ctx context.Context, dir, branch, message string, rerere bool) (MergeState, error) {
+	args := identity(ctx, dir)
+	if rerere {
+		args = append(args, "-c", "rerere.enabled=true", "-c", "rerere.autoupdate=true")
+	}
+	args = append(args, "merge", "--no-ff", "--no-verify", "-q", "-m", message, branch)
+	_, mergeErr := Run(ctx, dir, args...)
+	if mergeErr == nil {
+		head, err := RevParse(ctx, dir, "HEAD")
+		if err != nil {
+			return MergeState{}, fmt.Errorf("merge in %s finished but HEAD cannot be read: %w", dir, err)
+		}
+		return MergeState{Done: true, Head: head}, nil
+	}
+	in, err := gitPathExists(ctx, dir, "MERGE_HEAD")
+	if err != nil {
+		return MergeState{}, fmt.Errorf("%w; and %v", mergeErr, err)
+	}
+	if !in {
+		return MergeState{}, fmt.Errorf("merge in %s failed and is not in progress: %w", dir, mergeErr)
+	}
+	files, err := unmergedFiles(ctx, dir)
+	if err != nil {
+		return MergeState{}, fmt.Errorf("%w; run `git merge --abort` in %s", err, dir)
+	}
+	if len(files) > 0 {
+		return MergeState{Files: files}, nil
+	}
+	if !rerere {
+		return MergeState{}, fmt.Errorf("merge in %s stopped without conflicted files: %v; run `git merge --abort` in %s", dir, mergeErr, dir)
+	}
+	marked, err := rerereMarkedFiles(ctx, dir)
+	if err != nil {
+		return MergeState{}, fmt.Errorf("%w; run `git merge --abort` in %s", err, dir)
+	}
+	if len(marked) > 0 {
+		return MergeState{Files: marked}, nil
+	}
+	sha, err := MergeContinue(ctx, dir, nil, message)
+	if err != nil {
+		return MergeState{}, err
+	}
+	return MergeState{Done: true, Head: sha, RerereResolved: true}, nil
+}
+
+// MergeContinue stages files (the resolved conflicts) and commits the merge in progress in dir
+// with message, skipping hooks and signing. It returns the merge commit.
+func MergeContinue(ctx context.Context, dir string, files []string, message string) (string, error) {
+	in, err := gitPathExists(ctx, dir, "MERGE_HEAD")
+	if err != nil {
+		return "", err
+	}
+	if !in {
+		return "", fmt.Errorf("continue merge: no merge is in progress in %s", dir)
+	}
+	if err := addFiles(ctx, dir, files); err != nil {
+		return "", fmt.Errorf("%w; fix the files and continue again, or run `git merge --abort` in %s", err, dir)
+	}
+	args := identity(ctx, dir)
+	// Let rerere record the resolution when it saw the conflict.
+	if rr, err := gitPathExists(ctx, dir, "MERGE_RR"); err != nil {
+		return "", err
+	} else if rr {
+		args = append(args, "-c", "rerere.enabled=true")
+	}
+	args = append(args, "commit", "-q", "--no-verify", "-F", "-")
+	if _, err := RunInput(ctx, dir, message, args...); err != nil {
+		return "", fmt.Errorf("committing the merge in %s: %w; fix it and continue again, or run `git merge --abort` in %s", dir, err, dir)
+	}
+	return RevParse(ctx, dir, "HEAD")
+}
+
+// MergeAbort aborts the merge in progress in dir, restoring the original head.
+func MergeAbort(ctx context.Context, dir string) error {
+	if _, err := Run(ctx, dir, "merge", "--abort"); err != nil {
+		return fmt.Errorf("aborting the merge in %s: %w; inspect it with `git status` in %s", dir, err, dir)
+	}
+	return nil
+}
+
+// hunkContext is the number of lines ConflictHunks shows around each conflict.
+const hunkContext = 3
+
+// isMarker reports whether line is a conflict marker line: <<<<<<<, ======= or >>>>>>>.
+func isMarker(line string) bool {
+	line = strings.TrimRight(line, "\r")
+	if line == "=======" {
+		return true
+	}
+	for _, m := range []string{"<<<<<<<", ">>>>>>>"} {
+		if line == m || strings.HasPrefix(line, m+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// ConflictHunks returns the conflict regions of file (relative to dir), from <<<<<<< to
+// >>>>>>> with a few lines of context, each headed by its line range. It returns "" when the
+// file has no conflict.
+func ConflictHunks(ctx context.Context, dir, file string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, file))
+	if err != nil {
+		return "", fmt.Errorf("reading conflicted file: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	type span struct{ from, to int } // inclusive line indexes
+	var spans []span
+	for i := 0; i < len(lines); i++ {
+		if !strings.HasPrefix(lines[i], "<<<<<<<") || !isMarker(lines[i]) {
+			continue
+		}
+		end := i
+		for end < len(lines) && !(strings.HasPrefix(lines[end], ">>>>>>>") && isMarker(lines[end])) {
+			end++
+		}
+		if end == len(lines) {
+			end = len(lines) - 1 // unterminated: show to the end
+		}
+		s := span{max(0, i-hunkContext), min(len(lines)-1, end+hunkContext)}
+		if n := len(spans); n > 0 && s.from <= spans[n-1].to+1 {
+			spans[n-1].to = s.to
+		} else {
+			spans = append(spans, s)
+		}
+		i = end
+	}
+	var b strings.Builder
+	for _, s := range spans {
+		fmt.Fprintf(&b, "@@ %s lines %d-%d @@\n", file, s.from+1, s.to+1)
+		for _, l := range lines[s.from : s.to+1] {
+			b.WriteString(l)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String(), nil
+}
+
+// HasConflictMarkers returns the files (relative to dir) that still contain a <<<<<<<,
+// ======= or >>>>>>> marker line. A file that no longer exists has none.
+func HasConflictMarkers(ctx context.Context, dir string, files []string) ([]string, error) {
+	var marked []string
+	for _, f := range files {
+		data, err := os.ReadFile(filepath.Join(dir, f))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("checking %s for conflict markers: %w", f, err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if isMarker(line) {
+				marked = append(marked, f)
+				break
+			}
+		}
+	}
+	return marked, nil
+}
+
+// CommitSummary is one commit's sha, subject and trailers ("Key: value" lines).
+type CommitSummary struct {
+	SHA      string
+	Subject  string
+	Trailers []string
+}
+
+// CommitSummaries returns the commits in from..to, oldest first, with their subjects and
+// trailers (git interpret-trailers --parse).
+func CommitSummaries(ctx context.Context, dir, from, to string) ([]CommitSummary, error) {
+	out, err := Run(ctx, dir, "rev-list", "--reverse", from+".."+to, "--")
+	if err != nil {
+		return nil, fmt.Errorf("listing commits %s..%s in %s: %w", from, to, dir, err)
+	}
+	var sums []CommitSummary
+	for _, sha := range strings.Fields(out) {
+		msg, err := Run(ctx, dir, "show", "-s", "--format=%s%x00%B", sha)
+		if err != nil {
+			return nil, fmt.Errorf("reading commit %s in %s: %w", sha, dir, err)
+		}
+		subject, body, _ := strings.Cut(msg, "\x00")
+		s := CommitSummary{SHA: sha, Subject: subject}
+		trailers, err := RunInput(ctx, dir, body+"\n", "interpret-trailers", "--parse")
+		if err != nil {
+			return nil, fmt.Errorf("parsing the trailers of %s in %s: %w", sha, dir, err)
+		}
+		for _, t := range strings.Split(trailers, "\n") {
+			if t != "" {
+				s.Trailers = append(s.Trailers, t)
+			}
+		}
+		sums = append(sums, s)
+	}
+	return sums, nil
 }
