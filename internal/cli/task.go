@@ -125,8 +125,8 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	case !*retry:
 		return fail(fmt.Errorf("task %s already exists (status %s); use --retry to run it again", spec.ID, existing.Status))
-	case existing.Status == store.TaskVerified:
-		return fail(fmt.Errorf("task %s is already verified", spec.ID))
+	case store.Done(existing.Status):
+		return fail(fmt.Errorf("task %s is already %s; it cannot be run again", spec.ID, existing.Status))
 	default:
 		if existing.Status == store.TaskRunning {
 			fmt.Fprintf(env.Stderr, "mill task run: %s was left running (mill stopped mid-run?); retrying\n", spec.ID)
@@ -325,7 +325,7 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 	if v.Usage, err = s.TaskUsage(ctx, id); err != nil {
 		return fail(err)
 	}
-	if v.Task.Status != store.TaskVerified {
+	if !store.Done(v.Task.Status) {
 		if v.Findings, err = pipeline.LastFindings(ctx, s, id); err != nil {
 			return fail(err)
 		}

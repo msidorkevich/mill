@@ -112,6 +112,11 @@ ALTER TABLE attempts ADD COLUMN command TEXT NOT NULL DEFAULT '';
 	`
 ALTER TABLE attempts ADD COLUMN cost_estimated INTEGER NOT NULL DEFAULT 0;
 `,
+	// 7: the sha published for review and the head the gate passed at.
+	`
+ALTER TABLE branches ADD COLUMN published_sha TEXT NOT NULL DEFAULT '';
+ALTER TABLE branches ADD COLUMN gate_sha TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // LatestVersion is the schema version this build writes.

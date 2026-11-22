@@ -465,3 +465,64 @@ func TestTaskLeftPendingIsStartedOnceAndReportedStuck(t *testing.T) {
 		t.Errorf("%s = %s, want pending", c, got)
 	}
 }
+
+func TestPublishedDependencyUnblocksDependent(t *testing.T) {
+	ctx := context.Background()
+	s, g := newGoal(t, task{id: "a"}, task{id: "b", deps: []string{"a"}})
+	a, b := store.TaskID(g, "a"), store.TaskID(g, "b")
+	if err := s.SetTaskStatus(ctx, a, store.TaskPublished, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake(s)
+	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}).RunGoal(ctx, g, Options{})
+	if err != nil || res.Status != store.GoalDone {
+		t.Fatalf("RunGoal = %+v, %v", res, err)
+	}
+	if f.index("start "+a) >= 0 || f.index("start "+b) < 0 {
+		t.Fatalf("events = %v, want only b to run", f.events)
+	}
+	if got := status(t, s, a).Status; got != store.TaskPublished {
+		t.Fatalf("a = %s, want published", got)
+	}
+}
+
+func TestGoalOfPublishedAndLandedTasksIsDone(t *testing.T) {
+	ctx := context.Background()
+	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
+	if err := s.SetTaskStatus(ctx, store.TaskID(g, "a"), store.TaskPublished, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, store.TaskID(g, "b"), store.TaskLanded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake(s)
+	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}).RunGoal(ctx, g, Options{})
+	if err != nil || res.Status != store.GoalDone || res.Reason != "" {
+		t.Fatalf("RunGoal = %+v, %v", res, err)
+	}
+	if len(f.events) != 0 {
+		t.Fatalf("ran tasks: %v", f.events)
+	}
+}
+
+// A blocked goal's reason does not list published or landed tasks as stopped or needed.
+func TestBlockedReasonTreatsPublishedAndLandedAsFinished(t *testing.T) {
+	ctx := context.Background()
+	s, g := newGoal(t, task{id: "a"}, task{id: "l"}, task{id: "x"}, task{id: "b", deps: []string{"a", "l", "x"}})
+	a, l, x, b := store.TaskID(g, "a"), store.TaskID(g, "l"), store.TaskID(g, "x"), store.TaskID(g, "b")
+	if err := s.SetTaskStatus(ctx, a, store.TaskPublished, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, l, store.TaskLanded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake(s)
+	f.decide = func(string) (string, string, error) { return store.TaskBlocked, "nope", nil }
+	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}).RunGoal(ctx, g, Options{})
+	if err != nil || res.Status != store.GoalBlocked {
+		t.Fatalf("RunGoal = %+v, %v", res, err)
+	}
+	if want := x + " blocked (nope); waiting: " + b + " (needs " + x + ")"; res.Reason != want {
+		t.Fatalf("reason = %q, want %q", res.Reason, want)
+	}
+}

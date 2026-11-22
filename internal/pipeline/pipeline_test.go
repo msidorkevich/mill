@@ -848,3 +848,62 @@ func TestOwnsOffAndEmptyOwnsRecordNothing(t *testing.T) {
 		t.Fatalf("empty owns restricted: %+v", out)
 	}
 }
+
+// gate_sha is the head the gate passed at, not a head that failed it.
+func TestGatePassRecordsGateSHA(t *testing.T) {
+	e := setup(t, `grep -q hello hello.txt`, runner.Script{
+		runner.RoleImplementer: {
+			impl(map[string]string{"hello.txt": "goodbye\n"}),
+			impl(map[string]string{"hello.txt": "hello\n"}),
+		},
+		runner.RoleVerifier: {verdict("pass")},
+	}, nil)
+	e.task(t, "gated")
+	out := e.run(t, "gated")
+	if out.Status != store.TaskVerified {
+		t.Fatalf("outcome = %+v\n%s", out, e.out)
+	}
+	br, err := e.p.Store.GetBranch(context.Background(), "gated")
+	if err != nil || br.GateSHA != out.HeadSHA || br.GateSHA == "" {
+		t.Fatalf("branch = %+v, %v; want gate_sha %s", br, err, out.HeadSHA)
+	}
+}
+
+// The gate result is recorded even when the verifier then rejects the attempt.
+func TestGatePassRecordsGateSHAWhenVerifierFails(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
+		runner.RoleVerifier:    {verdict("fail", "wrong")},
+	}, func(c *config.Config) { c.MaxAttempts = 1 })
+	e.task(t, "rejected")
+	if out := e.run(t, "rejected"); out.Status != store.TaskBlocked {
+		t.Fatalf("outcome = %+v", out)
+	}
+	br, _ := e.p.Store.GetBranch(context.Background(), "rejected")
+	if br.GateSHA == "" || br.GateSHA != br.HeadSHA || br.GateSHA == br.StartSHA {
+		t.Fatalf("branch = %+v", br)
+	}
+}
+
+func TestPublishedDependencyIsABase(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.goal(t, nil, []string{"a"})
+	if out := e.run(t, "g1/a"); out.Status != store.TaskVerified {
+		t.Fatalf("a: %+v", out)
+	}
+	ctx := context.Background()
+	if err := e.p.Store.SetTaskStatus(ctx, "g1/a", store.TaskPublished, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if out := e.run(t, "g1/b"); out.Status != store.TaskVerified {
+		t.Fatalf("b: %+v\n%s", out, e.out)
+	}
+	ba, _ := e.p.Store.GetBranch(ctx, "g1/a")
+	bb, _ := e.p.Store.GetBranch(ctx, "g1/b")
+	if bb.Base != "mill/g1/a" || bb.BaseSHA != ba.HeadSHA {
+		t.Fatalf("b branch = %+v, a head %s", bb, ba.HeadSHA)
+	}
+}

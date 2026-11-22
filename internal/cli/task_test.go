@@ -371,3 +371,22 @@ func TestTaskShowMarksEstimatedCosts(t *testing.T) {
 		t.Fatalf("json cost_estimated: %v\n%s", err, r.stdout)
 	}
 }
+
+func TestRunningPublishedOrLandedTaskIsRefused(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+		t.Fatalf("task run: %+v", r)
+	}
+	for _, st := range []string{store.TaskPublished, store.TaskLanded} {
+		setStatus(t, root, "hello", st)
+		if r := run(t, root, nil, "task", "run", "--file", tf, "--retry"); r.code != ExitError || !strings.Contains(r.stderr, "already "+st) {
+			t.Errorf("retry of %s: %+v", st, r)
+		}
+		if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitError || !strings.Contains(r.stderr, "status "+st) {
+			t.Errorf("re-run of %s: %+v", st, r)
+		}
+		if got, _ := openStore(t, root).GetTask(context.Background(), "hello"); got.Status != st {
+			t.Errorf("status after refusal = %s, want %s", got.Status, st)
+		}
+	}
+}

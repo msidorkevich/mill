@@ -137,14 +137,14 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 		return Result{}, err
 	}
 	res := Result{GoalID: goalID}
-	allVerified := true
+	allDone := true
 	for _, t := range tasks {
-		if t.Status != store.TaskVerified {
-			allVerified = false
+		if !store.Done(t.Status) {
+			allDone = false
 		}
 	}
 	switch {
-	case allVerified:
+	case allDone:
 		res.Status = store.GoalDone
 	case ctx.Err() != nil:
 		if _, err := s.Store.ResetGoalTasks(bg, goalID, []string{store.TaskBlocked}, ReasonInterrupted, ReasonInterrupted); err != nil {
@@ -195,7 +195,7 @@ func (s *Scheduler) startReady(ctx, bg context.Context, goalID string, running m
 		}
 		ready := true
 		for _, d := range deps {
-			if status[d] != store.TaskVerified {
+			if !store.Done(status[d]) {
 				ready = false
 			}
 		}
@@ -236,9 +236,9 @@ func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task, start
 	}
 	var stopped, waiting []string
 	for _, t := range tasks {
-		switch t.Status {
-		case store.TaskVerified:
-		case store.TaskPending:
+		switch {
+		case store.Done(t.Status):
+		case t.Status == store.TaskPending:
 			if started[t.ID] {
 				stopped = append(stopped, t.ID+" stuck (it did not leave pending after running)")
 				continue
@@ -249,7 +249,7 @@ func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task, start
 			}
 			var needs []string
 			for _, d := range deps {
-				if status[d] != store.TaskVerified {
+				if !store.Done(status[d]) {
 					needs = append(needs, d)
 				}
 			}

@@ -249,3 +249,146 @@ func RebaseOnto(ctx context.Context, dir, onto, upstream string) (string, error)
 	}
 	return "", &RebaseConflictError{Onto: onto, Files: strings.Split(files, "\n")}
 }
+
+// runExit runs git in dir and returns trimmed stdout and git's exit code. err is set only
+// when git could not run or was killed (not for a non-zero exit).
+func runExit(ctx context.Context, dir string, args ...string) (string, int, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = cleanEnv()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	var ee *exec.ExitError
+	if err != nil && (!errors.As(err, &ee) || ee.ExitCode() < 0) {
+		return "", -1, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	code := 0
+	if ee != nil {
+		code = ee.ExitCode()
+	}
+	if code != 0 && code != 1 {
+		return "", code, fmt.Errorf("git %s: exit status %d: %s", strings.Join(args, " "), code, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), code, nil
+}
+
+// identity returns the -c options for a commit without hooks or signing, adding mill's own
+// identity when the repository has none.
+func identity(ctx context.Context, dir string) []string {
+	args := []string{"-c", "commit.gpgsign=false"}
+	if email, _ := Run(ctx, dir, "config", "user.email"); email == "" {
+		args = append(args, "-c", "user.name=mill", "-c", "user.email=mill@localhost")
+	}
+	return args
+}
+
+// Fetch fetches the branches of remote (its configured remote-tracking refs).
+func Fetch(ctx context.Context, dir, remote string) error {
+	if strings.HasPrefix(remote, "-") || remote == "" {
+		return fmt.Errorf("fetch: invalid remote %q", remote)
+	}
+	_, err := Run(ctx, dir, "fetch", "--quiet", "--prune", remote)
+	return err
+}
+
+// MergeConflicts reports the paths that conflict when merging branch into base, without
+// touching any work tree or ref. It returns nil when they merge cleanly.
+func MergeConflicts(ctx context.Context, dir, base, branch string) ([]string, error) {
+	out, code, err := runExit(ctx, dir, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", base, branch)
+	if err != nil {
+		return nil, err
+	}
+	if code == 0 {
+		return nil, nil
+	}
+	// -z output: the tree id, then each conflicted path, NUL-terminated.
+	parts := strings.Split(out, "\x00")
+	var files []string
+	for _, f := range parts[1:] {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("git merge-tree %s %s reported a conflict but listed no paths", base, branch)
+	}
+	return files, nil
+}
+
+// TreeOf returns the tree id of rev.
+func TreeOf(ctx context.Context, dir, rev string) (string, error) {
+	return Run(ctx, dir, "rev-parse", "--verify", "--quiet", rev+"^{tree}")
+}
+
+// CommitTree creates a commit of tree with parent (none when parent is empty) and message,
+// without hooks or signing, and returns its sha. No ref moves. When the repository has no
+// identity configured, mill's own is used.
+func CommitTree(ctx context.Context, dir, tree, parent, message string) (string, error) {
+	args := append(identity(ctx, dir), "commit-tree", tree)
+	if parent != "" {
+		args = append(args, "-p", parent)
+	}
+	args = append(args, "-F", "-")
+	return RunInput(ctx, dir, message, args...)
+}
+
+// ReviewPrefix is the only branch namespace mill pushes to (SE2).
+const ReviewPrefix = "review/"
+
+// PushReview pushes sha to refs/heads/<branch> on remote, only if the remote branch is still
+// at expected ("" means it must not exist yet). It refuses, without running git, any branch
+// outside review/: mill never pushes anywhere else. This is mill's only push.
+func PushReview(ctx context.Context, dir, remote, sha, branch, expected string) error {
+	if !strings.HasPrefix(branch, ReviewPrefix) || len(branch) == len(ReviewPrefix) {
+		return fmt.Errorf("refusing to push to branch %q: mill only pushes review/<name> branches", branch)
+	}
+	if remote == "" || strings.HasPrefix(remote, "-") || sha == "" || strings.HasPrefix(sha, "-") {
+		return fmt.Errorf("refusing to push %q to remote %q: invalid remote or sha", sha, remote)
+	}
+	ref := "refs/heads/" + branch
+	_, err := Run(ctx, dir, "push", "--quiet", "--no-verify", "--force-with-lease="+ref+":"+expected, remote, sha+":"+ref)
+	return err
+}
+
+// PatchLanded reports whether upstream contains a commit with the same patch as the single
+// commit `commit` (git cherry marks it with "-"), or contains the commit itself.
+func PatchLanded(ctx context.Context, dir, upstream, commit string) (bool, error) {
+	out, err := Run(ctx, dir, "cherry", upstream, commit, commit+"^")
+	if err != nil {
+		return false, err
+	}
+	if out == "" {
+		// git cherry lists nothing when the commit itself is already in upstream.
+		in, err := IsAncestor(ctx, dir, commit, upstream)
+		if err != nil {
+			return false, err
+		}
+		if !in {
+			return false, fmt.Errorf("git cherry %s %s %s^ listed no commit; cannot tell whether it landed", upstream, commit, commit)
+		}
+		return true, nil
+	}
+	return strings.HasPrefix(out, "-"), nil
+}
+
+// FindTrailer returns the newest commit reachable from rev whose message has a line exactly
+// equal to trailer (e.g. "Mill-Task: g1/a"). ok is false when there is none.
+func FindTrailer(ctx context.Context, dir, rev, trailer string) (sha string, ok bool, err error) {
+	out, err := Run(ctx, dir, "log", "-z", "--format=%H%n%B", "--fixed-strings", "--grep="+trailer, rev, "--")
+	if err != nil {
+		return "", false, err
+	}
+	for _, rec := range strings.Split(out, "\x00") {
+		hash, body, _ := strings.Cut(strings.TrimLeft(rec, "\n"), "\n")
+		if hash == "" {
+			continue
+		}
+		for _, line := range strings.Split(body, "\n") {
+			if strings.TrimSpace(line) == trailer {
+				return hash, true, nil
+			}
+		}
+	}
+	return "", false, nil
+}

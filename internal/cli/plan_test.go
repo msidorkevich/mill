@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"mill/internal/project"
+	"mill/internal/store"
 )
 
 const validPlan = `{
@@ -332,5 +333,16 @@ func TestGoalListAndShowJSON(t *testing.T) {
 	}
 	if r := run(t, root, nil, "goal", "show", "g9"); r.code != ExitError {
 		t.Errorf("unknown goal: %+v", r)
+	}
+}
+
+func TestGoalListCountsPublishedAndLandedTasksAsDone(t *testing.T) {
+	root := planRepo(t)
+	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
+	run(t, root, nil, "plan", "approve", "g1")
+	setStatus(t, root, "g1/a", store.TaskLanded)
+	setStatus(t, root, "g1/b", store.TaskPublished)
+	if h := run(t, root, nil, "goal", "list"); h.code != ExitOK || !strings.Contains(h.stdout, "2/2") {
+		t.Errorf("list:\n%+v", h)
 	}
 }

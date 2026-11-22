@@ -558,3 +558,74 @@ func TestRecoverInterruptedRecordsUsageOfAbandonedAttempts(t *testing.T) {
 		t.Errorf("GoalUsage = %+v, %v; want %+v", got, err, u)
 	}
 }
+
+func TestBranchRoundTripsPublishedAndGateSHA(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	b := Branch{TaskID: "t1", Name: "mill/t1", Base: "main", BaseSHA: "b", HeadSHA: "h", Worktree: "/w",
+		PublishedRef: "review/t1", PublishedSHA: "p1", GateSHA: "g1"}
+	if err := s.SaveBranch(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetBranch(ctx, "t1")
+	if err != nil || got.PublishedSHA != "p1" || got.GateSHA != "g1" || got.PublishedRef != "review/t1" {
+		t.Fatalf("GetBranch = %+v, %v", got, err)
+	}
+	b.PublishedSHA, b.GateSHA = "p2", "g2"
+	if err := s.SaveBranch(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetBranch(ctx, "t1"); got.PublishedSHA != "p2" || got.GateSHA != "g2" {
+		t.Fatalf("after update = %+v", got)
+	}
+}
+
+// A database at schema v6 upgrades; existing branches gain empty published_sha and gate_sha.
+func TestMigrateFromV6AddsBranchPublishAndGateSHA(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mill.db")
+	saved := migrations
+	migrations = saved[:6]
+	LatestVersion = 6
+	s, err := Open(ctx, path, Options{})
+	migrations, LatestVersion = saved, len(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO branches (task_id, name, base, base_sha, head_sha, updated_at)
+		VALUES ('t1', 'mill/t1', 'main', 'b', 'h', '2026-01-01T00:00:00.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2 := open(t, path)
+	if v, _ := s2.SchemaVersion(ctx); v != LatestVersion || v < 7 {
+		t.Fatalf("schema = %d, want %d", v, LatestVersion)
+	}
+	got, err := s2.GetBranch(ctx, "t1")
+	if err != nil || got.HeadSHA != "h" || got.PublishedSHA != "" || got.GateSHA != "" {
+		t.Fatalf("branch after upgrade = %+v, %v", got, err)
+	}
+	got.GateSHA = "g"
+	if err := s2.SaveBranch(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s2.GetBranch(ctx, "t1"); got.GateSHA != "g" {
+		t.Fatalf("gate_sha = %q", got.GateSHA)
+	}
+}
+
+func TestDoneMeansVerifiedPublishedOrLanded(t *testing.T) {
+	for _, st := range TaskStatuses {
+		want := st == TaskVerified || st == TaskPublished || st == TaskLanded
+		if Done(st) != want {
+			t.Errorf("Done(%q) = %v, want %v", st, !want, want)
+		}
+	}
+}

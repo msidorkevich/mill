@@ -285,6 +285,10 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			g, flaky = tr.gate, tr.flaky
 		}
 		p.logf("%s a%d gate      ok (%d command(s), %s)", t.ID, n, len(g.Commands), p.since(started))
+		br.GateSHA = br.HeadSHA
+		if err := p.Store.SaveBranch(ctx, br); err != nil {
+			return out, fmt.Errorf("record the gate result for attempt %d: %w", n, err)
+		}
 
 		// verify
 		if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
@@ -453,12 +457,12 @@ func (p *Pipeline) baseFor(ctx context.Context, t store.Task) (base, baseSHA str
 		if err != nil {
 			return "", "", nil, err
 		}
-		if dt.Status != store.TaskVerified {
-			return "", "", nil, &blockedError{fmt.Sprintf("dependency %s is %s, not verified; run it first", d, dt.Status)}
+		if !store.Done(dt.Status) {
+			return "", "", nil, &blockedError{fmt.Sprintf("dependency %s is %s, not verified, published or landed; run it first", d, dt.Status)}
 		}
 		db, err := p.Store.GetBranch(ctx, d)
 		if err != nil {
-			return "", "", nil, fmt.Errorf("dependency %s is verified but has no branch: %w", d, err)
+			return "", "", nil, fmt.Errorf("dependency %s is %s but has no branch: %w", d, dt.Status, err)
 		}
 		branches[d] = db.Name
 	}
