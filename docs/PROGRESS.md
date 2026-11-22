@@ -354,3 +354,9 @@ commit, rebase, squash), and mill detects each one.
       of a parent with unpublished changes would carry them; (3) sync blocked a restacked child
       only because its parent was not re-published yet; (4) tasks merged without publishing
       (all of M1/M2, merged by hand) never become landed
+- [x] Local forge for mill: `~/prj/mill-forge.git` is `origin`; `main` pushed once. The first
+      `mill sync` marked every hand-merged M1–M3 task landed (method `merged`) and goals g1–g5
+      landed; the review queue is empty. From here on mill's branches reach `main` only through
+      the forge (then `git pull`).
+- [ ] Dogfood exit: goal `g6` (live usage + `mill watch`, two stacked tasks) is built, published
+      to the forge, merged there with different methods, and `mill sync` detects each merge
