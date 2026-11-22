@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/config"
@@ -145,12 +146,18 @@ func runInit(ctx context.Context, env Env, args []string) int {
 		return ExitError
 	}
 
-	cfgState, err := writeIfMissing(p.Config, config.DefaultTOML)
+	branch, branchErr := currentBranch(ctx, root)
+	detected := branchErr == nil
+	if !detected {
+		branch = "main"
+	}
+	cfgState, err := writeIfMissing(p.Config, config.RenderDefaultTOML(branch))
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "mill init: %v\n", err)
 		return ExitError
 	}
-	if _, err := config.Load(p.Config); err != nil {
+	cfg, err := config.Load(p.Config)
+	if err != nil {
 		fmt.Fprintf(env.Stderr, "mill init: existing %s is invalid: %v\n", p.Config, err)
 		return ExitError
 	}
@@ -174,12 +181,30 @@ func runInit(ctx context.Context, env Env, args []string) int {
 
 	fmt.Fprintf(env.Stdout, "Initialized mill in %s\n", p.MillDir)
 	fmt.Fprintf(env.Stdout, "  config.toml  %s\n", cfgState)
+	fmt.Fprintf(env.Stdout, "  base branch  %s\n", cfg.BaseBranch)
+	if !detected && cfgState == "created" {
+		fmt.Fprintf(env.Stdout, "  could not read the current branch (%v); wrote base_branch = \"main\". Check base_branch in .mill/config.toml.\n", branchErr)
+	}
 	fmt.Fprintf(env.Stdout, "  .gitignore   %s\n", ignState)
 	fmt.Fprintf(env.Stdout, "  mill.db      schema v%d\n", v)
 	fmt.Fprintf(env.Stdout, "  runs/        ready\n")
 	fmt.Fprintln(env.Stdout)
 	fmt.Fprintln(env.Stdout, "Next: set check_cmd in .mill/config.toml, commit .mill/config.toml and .mill/.gitignore, then run `mill doctor`.")
 	return ExitOK
+}
+
+// currentBranch returns the branch HEAD points to; it works before the first commit.
+// It fails on a detached HEAD.
+func currentBranch(ctx context.Context, root string) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", root, "symbolic-ref", "--short", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("HEAD is detached or unreadable: %w", err)
+	}
+	b := strings.TrimSpace(string(out))
+	if b == "" {
+		return "", errors.New("git reported an empty branch name")
+	}
+	return b, nil
 }
 
 // writeIfMissing creates path with text unless it exists. It never overwrites.
