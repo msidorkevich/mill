@@ -54,6 +54,7 @@ func init() {
 		{"plan", "create, review and approve a plan (show, edit, approve)", runPlan},
 		{"goal", "list or show goals (list, show)", runGoal},
 		{"run", "run an approved goal's tasks in dependency order (--retry-blocked)", runRun},
+		{"review", "list tasks awaiting review; show, changes, reject", runReview},
 		{"version", "print the mill version", runVersion},
 		{"help", "show this help", func(_ context.Context, env Env, _ []string) int {
 			usage(env.Stdout)

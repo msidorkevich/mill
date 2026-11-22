@@ -629,3 +629,34 @@ func TestDoneMeansVerifiedPublishedOrLanded(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskDescendantsAreTransitiveAndRejectHoldsNonLanded(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	for _, id := range []string{"g/a", "g/b", "g/c", "g/d", "g/x"} {
+		if err := s.CreateTask(ctx, taskspec.Spec{ID: id, Title: id, Kind: "implement", Spec: "s", Size: "S"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range [][2]string{{"g/b", "g/a"}, {"g/c", "g/b"}, {"g/d", "g/a"}, {"g/d", "g/c"}} {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO deps (task_id, depends_on) VALUES (?, ?)`, d[0], d[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.TaskDescendants(ctx, "g/a")
+	if err != nil || len(got) != 3 || got[0] != "g/b" || got[1] != "g/d" || got[2] != "g/c" {
+		t.Fatalf("descendants = %v, %v", got, err)
+	}
+	if err := s.SetTaskStatus(ctx, "g/c", TaskLanded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	held, err := s.RejectTask(ctx, "g/a", "rejected: no")
+	if err != nil || len(held) != 2 {
+		t.Fatalf("held = %v, %v", held, err)
+	}
+	for id, want := range map[string]string{"g/a": TaskBlocked, "g/b": TaskBlocked, "g/c": TaskLanded, "g/d": TaskBlocked, "g/x": TaskPending} {
+		if tk, _ := s.GetTask(ctx, id); tk.Status != want {
+			t.Errorf("%s = %s, want %s", id, tk.Status, want)
+		}
+	}
+}

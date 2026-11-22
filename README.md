@@ -86,6 +86,10 @@ mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, CO
 mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
 mill run g1                     # run the approved goal's tasks in dependency order
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
+mill review                     # verified and published tasks, oldest first: ID, STATUS, ATTEMPTS, COST, TITLE, BRANCH (--json)
+mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat (--diff, --json)
+mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
+mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
 ```
 
 `mill run` starts a task once all its dependencies are verified, up to `max_parallel` at a

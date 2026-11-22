@@ -18,6 +18,7 @@ import (
 	"mill/internal/host"
 	"mill/internal/plan"
 	"mill/internal/project"
+	"mill/internal/prompt"
 	"mill/internal/runner"
 	"mill/internal/store"
 	"mill/internal/taskspec"
@@ -905,5 +906,28 @@ func TestPublishedDependencyIsABase(t *testing.T) {
 	bb, _ := e.p.Store.GetBranch(ctx, "g1/b")
 	if bb.Base != "mill/g1/a" || bb.BaseSHA != ba.HeadSHA {
 		t.Fatalf("b branch = %+v, a head %s", bb, ba.HeadSHA)
+	}
+}
+
+func TestOperatorFindingsStartTheNextAttemptPrompt(t *testing.T) {
+	e := setup(t, "grep -q hello hello.txt", runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"}), impl(map[string]string{"hello.txt": "hello world\n"})},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.task(t, "reviewed")
+	if out := e.run(t, "reviewed"); out.Status != store.TaskVerified {
+		t.Fatalf("first run = %+v", out)
+	}
+	ctx := context.Background()
+	findings := []prompt.Finding{{Source: "operator", Issue: "say hello world"}}
+	if err := e.p.Store.RequestChanges(ctx, "reviewed", 1, findings, "changes requested"); err != nil {
+		t.Fatal(err)
+	}
+	if out := e.run(t, "reviewed"); out.Status != store.TaskVerified {
+		t.Fatalf("second run = %+v\n%s", out, e.out)
+	}
+	ip := prompts(e.fake, runner.RoleImplementer)
+	if len(ip) != 2 || !strings.Contains(ip[1], "[operator] say hello world") {
+		t.Fatalf("second implementer prompt lacks the operator finding:\n%v", ip)
 	}
 }
