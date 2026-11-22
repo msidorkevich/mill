@@ -386,7 +386,7 @@ commit, rebase, squash), and mill detects each one.
 - [ ] GT7 (rebuild state from git) stays deferred, see the design notes.
 
 
-## M3 follow-ups through GitHub: in progress (goal `g7`)
+## M3 follow-ups through GitHub: published, awaiting merge (goal `g7`)
 
 Onboarded to GitHub: `origin` is `git@github.com:msidorkevich/mill.git` (the local forge stays as
 remote `forge` for now); `master` pushed once, by hand; from here on `master` changes only
@@ -396,12 +396,26 @@ Goal `g7`: `module-path` first (it touches nearly every file), the others stacke
 their PRs target `review/g7/module-path` until it merges; then GitHub retargets them to
 `master` and `mill sync` should restack and re-publish them.
 
-- [ ] `module-path`: module `github.com/msidorkevich/mill`
-- [ ] `init-base-branch`: `mill init` writes the repo's current branch
-- [ ] `publish-polish`: `- [x]` checklist, trimmed verifier summary
-- [ ] `mill-clean`: remove landed tasks' worktrees and branches; `--remote` deletes their review
+- [x] `module-path` (4 attempts: the first three hit the Claude usage limit, see below): module `github.com/msidorkevich/mill`
+- [x] `init-base-branch` (1 attempt): `mill init` writes the repo's current branch
+- [x] `publish-polish` (3 attempts: the verifier caught a test assertion that could never fail, and an off-by-prefix 600-character limit): `- [x]` checklist, trimmed verifier summary
+- [x] `mill-clean` (1 attempt): remove landed tasks' worktrees and branches; `--remote` deletes their review
       branches (lease, review/* only)
-- [ ] `livewriter-panic`: writer stops even if the runner panics
+- [x] `livewriter-panic` (1 attempt): writer stops even if the runner panics
 
 Not in this goal: gate speed (mostly my specs adding a full `-race` run on top of `make check`;
 I now write narrower checks), GT7 (deferred).
+
+Goal `g7`: 5/5 verified, $1.27, all published to GitHub (`review/g7/module-path` on `master`,
+the other four stacked on it). Waiting for the PRs to be merged; `mill sync` then restacks the
+four onto `master` after `module-path` merges.
+
+### Follow-ups found in g7
+
+- [ ] Claude usage limit: the first `g7` run hit "You've hit your 5-hour limit"; mill counted it
+      as an implementer failure and burned all three attempts in seconds, then blocked the task.
+      A usage or rate limit is not the agent's fault: recognise it, do not count the attempt,
+      stop starting new agents, and block or pause with the reset time.
+- [ ] The workers' deny rule for `mill` also matches a locally built `./bin/mill`, so an agent
+      working on mill cannot run the binary it just built (it verified another way). Fine as a
+      safety rule; mention it in CLAUDE.md so agents use `go run ./cmd/mill` or tests instead.
