@@ -77,12 +77,12 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 		if err != nil {
 			return fail(err)
 		}
-		if dt.Status != store.TaskVerified {
-			return fail(fmt.Errorf("dependency %s is %s, not verified; run it first", deps[0], dt.Status))
+		if !store.Done(dt.Status) {
+			return fail(fmt.Errorf("dependency %s is %s, not verified, published or landed; run it first", deps[0], dt.Status))
 		}
 		db, err := s.GetBranch(ctx, deps[0])
 		if err != nil {
-			return fail(fmt.Errorf("dependency %s is verified but has no branch: %w", deps[0], err))
+			return fail(fmt.Errorf("dependency %s is %s but has no branch: %w", deps[0], dt.Status, err))
 		}
 		newBase = db.Name
 		if newTip, err = gitx.RevParse(ctx, paths.Root, db.Name); err != nil {

@@ -217,3 +217,25 @@ func TestTaskRebaseRefusesFanInTask(t *testing.T) {
 		t.Fatalf("rebase: %+v", r)
 	}
 }
+
+func TestTaskRebaseAcceptsPublishedDependency(t *testing.T) {
+	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
+	if r := run(t, root, nil, "plan", "--file", writePlan(t, chainPlan)); r.code != ExitOK {
+		t.Fatalf("plan: %+v", r)
+	}
+	if r := run(t, root, nil, "plan", "approve", "g2"); r.code != ExitOK {
+		t.Fatalf("approve: %+v", r)
+	}
+	if r := run(t, root, nil, "run", "g2"); r.code != ExitOK {
+		t.Fatalf("run: %+v", r)
+	}
+	setStatus(t, root, "g2/a", store.TaskPublished)
+	setStatus(t, root, "g2/b", store.TaskBlocked)
+	if r := run(t, root, nil, "task", "rebase", "g2/b"); r.code != ExitOK {
+		t.Fatalf("rebase onto published dependency: %+v", r)
+	}
+	setStatus(t, root, "g2/a", store.TaskPending)
+	if r := run(t, root, nil, "task", "rebase", "g2/b"); r.code != ExitError || !strings.Contains(r.stderr, "dependency g2/a is pending") {
+		t.Fatalf("rebase onto pending dependency: %+v", r)
+	}
+}

@@ -14,12 +14,24 @@ import (
 
 // Task statuses (GR5). Only the harness changes them.
 const (
-	TaskPending  = "pending"
-	TaskRunning  = "running"
-	TaskVerified = "verified"
-	TaskBlocked  = "blocked"
-	TaskFailed   = "failed"
+	TaskPending   = "pending"
+	TaskRunning   = "running"
+	TaskVerified  = "verified"
+	TaskPublished = "published"
+	TaskLanded    = "landed"
+	TaskBlocked   = "blocked"
+	TaskFailed    = "failed"
 )
+
+// Done reports whether status is a finished task whose code later tasks may build on:
+// verified, published or landed.
+func Done(status string) bool {
+	switch status {
+	case TaskVerified, TaskPublished, TaskLanded:
+		return true
+	}
+	return false
+}
 
 // Task phases while running.
 const (
@@ -223,7 +235,7 @@ func (s *Store) MaxAttemptN(ctx context.Context, taskID string) (int, error) {
 }
 
 // TaskStatuses lists every valid task status.
-var TaskStatuses = []string{TaskPending, TaskRunning, TaskVerified, TaskBlocked, TaskFailed}
+var TaskStatuses = []string{TaskPending, TaskRunning, TaskVerified, TaskPublished, TaskLanded, TaskBlocked, TaskFailed}
 
 // TaskSummary is a task with its aggregated attempts and spend.
 type TaskSummary struct {
@@ -271,18 +283,21 @@ type Branch struct {
 	StartSHA     string    `json:"start_sha,omitempty"`
 	Worktree     string    `json:"worktree"`
 	PublishedRef string    `json:"published_ref,omitempty"`
+	PublishedSHA string    `json:"published_sha,omitempty"`
+	GateSHA      string    `json:"gate_sha,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // SaveBranch inserts or updates a task's branch row.
 func (s *Store) SaveBranch(ctx context.Context, b Branch) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO branches
-		(task_id, name, base, base_sha, start_sha, head_sha, worktree, published_ref, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(task_id, name, base, base_sha, start_sha, head_sha, worktree, published_ref, published_sha, gate_sha, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(task_id) DO UPDATE SET name = excluded.name, base = excluded.base,
 		base_sha = excluded.base_sha, start_sha = excluded.start_sha, head_sha = excluded.head_sha, worktree = excluded.worktree,
-		published_ref = excluded.published_ref, updated_at = excluded.updated_at`,
-		b.TaskID, b.Name, b.Base, b.BaseSHA, b.StartSHA, b.HeadSHA, b.Worktree, b.PublishedRef, s.ts())
+		published_ref = excluded.published_ref, published_sha = excluded.published_sha, gate_sha = excluded.gate_sha,
+		updated_at = excluded.updated_at`,
+		b.TaskID, b.Name, b.Base, b.BaseSHA, b.StartSHA, b.HeadSHA, b.Worktree, b.PublishedRef, b.PublishedSHA, b.GateSHA, s.ts())
 	return err
 }
 
@@ -291,8 +306,9 @@ func (s *Store) GetBranch(ctx context.Context, taskID string) (Branch, error) {
 	var b Branch
 	var updated string
 	err := s.db.QueryRowContext(ctx, `SELECT task_id, name, base, base_sha, start_sha, head_sha, worktree,
-		published_ref, updated_at FROM branches WHERE task_id = ?`, taskID).
-		Scan(&b.TaskID, &b.Name, &b.Base, &b.BaseSHA, &b.StartSHA, &b.HeadSHA, &b.Worktree, &b.PublishedRef, &updated)
+		published_ref, published_sha, gate_sha, updated_at FROM branches WHERE task_id = ?`, taskID).
+		Scan(&b.TaskID, &b.Name, &b.Base, &b.BaseSHA, &b.StartSHA, &b.HeadSHA, &b.Worktree, &b.PublishedRef,
+			&b.PublishedSHA, &b.GateSHA, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Branch{}, fmt.Errorf("branch for %s: %w", taskID, ErrNotFound)
 	}

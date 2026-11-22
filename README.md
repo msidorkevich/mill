@@ -67,7 +67,7 @@ unchanged, lists the conflicting files and exits 1. A branch that already contai
 reported as up to date and left alone.
 
 A verified task is a branch `mill/t/<id>` in a worktree outside your checkout; mill prints the
-command to review its diff. mill never pushes and never touches `main`.
+command to review its diff. mill pushes only `review/<task>` branches, on `mill review approve`, and never touches `main`.
 
 ### Plans and goals
 
@@ -86,7 +86,22 @@ mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, CO
 mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
 mill run g1                     # run the approved goal's tasks in dependency order
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
+mill review                     # verified and published tasks, oldest first: ID, STATUS, ATTEMPTS, COST, TITLE, BRANCH (--json)
+mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat (--diff, --json)
+mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
+mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
+mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
+mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
 ```
+
+`mill sync` fetches the remote and marks each published task landed when its published commit
+is in `<remote>/<base_branch>` (method `ancestor`), a commit there has the same patch (`patch`,
+after a squash or rebase), or a commit there carries its `Mill-Task: <id>` trailer (`trailer`).
+A verified or published single-dependency task whose parent landed is rebased onto
+`<remote>/<base_branch>`; one whose parent got new commits is rebased onto the parent's new
+head. The gate is re-run (not the verifier) and published tasks are re-published with the lease.
+A conflict or a red gate blocks the task with the files or commands, leaving its branch as it
+was. Fan-in tasks are only reported. A goal whose tasks have all landed becomes `landed`.
 
 `mill run` starts a task once all its dependencies are verified, up to `max_parallel` at a
 time, and never runs two tasks whose `owns` overlap together. Each task gets the branch
@@ -171,5 +186,33 @@ Verified tasks are not run again.
 `mill run g1` recovers the half-finished tasks and continues where it stopped. Only one
 `mill run` can work on a repository at a time; a second one fails and says so. Wait for the
 first to finish or stop it, then run again.
+
+### Reviewing, publishing and syncing
+
+Once a goal's tasks are verified, you review them in mill and publish them for your forge.
+
+- `mill review` lists verified and published tasks. `mill review show g1/a` prints the spec,
+  acceptance, last verdict and gate, attempts, cost, branch and diff stat (`--diff` for the full
+  diff).
+- `mill review approve g1/a` publishes the task. `mill review changes g1/a -m "text"` records
+  your comments (a blank line separates findings) and sends the task back for another attempt.
+  `mill review reject g1/a -m "why"` blocks the task and puts its non-landed descendants on hold.
+
+**What a published branch contains.** `review/g1/a` on the remote is one squashed commit with
+the task's whole change, not its attempt history. The message holds a description (title,
+spec, acceptance) and trailers: `Mill-Task: g1/a`, `Mill-Goal`, and for a stacked task
+`Mill-Base` (the parent's published commit). The commit is stacked on its parent: the first
+parent of `review/g1/b` is `review/g1/a`'s commit, so a forge shows only b's own change.
+A task whose dependencies have not been published is refused, and a fan-in task waits for its
+other dependencies to land. Approving again force-pushes with a lease.
+
+**Syncing.** After you merge on the forge, `mill sync` fetches and detects what landed, by
+`ancestor` (merge commit), `patch` (squash or rebase merge with the same patch) or `trailer`
+(the `Mill-Task` trailer survived an edited merge). Children of a landed task are restacked
+onto `<remote>/<base_branch>`, re-gated and re-published, so their review branches track main.
+When every task of a goal has landed, the goal becomes `landed`.
+
+**mill only ever pushes `review/*` branches.** It never pushes to `main` or any other branch;
+merging stays with you and your forge.
 
 Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.

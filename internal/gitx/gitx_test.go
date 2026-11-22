@@ -260,3 +260,269 @@ func TestDetachedWorktreeAtShaIsAddedAndRemoved(t *testing.T) {
 		t.Fatal("unknown sha accepted")
 	}
 }
+
+// commitFile writes name=body in dir and commits it, returning the new HEAD.
+func commitFile(t *testing.T, dir, name, body, msg string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := CommitAll(context.Background(), dir, msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sha
+}
+
+// bareRemote creates a bare repository, adds it to r as "origin" and pushes main to it.
+func bareRemote(t *testing.T, r string) string {
+	t.Helper()
+	ctx := context.Background()
+	bare := filepath.Join(t.TempDir(), "remote.git")
+	mustRun(t, ctx, r, "init", "-q", "--bare", "-b", "main", bare)
+	mustRun(t, ctx, r, "remote", "add", "origin", bare)
+	mustRun(t, ctx, r, "push", "-q", "origin", "main")
+	return bare
+}
+
+func TestFetchGetsRemoteBranches(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	bare := bareRemote(t, r)
+	// Another clone moves the remote's main and adds a branch.
+	other := filepath.Join(t.TempDir(), "other")
+	mustRun(t, ctx, r, "clone", "-q", bare, other)
+	tip := commitFile(t, other, "x.txt", "x\n", "x")
+	mustRun(t, ctx, other, "push", "-q", "origin", "main", "main:side")
+
+	if err := Fetch(ctx, r, "origin"); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{"origin/main", "origin/side"} {
+		if got, err := RevParse(ctx, r, ref); err != nil || got != tip {
+			t.Errorf("%s = %q, %v; want %s", ref, got, err, tip)
+		}
+	}
+	if err := Fetch(ctx, r, "nosuch"); err == nil {
+		t.Error("Fetch of an unknown remote succeeded")
+	}
+}
+
+func TestMergeConflictsCleanAndConflicting(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	mustRun(t, ctx, r, "branch", "clean")
+	mustRun(t, ctx, r, "branch", "clash")
+	mainTip := commitFile(t, r, "README", "main\n", "main edit")
+
+	mustRun(t, ctx, r, "checkout", "-q", "clean")
+	commitFile(t, r, "other.txt", "o\n", "other")
+	mustRun(t, ctx, r, "checkout", "-q", "clash")
+	commitFile(t, r, "README", "clash\n", "clash edit")
+	commitFile(t, r, "b.txt", "b\n", "b")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+
+	if files, err := MergeConflicts(ctx, r, "main", "clean"); err != nil || files != nil {
+		t.Fatalf("clean = %v, %v", files, err)
+	}
+	files, err := MergeConflicts(ctx, r, "main", "clash")
+	if err != nil || len(files) != 1 || files[0] != "README" {
+		t.Fatalf("clash = %v, %v", files, err)
+	}
+	// Nothing moved and the work tree is untouched.
+	if got, _ := RevParse(ctx, r, "HEAD"); got != mainTip {
+		t.Fatal("HEAD moved")
+	}
+	if changed, _ := HasChanges(ctx, r); changed {
+		t.Fatal("work tree changed")
+	}
+	if _, err := MergeConflicts(ctx, r, "main", "nosuch"); err == nil {
+		t.Fatal("unknown branch reported as clean")
+	}
+}
+
+func TestCommitTreeAndTreeOf(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no global identity
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ctx := context.Background()
+	r := repo(t)
+	parent, _ := RevParse(ctx, r, "main")
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "side")
+	side := commitFile(t, r, "s.txt", "s\n", "side")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+
+	tree, err := TreeOf(ctx, r, side)
+	if err != nil || len(tree) != 40 {
+		t.Fatalf("TreeOf = %q, %v", tree, err)
+	}
+	if want := mustRun(t, ctx, r, "rev-parse", side+"^{tree}"); tree != want {
+		t.Fatalf("TreeOf = %s, want %s", tree, want)
+	}
+	// No identity in the repository: mill's own is used; hooks never run.
+	if err := os.WriteFile(filepath.Join(r, ".git", "hooks", "commit-msg"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sha, err := CommitTree(ctx, r, tree, parent, "squash of side\n\nMill-Task: x\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRun(t, ctx, r, "log", "-1", "--format=%T %P %an <%ae> %s", sha); got != tree+" "+parent+" mill <mill@localhost> squash of side" {
+		t.Fatalf("commit = %q", got)
+	}
+	if got, _ := RevParse(ctx, r, "main"); got != parent {
+		t.Fatal("CommitTree moved main")
+	}
+	root, err := CommitTree(ctx, r, tree, "", "root")
+	if err != nil || mustRun(t, ctx, r, "log", "-1", "--format=%P", root) != "" {
+		t.Fatalf("root commit %s, %v", root, err)
+	}
+	if _, err := TreeOf(ctx, r, "nosuch"); err == nil {
+		t.Fatal("TreeOf of an unknown rev succeeded")
+	}
+}
+
+func TestPushReviewUsesLease(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	bare := bareRemote(t, r)
+	first, _ := RevParse(ctx, r, "main")
+	second := commitFile(t, r, "a.txt", "a\n", "a")
+	third := commitFile(t, r, "b.txt", "b\n", "b")
+
+	// expected "" requires the branch not to exist.
+	if err := PushReview(ctx, r, "origin", first, "review/g1/a", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRun(t, ctx, bare, "rev-parse", "refs/heads/review/g1/a"); got != first {
+		t.Fatalf("remote review/g1/a = %s, want %s", got, first)
+	}
+	if err := PushReview(ctx, r, "origin", second, "review/g1/a", ""); err == nil {
+		t.Fatal("push with empty lease over an existing branch succeeded")
+	}
+	// The right lease moves it.
+	if err := PushReview(ctx, r, "origin", second, "review/g1/a", first); err != nil {
+		t.Fatal(err)
+	}
+	// A stale expected sha is rejected by git and the branch stays.
+	if err := PushReview(ctx, r, "origin", third, "review/g1/a", first); err == nil {
+		t.Fatal("push with a stale lease succeeded")
+	}
+	if got := mustRun(t, ctx, bare, "rev-parse", "refs/heads/review/g1/a"); got != second {
+		t.Fatalf("remote review/g1/a = %s, want %s", got, second)
+	}
+	if err := PushReview(ctx, r, "origin", first, "review/g1/a", second); err != nil {
+		t.Fatalf("forced push with the right lease: %v", err)
+	}
+}
+
+func TestPushReviewRefusesNonReviewBranchesWithoutGit(t *testing.T) {
+	ctx := context.Background()
+	// Not a repository: any git call would fail with git's own error.
+	dir := filepath.Join(t.TempDir(), "missing")
+	for _, b := range []string{"main", "refs/heads/review/x", "reviews/x", "mill/g1/a", "review/", "Review/x", ""} {
+		err := PushReview(ctx, dir, "origin", "0123456789012345678901234567890123456789", b, "")
+		if err == nil || !strings.Contains(err.Error(), "only pushes review/") || strings.Contains(err.Error(), "git ") {
+			t.Errorf("PushReview(%q) = %v", b, err)
+		}
+	}
+}
+
+func TestPatchLanded(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
+	c := commitFile(t, r, "f.txt", "feature\n", "feature")
+	other := commitFile(t, r, "g.txt", "other\n", "other")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+	commitFile(t, r, "unrelated.txt", "u\n", "unrelated")
+
+	if landed, err := PatchLanded(ctx, r, "main", c); err != nil || landed {
+		t.Fatalf("before squash = %v, %v", landed, err)
+	}
+	// A squash of the commit's change lands on main under a different sha.
+	mustRun(t, ctx, r, "checkout", "-q", c, "--", "f.txt")
+	if _, err := CommitAll(ctx, r, "squashed feature"); err != nil {
+		t.Fatal(err)
+	}
+	if landed, err := PatchLanded(ctx, r, "main", c); err != nil || !landed {
+		t.Fatalf("after squash = %v, %v", landed, err)
+	}
+	if landed, err := PatchLanded(ctx, r, "main", other); err != nil || landed {
+		t.Fatalf("other commit = %v, %v", landed, err)
+	}
+	if _, err := PatchLanded(ctx, r, "main", "nosuch"); err == nil {
+		t.Fatal("unknown commit succeeded")
+	}
+}
+
+func TestFindTrailer(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	old := commitFile(t, r, "a.txt", "1\n", "first\n\nMill-Task: g1/a\n")
+	newer := commitFile(t, r, "a.txt", "2\n", "second\n\nMill-Task: g1/a\nMill-Attempt: 2\n")
+	commitFile(t, r, "b.txt", "1\n", "prefix\n\nMill-Task: g1/ab\n")
+	commitFile(t, r, "c.txt", "1\n", "mentions Mill-Task: g1/a in the subject\n")
+
+	sha, ok, err := FindTrailer(ctx, r, "main", "Mill-Task: g1/a")
+	if err != nil || !ok || sha != newer {
+		t.Fatalf("FindTrailer = %s, %v, %v; want %s", sha, ok, err, newer)
+	}
+	if sha, ok, err := FindTrailer(ctx, r, old, "Mill-Task: g1/a"); err != nil || !ok || sha != old {
+		t.Fatalf("from old = %s, %v, %v", sha, ok, err)
+	}
+	if _, ok, err := FindTrailer(ctx, r, "main", "Mill-Task: g1/b"); err != nil || ok {
+		t.Fatalf("missing trailer = %v, %v", ok, err)
+	}
+	if _, _, err := FindTrailer(ctx, r, "nosuch", "Mill-Task: g1/a"); err == nil {
+		t.Fatal("unknown rev succeeded")
+	}
+}
+
+func TestFindPatchReturnsTheSquashCommit(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
+	c := commitFile(t, r, "f.txt", "feature\n", "feature")
+	other := commitFile(t, r, "g.txt", "other\n", "other")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+	commitFile(t, r, "unrelated.txt", "u\n", "unrelated")
+	mustRun(t, ctx, r, "checkout", "-q", c, "--", "f.txt")
+	squash, err := CommitAll(ctx, r, "squashed feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, r, "later.txt", "l\n", "later")
+
+	if sha, ok, err := FindPatch(ctx, r, "main", c); err != nil || !ok || sha != squash {
+		t.Fatalf("FindPatch = %s, %v, %v; want %s", sha, ok, err, squash)
+	}
+	if sha, ok, err := FindPatch(ctx, r, "main", other); err != nil || ok {
+		t.Fatalf("FindPatch(other) = %s, %v, %v; want none", sha, ok, err)
+	}
+}
+
+func TestContainingCommitFindsMergeOrFastForward(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
+	c := commitFile(t, r, "f.txt", "feature\n", "feature")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+	commitFile(t, r, "unrelated.txt", "u\n", "unrelated")
+	if err := Merge(ctx, r, "task", "merge task"); err != nil {
+		t.Fatal(err)
+	}
+	merge := mustRun(t, ctx, r, "rev-parse", "HEAD")
+	commitFile(t, r, "later.txt", "l\n", "later")
+	if got, err := ContainingCommit(ctx, r, "main", c); err != nil || got != merge {
+		t.Fatalf("ContainingCommit after merge = %s, %v; want %s", got, err, merge)
+	}
+
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "ff")
+	d := commitFile(t, r, "d.txt", "d\n", "ff commit")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+	mustRun(t, ctx, r, "merge", "-q", "--ff-only", "ff")
+	commitFile(t, r, "after.txt", "a\n", "after")
+	if got, err := ContainingCommit(ctx, r, "main", d); err != nil || got != d {
+		t.Fatalf("ContainingCommit after fast-forward = %s, %v; want %s", got, err, d)
+	}
+}

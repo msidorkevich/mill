@@ -18,6 +18,7 @@ import (
 	"mill/internal/host"
 	"mill/internal/plan"
 	"mill/internal/project"
+	"mill/internal/prompt"
 	"mill/internal/runner"
 	"mill/internal/store"
 	"mill/internal/taskspec"
@@ -846,5 +847,87 @@ func TestOwnsOffAndEmptyOwnsRecordNothing(t *testing.T) {
 	e2.ownedTask(t, "n")
 	if out := e2.run(t, "n"); out.Status != store.TaskVerified || e2.ownsEvents(t, "n") != 0 {
 		t.Fatalf("empty owns restricted: %+v", out)
+	}
+}
+
+// gate_sha is the head the gate passed at, not a head that failed it.
+func TestGatePassRecordsGateSHA(t *testing.T) {
+	e := setup(t, `grep -q hello hello.txt`, runner.Script{
+		runner.RoleImplementer: {
+			impl(map[string]string{"hello.txt": "goodbye\n"}),
+			impl(map[string]string{"hello.txt": "hello\n"}),
+		},
+		runner.RoleVerifier: {verdict("pass")},
+	}, nil)
+	e.task(t, "gated")
+	out := e.run(t, "gated")
+	if out.Status != store.TaskVerified {
+		t.Fatalf("outcome = %+v\n%s", out, e.out)
+	}
+	br, err := e.p.Store.GetBranch(context.Background(), "gated")
+	if err != nil || br.GateSHA != out.HeadSHA || br.GateSHA == "" {
+		t.Fatalf("branch = %+v, %v; want gate_sha %s", br, err, out.HeadSHA)
+	}
+}
+
+// The gate result is recorded even when the verifier then rejects the attempt.
+func TestGatePassRecordsGateSHAWhenVerifierFails(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
+		runner.RoleVerifier:    {verdict("fail", "wrong")},
+	}, func(c *config.Config) { c.MaxAttempts = 1 })
+	e.task(t, "rejected")
+	if out := e.run(t, "rejected"); out.Status != store.TaskBlocked {
+		t.Fatalf("outcome = %+v", out)
+	}
+	br, _ := e.p.Store.GetBranch(context.Background(), "rejected")
+	if br.GateSHA == "" || br.GateSHA != br.HeadSHA || br.GateSHA == br.StartSHA {
+		t.Fatalf("branch = %+v", br)
+	}
+}
+
+func TestPublishedDependencyIsABase(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.goal(t, nil, []string{"a"})
+	if out := e.run(t, "g1/a"); out.Status != store.TaskVerified {
+		t.Fatalf("a: %+v", out)
+	}
+	ctx := context.Background()
+	if err := e.p.Store.SetTaskStatus(ctx, "g1/a", store.TaskPublished, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if out := e.run(t, "g1/b"); out.Status != store.TaskVerified {
+		t.Fatalf("b: %+v\n%s", out, e.out)
+	}
+	ba, _ := e.p.Store.GetBranch(ctx, "g1/a")
+	bb, _ := e.p.Store.GetBranch(ctx, "g1/b")
+	if bb.Base != "mill/g1/a" || bb.BaseSHA != ba.HeadSHA {
+		t.Fatalf("b branch = %+v, a head %s", bb, ba.HeadSHA)
+	}
+}
+
+func TestOperatorFindingsStartTheNextAttemptPrompt(t *testing.T) {
+	e := setup(t, "grep -q hello hello.txt", runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"}), impl(map[string]string{"hello.txt": "hello world\n"})},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.task(t, "reviewed")
+	if out := e.run(t, "reviewed"); out.Status != store.TaskVerified {
+		t.Fatalf("first run = %+v", out)
+	}
+	ctx := context.Background()
+	findings := []prompt.Finding{{Source: "operator", Issue: "say hello world"}}
+	if err := e.p.Store.RequestChanges(ctx, "reviewed", 1, findings, "changes requested"); err != nil {
+		t.Fatal(err)
+	}
+	if out := e.run(t, "reviewed"); out.Status != store.TaskVerified {
+		t.Fatalf("second run = %+v\n%s", out, e.out)
+	}
+	ip := prompts(e.fake, runner.RoleImplementer)
+	if len(ip) != 2 || !strings.Contains(ip[1], "[operator] say hello world") {
+		t.Fatalf("second implementer prompt lacks the operator finding:\n%v", ip)
 	}
 }

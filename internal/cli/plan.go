@@ -573,7 +573,7 @@ func runGoalList(ctx context.Context, env Env, args []string) int {
 		}
 		r := goalSummary{ID: g.ID, Title: g.Title, Status: g.Status, TasksTotal: len(tasks), Usage: u}
 		for _, t := range tasks {
-			if t.Status == store.TaskVerified {
+			if store.Done(t.Status) {
 				r.TasksVerified++
 			}
 		}
