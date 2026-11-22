@@ -4,6 +4,7 @@ package gitx
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -191,4 +192,60 @@ func RemoveWorktree(ctx context.Context, repo, path string) error {
 func DeleteBranch(ctx context.Context, repo, name string) error {
 	_, err := Run(ctx, repo, "branch", "-D", "-q", name)
 	return err
+}
+
+// IsAncestor reports whether commit ancestor is reachable from descendant.
+func IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd.Dir = dir
+	cmd.Env = cleanEnv()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return true, nil
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w: %s", ancestor, descendant, err, strings.TrimSpace(stderr.String()))
+}
+
+// RebaseConflictError reports a rebase that stopped on conflicts. The rebase has been
+// aborted and the branch is as it was.
+type RebaseConflictError struct {
+	Onto  string
+	Files []string
+}
+
+func (e *RebaseConflictError) Error() string {
+	return fmt.Sprintf("rebasing onto %s conflicts in %s", e.Onto, strings.Join(e.Files, ", "))
+}
+
+// RebaseOnto replays the commits after `upstream` on the branch checked out in dir onto
+// `onto` (git rebase --onto), skipping hooks and signing. When the repository has no identity
+// configured, mill's own is used. On conflicts the rebase is aborted and a
+// *RebaseConflictError lists the files. It returns the new HEAD sha.
+func RebaseOnto(ctx context.Context, dir, onto, upstream string) (string, error) {
+	args := []string{"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}
+	if email, _ := Run(ctx, dir, "config", "user.email"); email == "" {
+		args = append(args, "-c", "user.name=mill", "-c", "user.email=mill@localhost")
+	}
+	args = append(args, "rebase", "--no-verify", "--onto", onto, upstream)
+	_, rebaseErr := Run(ctx, dir, args...)
+	if rebaseErr == nil {
+		return RevParse(ctx, dir, "HEAD")
+	}
+	files, lsErr := Run(ctx, dir, "diff", "--name-only", "--diff-filter=U")
+	_, inProgress := Run(ctx, dir, "rev-parse", "-q", "--verify", "REBASE_HEAD")
+	if inProgress == nil {
+		if _, err := Run(ctx, dir, "rebase", "--abort"); err != nil {
+			return "", fmt.Errorf("%w; and aborting the rebase failed, run `git rebase --abort` in %s: %v", rebaseErr, dir, err)
+		}
+	}
+	if lsErr != nil || files == "" {
+		return "", rebaseErr
+	}
+	return "", &RebaseConflictError{Onto: onto, Files: strings.Split(files, "\n")}
 }

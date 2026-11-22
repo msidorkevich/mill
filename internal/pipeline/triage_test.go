@@ -116,7 +116,8 @@ func TestGateFailingOnStartPointBlocksWithoutRetry(t *testing.T) {
 	if out.Status != store.TaskBlocked || out.Attempts != 1 ||
 		!strings.Contains(out.Reason, "`test ! -f broken`") ||
 		!strings.Contains(out.Reason, "fail on the task's starting point") ||
-		!strings.Contains(out.Reason, "this task did not cause them") {
+		!strings.Contains(out.Reason, "this task did not cause them") ||
+		!strings.Contains(out.Reason, "run `mill task rebase based`, then retry") {
 		t.Fatalf("outcome = %+v\n%s", out, e.out)
 	}
 	if n := len(prompts(e.fake, runner.RoleImplementer)); n != 1 {

@@ -41,6 +41,7 @@ func runTask(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(w, "  mill task show <id> [--json]               show a task, its attempts, spend and findings")
 		fmt.Fprintln(w, "  mill task list [--status S] [--json]       list all tasks, oldest first")
 		fmt.Fprintln(w, "  mill task edit <id> [--file spec.json]     change the spec of a pending, blocked or failed task (opens $EDITOR without --file)")
+		fmt.Fprintln(w, "  mill task rebase <id>                      move a pending, blocked or failed task's own commits onto its base's current tip")
 		return code
 	}
 	switch args[0] {
@@ -52,6 +53,8 @@ func runTask(ctx context.Context, env Env, args []string) int {
 		return runTaskList(ctx, env, args[1:])
 	case "edit":
 		return runTaskEdit(ctx, env, args[1:])
+	case "rebase":
+		return runTaskRebase(ctx, env, args[1:])
 	}
 	fmt.Fprintf(env.Stderr, "mill task: unknown subcommand %q\n", args[0])
 	return ExitUsage

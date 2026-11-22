@@ -104,8 +104,8 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 		if _, err := p.Store.AppendEvent(ctx, "gate-base-failing", "", t.ID, map[string]any{"attempt": n, "start": startSHA, "commands": alsoOnBase}); err != nil {
 			return tr, err
 		}
-		tr.blocked = fmt.Sprintf("gate command(s) %s fail on the task's starting point %s too, so this task did not cause them; fix them on the base branch, then retry",
-			quoteCmds(alsoOnBase), short(startSHA))
+		tr.blocked = fmt.Sprintf("gate command(s) %s fail on the task's starting point %s too, so this task did not cause them; fix them on the base branch, run `mill task rebase %s`, then retry",
+			quoteCmds(alsoOnBase), short(startSHA), t.ID)
 	}
 	return tr, nil
 }
