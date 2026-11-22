@@ -477,3 +477,52 @@ func TestFindTrailer(t *testing.T) {
 		t.Fatal("unknown rev succeeded")
 	}
 }
+
+func TestFindPatchReturnsTheSquashCommit(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
+	c := commitFile(t, r, "f.txt", "feature\n", "feature")
+	other := commitFile(t, r, "g.txt", "other\n", "other")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+	commitFile(t, r, "unrelated.txt", "u\n", "unrelated")
+	mustRun(t, ctx, r, "checkout", "-q", c, "--", "f.txt")
+	squash, err := CommitAll(ctx, r, "squashed feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, r, "later.txt", "l\n", "later")
+
+	if sha, ok, err := FindPatch(ctx, r, "main", c); err != nil || !ok || sha != squash {
+		t.Fatalf("FindPatch = %s, %v, %v; want %s", sha, ok, err, squash)
+	}
+	if sha, ok, err := FindPatch(ctx, r, "main", other); err != nil || ok {
+		t.Fatalf("FindPatch(other) = %s, %v, %v; want none", sha, ok, err)
+	}
+}
+
+func TestContainingCommitFindsMergeOrFastForward(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
+	c := commitFile(t, r, "f.txt", "feature\n", "feature")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+	commitFile(t, r, "unrelated.txt", "u\n", "unrelated")
+	if err := Merge(ctx, r, "task", "merge task"); err != nil {
+		t.Fatal(err)
+	}
+	merge := mustRun(t, ctx, r, "rev-parse", "HEAD")
+	commitFile(t, r, "later.txt", "l\n", "later")
+	if got, err := ContainingCommit(ctx, r, "main", c); err != nil || got != merge {
+		t.Fatalf("ContainingCommit after merge = %s, %v; want %s", got, err, merge)
+	}
+
+	mustRun(t, ctx, r, "checkout", "-q", "-b", "ff")
+	d := commitFile(t, r, "d.txt", "d\n", "ff commit")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+	mustRun(t, ctx, r, "merge", "-q", "--ff-only", "ff")
+	commitFile(t, r, "after.txt", "a\n", "after")
+	if got, err := ContainingCommit(ctx, r, "main", d); err != nil || got != d {
+		t.Fatalf("ContainingCommit after fast-forward = %s, %v; want %s", got, err, d)
+	}
+}

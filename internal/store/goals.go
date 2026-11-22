@@ -22,10 +22,11 @@ const (
 	GoalRunning  = "running"
 	GoalDone     = "done"
 	GoalBlocked  = "blocked"
+	GoalLanded   = "landed" // every task has landed on the base branch
 )
 
 // GoalStatuses lists every valid goal status.
-var GoalStatuses = []string{GoalDraft, GoalApproved, GoalRunning, GoalDone, GoalBlocked}
+var GoalStatuses = []string{GoalDraft, GoalApproved, GoalRunning, GoalDone, GoalBlocked, GoalLanded}
 
 // Goal is a request broken into a plan.
 type Goal struct {

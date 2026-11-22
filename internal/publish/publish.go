@@ -149,7 +149,7 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 	// Gate green at the current head.
 	gateCmds := nonEmpty(append([]string{cfg.CheckCmd}, t.Checks...))
 	if br.GateSHA != br.HeadSHA {
-		g, err := rerunGate(ctx, o, t, br, gateCmds)
+		g, err := rerunGate(ctx, o, t, br, gateCmds, "publish")
 		if err != nil {
 			return res, err
 		}
@@ -284,8 +284,18 @@ func stackOf(ctx context.Context, s *store.Store, cfg config.Config, t store.Tas
 		t.ID, parent, pt.Status, parent)
 }
 
+// GateAtHead re-runs the task's gate (check_cmd and its checks) at the branch head in its
+// worktree and records a task-gate event. phase names the log directory (runs/<id>/<phase>) and
+// is recorded in the event. It does not change the branch row: the caller records gate_sha.
+func GateAtHead(ctx context.Context, o Options, t store.Task, br store.Branch, phase string) (gate.Result, error) {
+	return rerunGate(ctx, o, t, br, nonEmpty(append([]string{o.Cfg.CheckCmd}, t.Checks...)), phase)
+}
+
+// FailedCommands lists the failing commands of a gate result, one per line.
+func FailedCommands(g gate.Result) string { return failedCmds(g) }
+
 // rerunGate runs check_cmd and the task's checks in the worktree, as the pipeline does.
-func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cmds []string) (gate.Result, error) {
+func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cmds []string, phase string) (gate.Result, error) {
 	if br.Worktree == "" {
 		return gate.Result{}, fmt.Errorf("task %s has no worktree to re-run the gate in", t.ID)
 	}
@@ -302,7 +312,7 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		h = host.NewExec()
 	}
 	g := gate.Run(ctx, gate.Options{
-		Host: h, Dir: br.Worktree, Cmds: cmds, LogDir: filepath.Join(o.Paths.Runs, t.ID, "publish"),
+		Host: h, Dir: br.Worktree, Cmds: cmds, LogDir: filepath.Join(o.Paths.Runs, t.ID, phase),
 		Env:     host.AllowEnv(os.Environ(), append(append([]string{}, host.DefaultEnvAllow...), o.Cfg.EnvAllow...)),
 		Timeout: o.Cfg.GateTimeout.Duration,
 	})
@@ -313,7 +323,7 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 	if err != nil {
 		return g, err
 	}
-	if _, err := o.Store.AppendEvent(ctx, "task-gate", "", t.ID, map[string]any{"attempt": n, "head": br.HeadSHA, "result": g, "publish": true}); err != nil {
+	if _, err := o.Store.AppendEvent(ctx, "task-gate", "", t.ID, map[string]any{"attempt": n, "head": br.HeadSHA, "result": g, phase: true}); err != nil {
 		return g, err
 	}
 	return g, nil

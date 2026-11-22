@@ -91,7 +91,17 @@ mill review show g1/a           # spec, acceptance, last verdict and gate, attem
 mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
 mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
 mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
+mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
 ```
+
+`mill sync` fetches the remote and marks each published task landed when its published commit
+is in `<remote>/<base_branch>` (method `ancestor`), a commit there has the same patch (`patch`,
+after a squash or rebase), or a commit there carries its `Mill-Task: <id>` trailer (`trailer`).
+A verified or published single-dependency task whose parent landed is rebased onto
+`<remote>/<base_branch>`; one whose parent got new commits is rebased onto the parent's new
+head. The gate is re-run (not the verifier) and published tasks are re-published with the lease.
+A conflict or a red gate blocks the task with the files or commands, leaving its branch as it
+was. Fan-in tasks are only reported. A goal whose tasks have all landed becomes `landed`.
 
 `mill run` starts a task once all its dependencies are verified, up to `max_parallel` at a
 time, and never runs two tasks whose `owns` overlap together. Each task gets the branch

@@ -392,3 +392,89 @@ func FindTrailer(ctx context.Context, dir, rev, trailer string) (sha string, ok 
 	}
 	return "", false, nil
 }
+
+// ContainingCommit returns the commit on rev's first-parent history that brought commit into
+// rev: commit itself after a fast-forward, or the merge commit that merged it. commit must be
+// an ancestor of rev.
+func ContainingCommit(ctx context.Context, dir, rev, commit string) (string, error) {
+	args := []string{"rev-list", "--first-parent", rev}
+	if _, err := Run(ctx, dir, "rev-parse", "--verify", "--quiet", commit+"^"); err == nil {
+		args = append(args, "^"+commit+"^")
+	}
+	out, err := Run(ctx, dir, args...)
+	if err != nil {
+		return "", err
+	}
+	first := map[string]bool{}
+	for _, c := range strings.Fields(out) {
+		first[c] = true
+	}
+	full, err := RevParse(ctx, dir, commit)
+	if err != nil {
+		return "", err
+	}
+	if first[full] {
+		return full, nil
+	}
+	out, err = Run(ctx, dir, "rev-list", "--reverse", "--ancestry-path", full+".."+rev)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range strings.Fields(out) {
+		if first[c] {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no commit on the first-parent history of %s contains %s", rev, commit)
+}
+
+// FindPatch returns the commit reachable from upstream (and not from commit's parent) whose
+// patch is the same as the single commit `commit` (same `git patch-id --stable`). ok is false
+// when there is none.
+func FindPatch(ctx context.Context, dir, upstream, commit string) (sha string, ok bool, err error) {
+	want, err := patchIDs(ctx, dir, "show", "--no-color", "--no-ext-diff", "--format=commit %H", commit)
+	if err != nil {
+		return "", false, err
+	}
+	if len(want) != 1 {
+		return "", false, fmt.Errorf("commit %s has no patch to compare", commit)
+	}
+	var id string
+	for k := range want {
+		id = k
+	}
+	got, err := patchIDs(ctx, dir, "log", "-p", "--no-merges", "--no-color", "--no-ext-diff", "--format=commit %H",
+		upstream, "^"+commit+"^", "--")
+	if err != nil {
+		return "", false, err
+	}
+	sha, ok = got[id]
+	return sha, ok, nil
+}
+
+// patchIDs runs git with args (a log-like patch output) through `git patch-id --stable` and
+// maps each patch id to its commit. When several commits share a patch, the first listed wins.
+func patchIDs(ctx context.Context, dir string, args ...string) (map[string]string, error) {
+	patches, err := Run(ctx, dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	if patches == "" {
+		return out, nil
+	}
+	ids, err := RunInput(ctx, dir, patches+"\n", "patch-id", "--stable")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(ids, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		if _, seen := out[f[0]]; !seen {
+			out[f[0]] = f[1]
+		}
+	}
+	return out, nil
+}
