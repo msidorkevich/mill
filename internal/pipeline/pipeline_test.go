@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1447,5 +1448,93 @@ func TestConcurrentNewBranchesFetchWithoutLockErrors(t *testing.T) {
 				t.Fatalf("round %d task %d starts at %s, want remote tip %s", round, i, shas[i], want)
 			}
 		}
+	}
+}
+
+func TestFailedPrepareRemovesBranchAndWorktreeItCreated(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.goal(t, nil, nil, []string{"a", "b"})
+	e.run(t, "g1/a")
+	e.run(t, "g1/b")
+	ctx := context.Background()
+	// Give both dependency branches unrelated histories: the worktree for c is created at one
+	// of them, then merging the other fails with an error that is not a conflict.
+	saved := map[string]string{}
+	for _, id := range []string{"g1/a", "g1/b"} {
+		br, err := e.p.Store.GetBranch(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved[br.Name] = br.HeadSHA
+		orphan, err := gitx.Run(ctx, e.root, "-c", "user.name=t", "-c", "user.email=t@t", "commit-tree", "-m", "orphan "+id, "4b825dc642cb6eb9a060e54bf8d69288fbee4904")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gitx.Run(ctx, e.root, "update-ref", "refs/heads/"+br.Name, orphan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	task, err := e.p.Store.GetTask(ctx, "g1/c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt := filepath.Join(e.p.Cfg.Worktrees(e.root, e.p.Home), "g1", "c")
+	_, err = e.p.prepare(ctx, task)
+	if err == nil || !strings.Contains(err.Error(), "merge dependency") {
+		t.Fatalf("prepare error = %v, want a failed dependency merge", err)
+	}
+	if gitx.BranchExists(ctx, e.root, "mill/g1/c") {
+		t.Fatalf("branch left behind after: %v", err)
+	}
+	if _, statErr := os.Stat(wt); statErr == nil {
+		t.Fatal("worktree left behind")
+	}
+	if _, err := e.p.Store.GetBranch(ctx, "g1/c"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("branch recorded after failed prepare: %v", err)
+	}
+	for name, sha := range saved {
+		if _, err := gitx.Run(ctx, e.root, "update-ref", "refs/heads/"+name, sha); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.p.prepare(ctx, task); err != nil {
+		t.Fatalf("second prepare: %v", err)
+	}
+}
+
+func TestFailedCleanupNamesLeftoverBranchAndWorktree(t *testing.T) {
+	e := setup(t, `true`, runner.Script{}, nil)
+	ctx := context.Background()
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := gitx.AddWorktree(ctx, e.root, wt, "mill/leftover", "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	// A locked worktree cannot be removed, and its branch stays checked out.
+	if _, err := gitx.Run(ctx, e.root, "worktree", "lock", wt); err != nil {
+		t.Fatal(err)
+	}
+	err := e.p.removeCreated(ctx, wt, "mill/leftover")
+	if err == nil || !strings.Contains(err.Error(), "mill/leftover") || !strings.Contains(err.Error(), wt) || !strings.Contains(err.Error(), "by hand") {
+		t.Fatalf("cleanup error = %v, want leftover branch and worktree named", err)
+	}
+}
+
+func TestPrepareRefusesUnrecordedBranchAndKeepsIt(t *testing.T) {
+	e := setup(t, `true`, runner.Script{}, nil)
+	e.task(t, "solo")
+	ctx := context.Background()
+	if _, err := gitx.Run(ctx, e.root, "branch", "mill/t/solo"); err != nil {
+		t.Fatal(err)
+	}
+	task, _ := e.p.Store.GetTask(ctx, "solo")
+	_, err := e.p.prepare(ctx, task)
+	if err == nil || !strings.Contains(err.Error(), "already exists in git") {
+		t.Fatalf("err = %v", err)
+	}
+	if !gitx.BranchExists(ctx, e.root, "mill/t/solo") {
+		t.Fatal("pre-existing branch was deleted")
 	}
 }
