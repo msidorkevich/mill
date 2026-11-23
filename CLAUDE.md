@@ -3,7 +3,10 @@
 mill is a Go CLI (Go 1.27, module `github.com/msidorkevich/mill`). Requirements: docs/REQUIREMENTS.md.
 
 ## Code
-- Match the style of the surrounding code. Standard library first; no new dependencies.
+- Match the style of the surrounding code. Standard library first.
+- New dependencies: only github.com/charmbracelet/bubbletea, github.com/charmbracelet/lipgloss
+  and github.com/charmbracelet/bubbles (for `mill tui`) and the modules they pull in. Add no
+  others.
 - Package layout: `cmd/mill` (entry), `internal/<pkg>`. CLI commands live in `internal/cli`.
 - Errors say what failed and what to do next. Never hide a failure (no ignored errors on
   state-changing calls, no `|| true`).

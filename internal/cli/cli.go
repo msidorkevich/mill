@@ -60,6 +60,7 @@ func init() {
 		{"keep", "keep branches mergeable: sync, rebase, fix, re-publish, combined check (--watch, --interval, --combined, --json)", runKeep},
 		{"clean", "remove worktrees and branches of landed tasks (--remote, --dry-run)", runClean},
 		{"watch", "show running agents, live spend and their latest action (--once, --interval)", runWatch},
+		{"tui", "interactive terminal UI", runTUI},
 		{"version", "print the mill version", runVersion},
 		{"help", "show this help", func(_ context.Context, env Env, _ []string) int {
 			usage(env.Stdout)
