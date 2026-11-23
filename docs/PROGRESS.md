@@ -593,7 +593,7 @@ flowchart TD
       published earlier looked like they had disappeared. Publish messages now come with direct
       compare links; the M6 `on_publish` hook (`gh pr create`) would remove the manual step.
 
-## M5. TUI and herdr: in progress (goal `g12`)
+## M5. TUI and herdr: done (goal `g12` landed 2026-11-23, plus fixes)
 
 Requirements: UI1–UI3, HO3–HO4. Exit criterion: the whole workflow works from the TUI, with and
 without herdr. Planned by mill's planner ($0.52), then edited before approval: a `go-upgrade`
@@ -609,21 +609,33 @@ and mine, updated in its own PRs).
   subprocesses for every action, so locking, recovery and logic stay in the CLI.
 - Views: goals with their graph, review queue, task detail (spec, verdict, gate, diff, log),
   agents. Keys per UI3; `s` (skip) deferred because mill has no skip operation.
-- herdr host: one pane per worker (`pane split --no-focus` + `pane run`), a wrapper records pid
-  and exit code to files, results are still read from files; `host.kind = auto` picks herdr only
-  inside herdr.
+- herdr host: a wrapper records pid and exit code to files, results are still read from
+  files; `host.kind = auto` picks herdr only inside herdr. Planned as one pane per worker split
+  next to the operator's pane; changed after real use to one unfocused tab per worker
+  (`herdr-robust`, see the follow-ups).
 - End-to-end tests are a separate task (applying the planner-parallelism follow-up).
 
-### Subtasks (goal `g12`)
+### Subtasks (goal `g12`: 8/8 landed, PRs #27–#34, #38, #39; about $9 of agent spend)
 
-- [ ] `go-upgrade`: Go 1.27.4, current dependencies
-- [ ] `herdr-host`: herdr host in internal/host
-- [ ] `herdr-wiring`: host selection, doctor, config comment
-- [ ] `tui-foundation`: dependencies, `mill tui`, polling, tabs, command runner
-- [ ] `tui-review-detail`: review queue, task detail, diff, log tail, `$EDITOR` changes
-- [ ] `tui-agents-open`: agents view, open worktree (herdr pane or shell)
-- [ ] `tui-herdr-e2e`: end-to-end tests across the TUI and the herdr host
-- [ ] `docs-tui-herdr`: README sections for the TUI and hosts
+- [x] `go-upgrade`: Go 1.27.4, current dependencies ($0.14). The upgrade worked in practice:
+      the next `make build` downloaded the toolchain by itself.
+- [x] `herdr-host`: herdr host in internal/host
+- [x] `herdr-wiring`: host selection, doctor, config comment
+- [x] `tui-foundation`: dependencies, `mill tui`, polling, tabs, command runner
+- [x] `tui-review-detail`: review queue, task detail, diff, log tail, `$EDITOR` changes
+- [x] `tui-agents-open`: agents view, open worktree (herdr pane or shell). It conflicted with
+      `tui-review-detail` in `internal/tui/model.go`; after the others landed, the keeper
+      restacked it and the **resolver agent's first real job** merged both sides ($0.07); gate
+      and verifier then passed.
+- [x] `tui-herdr-e2e`: end-to-end tests across the TUI and the herdr host
+- [x] `docs-tui-herdr`: README sections for the TUI and hosts
+
+### Exit criterion
+
+The whole workflow runs from the TUI with the exec host and with a fake herdr (end-to-end
+tests), and on the real herdr host: task `prepare-cleanup` ran with `host.kind = auto` inside
+herdr, each agent in its own tab (`mill prepare-cleanup a1 implementer`), the operator's tab
+kept focus, and the tabs closed when the workers ended.
 
 ### Process notes
 
@@ -664,12 +676,14 @@ and mine, updated in its own PRs).
       PR #36). `pane split` returns the pane as an object (`.result.pane.pane_id`); the host
       expected a string, because I described herdr's output from memory when planning M5 and
       the tests used that made-up shape. Tests now use a response captured from real herdr.
-- [ ] **A failed branch preparation leaves its branch and worktree behind.** The failed
+- [x] **A failed branch preparation leaves its branch and worktree behind** (task
+      `prepare-cleanup`, published; run on the real herdr host). The failed
       dependency merge above had already created both task branches; the next retry stopped at
       `branch … already exists in git but mill has no record of it`. I checked them (no work of
       their own, clean worktrees) and removed them by hand. Fix: remove what preparation created
       when it fails.
-- [ ] **herdr host robustness** (task `herdr-robust`, running). The operator closed two worker
+- [x] **herdr host robustness** (task `herdr-robust`, PR #41, $3.33 over 4 attempts: the
+      verifier found two real gaps, two reworks adapted it to M5 code that landed meanwhile). The operator closed two worker
       panes that mill had opened in their own tab without saying what they were. mill then
       waited forever for exit files that never came, and ignored Ctrl-C and SIGTERM (it had to
       be killed with SIGKILL; recovery then worked: tokens recorded, uncommitted work
@@ -677,7 +691,7 @@ and mine, updated in its own PRs).
       focused) that says closing it stops the task; a closed pane fails the attempt within ~2s;
       cancellation always returns. Also found: run inside herdr, `internal/cli`'s tests created
       and closed real herdr panes; tests must never reach the real herdr.
-- [ ] **`mill watch` says "nothing running" during gates** (task `watch-shows-gates`, queued).
+- [x] **`mill watch` says "nothing running" during gates** (task `watch-shows-gates`, PR #40).
       It lists only agent attempts, and the gate is not one; the TUI Agents view has the same
       gap. Fix: show every running stage with elapsed time and the gate log's last line.
 - [ ] **One scheduler for all goals** (operator decision 2026-11-23; planned as the next goal,
@@ -696,3 +710,19 @@ and mine, updated in its own PRs).
 
 Order after M5: `herdr-robust`, `watch-shows-gates`, one scheduler for all goals, fast gates
 (A, B, E).
+
+More follow-ups found while landing M5:
+
+- [ ] **"done" hides unmerged work.** A goal whose tasks are all published shows `done`, and I
+      reported M5 as landed while PR #39 was still open. `mill goal show` should say
+      `published, not merged` until every task has landed.
+- [ ] **Branches planned against an old base.** Tasks running in parallel with merges started
+      from a base without the latest docs, so one added a second README "Hosts" section. Seen
+      by hand, not by mill. When a task's owned files changed on the base branch since it
+      started, mill should rebase it before the gate (or at least warn in the review).
+- [ ] **Clashes between verified branches are found by hand.** `herdr-robust` and
+      `tui-herdr-e2e` each passed alone but together redeclared a test helper and disagreed on
+      herdr's protocol. The keeper's combined check would catch it, but only for published
+      branches; it should also run before publishing a batch.
+- [ ] **Locks block unrelated work** (publish, sync, single tasks): covered by the next goal,
+      one scheduler for all goals.
