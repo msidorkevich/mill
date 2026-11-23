@@ -215,17 +215,34 @@ func TestMissingDatabaseFails(t *testing.T) {
 	}
 }
 
-func TestHostAutoInsideHerdrWarns(t *testing.T) {
-	dir := gitRepo(t)
-	initRepo(t, dir, `check_cmd = "true"`)
-	tools := map[string]string{"git": "git version 2.50.1", "claude": "2.1.0", "herdr": "herdr 0.9.5"}
-	r := Run(context.Background(), fakeEnv{tools: tools, getenv: map[string]string{"HERDR_PANE_ID": "p1"}}.opts(dir))
-	if c := byName(r)["host"]; c.Status != Warn {
-		t.Fatalf("host = %+v, want warn", c)
+func TestHostCheckReportsEffectiveHost(t *testing.T) {
+	withHerdr := map[string]string{"git": "git version 2.50.1", "claude": "2.1.0", "herdr": "herdr 0.9.5"}
+	cases := []struct {
+		name   string
+		kind   string
+		tools  map[string]string
+		env    map[string]string
+		status Status
+		detail string
+	}{
+		{"exec", "exec", goodTools, nil, OK, "exec"},
+		{"exec inside herdr", "exec", withHerdr, map[string]string{"HERDR_ENV": "1"}, OK, "exec"},
+		{"auto outside herdr", "auto", withHerdr, nil, OK, "auto → exec"},
+		{"auto inside herdr without binary", "auto", goodTools, map[string]string{"HERDR_ENV": "1"}, OK, "auto → exec"},
+		{"auto inside herdr", "auto", withHerdr, map[string]string{"HERDR_ENV": "1"}, OK, "auto → herdr"},
+		{"herdr inside herdr", "herdr", withHerdr, map[string]string{"HERDR_ENV": "1"}, OK, "herdr"},
+		{"herdr outside herdr", "herdr", withHerdr, nil, Fail, "host.kind = herdr needs mill to run inside a herdr pane"},
 	}
-	r = Run(context.Background(), fakeEnv{tools: tools}.opts(dir))
-	if c := byName(r)["host"]; c.Status != OK {
-		t.Fatalf("outside herdr: host = %+v, want ok", c)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := gitRepo(t)
+			initRepo(t, dir, "check_cmd = \"true\"\n[host]\nkind = \""+c.kind+"\"\n")
+			r := Run(context.Background(), fakeEnv{tools: c.tools, getenv: c.env}.opts(dir))
+			got := byName(r)["host"]
+			if got.Status != c.status || !strings.Contains(got.Detail, c.detail) {
+				t.Fatalf("host = %+v, want %s containing %q", got, c.status, c.detail)
+			}
+		})
 	}
 }
 

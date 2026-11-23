@@ -164,7 +164,7 @@ func runPlanGoal(ctx context.Context, env Env, goal string) int {
 		return fail(err)
 	}
 	defer s.Close()
-	p, err := newPipeline(env, "plan", paths, cfg, s, env.Stdout)
+	p, err := newPipeline(env, "plan", paths, cfg, "", s, env.Stdout)
 	if err != nil {
 		return fail(err)
 	}

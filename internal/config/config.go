@@ -180,7 +180,7 @@ claude_bin = "claude"
 attempt_timeout = "30m"   # per agent run
 
 [host]
-kind = "auto"             # "auto" (herdr if available, else exec), "exec" or "herdr"
+kind = "auto"             # "auto": herdr inside a herdr pane (HERDR_ENV=1, herdr on PATH), else exec; "exec": plain processes; "herdr": always herdr, fails outside a herdr pane
 
 [sizes.S]
 model = "sonnet"
