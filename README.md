@@ -4,7 +4,7 @@ A deterministic harness that turns a goal into a graph of tasks, runs a coding a
 task in isolation, checks the result with your project's gate and an independent verifier, and
 delivers each task as its own branch for you to review and merge in your forge.
 
-Status: **M1 (single-task pipeline)**. See [docs/PROGRESS.md](docs/PROGRESS.md).
+Status: **M5 (TUI and herdr host)**: the single-task pipeline, goals, review, publishing, `mill keep`, `mill tui` and the herdr host. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 - Requirements: [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)
 - Milestones: [docs/MILESTONES.md](docs/MILESTONES.md)
@@ -370,3 +370,63 @@ Flags:
 merging stays with you and your forge.
 
 Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.
+
+### TUI
+
+```
+mill tui
+```
+
+`mill tui` is a terminal UI for the whole workflow. It has four tabs, switched with `tab` and
+`shift+tab`:
+
+- **Goals**: goals with their task graph; plan, approve, run and keep from here.
+- **Review**: the review queue (verified and published tasks).
+- **Task detail**: spec, verdict, gate results, diff and log tail of the selected task.
+- **Agents**: the agent processes that are running now.
+
+| Key | Action |
+| --- | --- |
+| `a` | approve the selected task (`mill review approve`) |
+| `c` | request changes: opens `$EDITOR` for the text (`mill review changes`) |
+| `x` | reject, with a reason (`mill review reject -m`) |
+| `r` | retry the selected task |
+| `l` | show the task's log |
+| `p` | pause: interrupt the latest `mill run` or `mill keep` started from the TUI |
+| `o` | open the task's worktree |
+| `n` | plan a new goal (Goals) |
+| `R` | run the selected goal (Goals) |
+| `k` | keep the goal mergeable (`mill keep --watch`); press again to stop (Goals) |
+| `tab` / `shift+tab`, `↑` / `↓`, `enter`, `esc` | switch tabs, move the selection, open or confirm, cancel |
+| `q` | quit |
+| `?` | toggle the key help |
+
+`A` approves the selected plan on the Goals tab. `s` (skip) is **not available**: mill has no
+skip operation, so the key does nothing useful and the help says so.
+
+The TUI is a thin client. It never changes state itself: every action runs the matching `mill`
+command as a subprocess (its output appears in the panel at the bottom), so locking and
+recovery behave exactly as on the command line. It polls the store every second to refresh
+what it shows.
+
+### Hosts
+
+A host starts the agent processes. `host.kind` in the config chooses it:
+
+- `auto` (default in a new config): herdr when mill runs inside a herdr pane (`HERDR_ENV=1`)
+  and `herdr` is on `PATH`; otherwise exec.
+- `exec`: plain child processes. This is the default behaviour everywhere, and everything
+  works without herdr.
+- `herdr`: always herdr. Outside herdr (no `HERDR_ENV=1`, or no `herdr` on `PATH`) this is an
+  error that names the fix: set `host.kind = "auto"` or `"exec"`.
+
+```
+mill task run <id> --host exec          # override host.kind for one command
+mill run <goal> --host herdr
+```
+
+`--host auto|exec|herdr` is accepted by `mill task run` and `mill run`. With the herdr host
+each worker gets its own pane, so you can watch agents work; mill still reads results from
+files, never from the pane. `mill doctor` reports a `host` line with the choice
+(`auto → exec`, `auto → herdr`, `exec`, `herdr`) or the error when `host.kind = herdr` cannot
+be satisfied.
