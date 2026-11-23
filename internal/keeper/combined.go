@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/gate"
@@ -26,6 +27,7 @@ type CombinedResult struct {
 	Partner  string   `json:"partner,omitempty"` // empty when the culprit is red with the base alone
 	Failed   string   `json:"failed,omitempty"`  // what failed for the culprit (and its partner)
 	Probes   int      `json:"probes"`            // gate runs on merged states
+	Cached   bool     `json:"cached"`            // nothing changed since the last check; this is its result
 }
 
 // readyBranch is a verified or published task whose gate ran at its head.
@@ -74,6 +76,38 @@ func Combined(ctx context.Context, o Options) (res CombinedResult, err error) {
 	if err != nil {
 		return res, fmt.Errorf("combined check: remote %s has no branch %s: %w", o.Cfg.Remote, o.Cfg.BaseBranch, err)
 	}
+	fp := fingerprint(base, ready)
+	if !o.Force {
+		cached, ok, err := cachedCombined(ctx, o, fp)
+		if err != nil {
+			return res, err
+		}
+		if ok {
+			cached.Branches = res.Branches
+			verdict := "green"
+			if !cached.Passed {
+				verdict = "red: " + cached.Culprit + "/" + cached.Partner
+			}
+			if o.Out != nil {
+				fmt.Fprintf(o.Out, "combined check: unchanged since the last check (%s)\n", verdict)
+			}
+			return cached, nil
+		}
+	}
+	defer func() {
+		if err != nil {
+			return
+		}
+		result := "green"
+		if !res.Passed {
+			result = "red"
+		}
+		if _, aerr := o.Store.AppendEvent(ctx, "combined-checked", "", "", map[string]any{
+			"fingerprint": fp, "base": base, "branches": res.Branches, "result": result,
+			"culprit": res.Culprit, "partner": res.Partner, "failed": res.Failed}); aerr != nil {
+			err = fmt.Errorf("record the combined check result: %w", aerr)
+		}
+	}()
 	home := ""
 	if o.Pipeline != nil {
 		home = o.Pipeline.Home
@@ -172,6 +206,39 @@ func Combined(ctx context.Context, o Options) (res CombinedResult, err error) {
 		strings.Join(earlier, ", "), failures[hi].failed)
 	c.logf("combined check: %s is %s", culprit.task.ID, res.Failed)
 	return res, nil
+}
+
+// fingerprint identifies what a combined check covers: the base tip and the ready branch heads.
+func fingerprint(base string, ready []readyBranch) string {
+	parts := make([]string, 0, len(ready))
+	for _, r := range ready {
+		parts = append(parts, r.task.ID+"@"+r.br.HeadSHA)
+	}
+	sort.Strings(parts)
+	return base + " " + strings.Join(parts, " ")
+}
+
+// cachedCombined returns the result of the latest combined check when it covered fp.
+func cachedCombined(ctx context.Context, o Options, fp string) (CombinedResult, bool, error) {
+	ev, ok, err := o.Store.LatestEvent(ctx, "combined-checked")
+	if err != nil || !ok {
+		return CombinedResult{}, false, err
+	}
+	var d struct {
+		Fingerprint string `json:"fingerprint"`
+		Result      string `json:"result"`
+		Culprit     string `json:"culprit"`
+		Partner     string `json:"partner"`
+		Failed      string `json:"failed"`
+	}
+	if err := json.Unmarshal(ev.Data, &d); err != nil {
+		return CombinedResult{}, false, fmt.Errorf("combined-checked event %d is unreadable: %w", ev.Seq, err)
+	}
+	if d.Fingerprint != fp {
+		return CombinedResult{}, false, nil
+	}
+	return CombinedResult{Ran: true, Passed: d.Result == "green", Culprit: d.Culprit, Partner: d.Partner,
+		Failed: d.Failed, Cached: true}, true, nil
 }
 
 func (c *combined) logf(format string, a ...any) {

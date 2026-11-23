@@ -46,6 +46,7 @@ type Options struct {
 	Pipeline *pipeline.Pipeline
 	Goal     string    // only this goal's tasks; empty means every goal
 	Out      io.Writer // one progress line per action; nil discards
+	Force    bool      // run the combined check even when nothing changed since the last one
 }
 
 // Rebased is a task whose own commits were replayed onto its moved base.

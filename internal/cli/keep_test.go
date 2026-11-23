@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -186,5 +187,71 @@ func TestHelpListsKeep(t *testing.T) {
 	r := run(t, t.TempDir(), nil, "help")
 	if !strings.Contains(r.stdout, "keep ") {
 		t.Errorf("help lacks keep:\n%s", r.stdout)
+	}
+}
+
+func TestKeepReusesCombinedResultUnlessCombinedFlagForcesIt(t *testing.T) {
+	counter := filepath.Join(t.TempDir(), "gate-runs")
+	root := keepRepo(t, "echo x >> "+counter)
+	gateRuns := func() int {
+		b, err := os.ReadFile(counter)
+		if os.IsNotExist(err) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(b), "x\n")
+	}
+	type doc struct {
+		Combined struct {
+			Ran    bool `json:"ran"`
+			Passed bool `json:"passed"`
+			Cached bool `json:"cached"`
+		} `json:"combined"`
+	}
+	keepJSON := func(args ...string) doc {
+		t.Helper()
+		r := run(t, root, nil, append([]string{"keep", "--json"}, args...)...)
+		if r.code != ExitOK {
+			t.Fatalf("keep %v: %+v", args, r)
+		}
+		var d doc
+		if err := json.Unmarshal([]byte(r.stdout), &d); err != nil {
+			t.Fatalf("stdout is not JSON: %v\n%s", err, r.stdout)
+		}
+		return d
+	}
+
+	before := gateRuns()
+	if d := keepJSON(); !d.Combined.Ran || !d.Combined.Passed || d.Combined.Cached {
+		t.Fatalf("first keep = %+v", d)
+	}
+	first := gateRuns()
+	if first == before {
+		t.Fatal("first keep did not run the gate")
+	}
+
+	d := keepJSON()
+	if !d.Combined.Passed || !d.Combined.Cached {
+		t.Errorf("second keep = %+v, want cached green", d)
+	}
+	if n := gateRuns(); n != first {
+		t.Errorf("second keep ran the gate (%d -> %d runs)", first, n)
+	}
+	r := run(t, root, nil, "keep")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "cached") {
+		t.Errorf("summary lacks cached note: %+v", r)
+	}
+	if n := gateRuns(); n != first {
+		t.Errorf("plain keep ran the gate (%d -> %d runs)", first, n)
+	}
+
+	d = keepJSON("--combined")
+	if !d.Combined.Ran || d.Combined.Cached {
+		t.Errorf("keep --combined = %+v, want a fresh run", d)
+	}
+	if n := gateRuns(); n <= first {
+		t.Errorf("keep --combined did not run the gate (%d runs)", n)
 	}
 }

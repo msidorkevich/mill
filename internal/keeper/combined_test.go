@@ -343,3 +343,179 @@ func TestCombinedRemovesWorktreeOnCancellation(t *testing.T) {
 	}
 	e.assertNoThrowaway(t)
 }
+
+// countingGate returns a check command that appends a line to a counter file per gate run, and
+// a function reading how many runs happened.
+func countingGate(t *testing.T, tail string) (string, func() int) {
+	t.Helper()
+	counter := filepath.Join(t.TempDir(), "runs")
+	return "echo run >> " + counter + "; " + tail, func() int {
+		b, err := os.ReadFile(counter)
+		if errors.Is(err, os.ErrNotExist) {
+			return 0
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Count(string(b), "\n")
+	}
+}
+
+func TestCombinedSkipsGateWhenNothingChanged(t *testing.T) {
+	cmd, runs := countingGate(t, "true")
+	e := combinedSetup(t, cmd, []string{"a", "b"}, nil)
+	ctx := context.Background()
+	first, err := Combined(ctx, e.o)
+	if err != nil || !first.Passed || first.Cached {
+		t.Fatalf("first = %+v, err %v", first, err)
+	}
+	after := runs()
+	e.out.Reset()
+	second, err := Combined(ctx, e.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Ran || !second.Passed || !second.Cached || second.Probes != 0 || runs() != after {
+		t.Fatalf("second = %+v, gate runs %d -> %d", second, after, runs())
+	}
+	if !strings.Contains(e.out.String(), "combined check: unchanged since the last check (green)") {
+		t.Fatalf("log:\n%s", e.out)
+	}
+	if strings.Join(second.Branches, " ") != strings.Join(e.ids, " ") {
+		t.Fatalf("branches = %v", second.Branches)
+	}
+	e.assertNoThrowaway(t)
+}
+
+func TestCombinedRecordsCheckedEvent(t *testing.T) {
+	e := combinedSetup(t, "true", []string{"a", "b"}, nil)
+	ctx := context.Background()
+	if _, err := Combined(ctx, e.o); err != nil {
+		t.Fatal(err)
+	}
+	ev, ok, err := e.o.Store.LatestEvent(ctx, "combined-checked")
+	if err != nil || !ok {
+		t.Fatalf("latest = %v, %v", ok, err)
+	}
+	var d struct {
+		Fingerprint string   `json:"fingerprint"`
+		Branches    []string `json:"branches"`
+		Result      string   `json:"result"`
+	}
+	if err := json.Unmarshal(ev.Data, &d); err != nil {
+		t.Fatal(err)
+	}
+	if d.Fingerprint == "" || d.Result != "green" || len(d.Branches) != 2 || ev.TaskID != "" {
+		t.Fatalf("event = %+v task %q", d, ev.TaskID)
+	}
+	if _, ok, err := e.o.Store.LatestEvent(ctx, "no-such-kind"); ok || err != nil {
+		t.Fatalf("missing kind: %v, %v", ok, err)
+	}
+}
+
+func TestCombinedRunsAgainWhenReadySetOrBaseChanges(t *testing.T) {
+	cmd, runs := countingGate(t, "true")
+	e := combinedSetup(t, cmd, []string{"a", "b", "c"}, nil)
+	ctx := context.Background()
+	step := func(name string, wantRun bool) {
+		t.Helper()
+		before := runs()
+		res, err := Combined(ctx, e.o)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if wantRun != (runs() > before) || res.Cached == wantRun {
+			t.Fatalf("%s: result %+v, gate runs %d -> %d, want run=%v", name, res, before, runs(), wantRun)
+		}
+	}
+	step("first", true)
+	step("unchanged", false)
+
+	// A new commit on a ready branch.
+	br, err := e.o.Store.GetBranch(ctx, e.ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := br
+	br.HeadSHA = writeCommit(t, br.Worktree, "more.txt", "y\n", "more")
+	br.GateSHA = br.HeadSHA
+	if err := e.o.Store.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+	step("new head", true)
+	step("unchanged again", false)
+
+	// A branch leaves the ready set.
+	left, err := e.o.Store.GetBranch(ctx, e.ids[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	left.GateSHA = "stale"
+	if err := e.o.Store.SaveBranch(ctx, left); err != nil {
+		t.Fatal(err)
+	}
+	step("branch left", true)
+
+	// It joins again.
+	left.GateSHA = left.HeadSHA
+	if err := e.o.Store.SaveBranch(ctx, left); err != nil {
+		t.Fatal(err)
+	}
+	step("branch joined", true)
+	step("unchanged third", false)
+
+	// A new base tip.
+	writeCommit(t, e.root, "base2.txt", "z\n", "move base")
+	git(t, e.root, "push", "-q", "origin", "main")
+	git(t, e.root, "fetch", "-q", "origin")
+	step("new base", true)
+	_ = orig
+}
+
+func TestCombinedCachedRedKeepsCulpritPartnerAndFlags(t *testing.T) {
+	cmd, runs := countingGate(t, "! { test -f a.txt && test -f b.txt; }")
+	e := combinedSetup(t, cmd, []string{"a", "b"}, nil)
+	ctx := context.Background()
+	if _, err := Combined(ctx, e.o); err != nil {
+		t.Fatal(err)
+	}
+	after := runs()
+	res, err := Combined(ctx, e.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := e.ids[0], e.ids[1]
+	if !res.Cached || res.Passed || res.Culprit != b || res.Partner != a || res.Failed == "" || runs() != after {
+		t.Fatalf("cached = %+v, gate runs %d -> %d", res, after, runs())
+	}
+	if !strings.Contains(e.out.String(), "unchanged since the last check (red: "+b+"/"+a+")") {
+		t.Fatalf("log:\n%s", e.out)
+	}
+	for _, id := range e.ids {
+		task, err := e.o.Store.GetTask(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(task.Reason, "combined check") {
+			t.Fatalf("%s lost its combined-check reason: %q", id, task.Reason)
+		}
+	}
+}
+
+func TestCombinedForceRunsDespiteUnchangedFingerprint(t *testing.T) {
+	cmd, runs := countingGate(t, "true")
+	e := combinedSetup(t, cmd, []string{"a", "b"}, nil)
+	ctx := context.Background()
+	if _, err := Combined(ctx, e.o); err != nil {
+		t.Fatal(err)
+	}
+	after := runs()
+	e.o.Force = true
+	res, err := Combined(ctx, e.o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cached || !res.Passed || runs() <= after {
+		t.Fatalf("forced = %+v, gate runs %d -> %d", res, after, runs())
+	}
+}
