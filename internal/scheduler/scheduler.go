@@ -1,4 +1,5 @@
-// Package scheduler runs an approved goal's tasks in dependency order, several at a time.
+// Package scheduler runs approved goals' tasks and single tasks in dependency order, several at
+// a time.
 package scheduler
 
 import (
@@ -6,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -30,10 +32,12 @@ const (
 	LimitUnknownWait = 15 * time.Minute
 )
 
-// Scheduler runs the tasks of one goal.
+// Scheduler runs the tasks of goals and single tasks.
 type Scheduler struct {
 	Store       *store.Store
 	MaxParallel int
+	// Claimer claims each task before it starts; defaults to store.NewClaimer("run").
+	Claimer store.Claimer
 	// RunTask runs one task to its end and writes its status to the store.
 	RunTask func(ctx context.Context, taskID string) (pipeline.Outcome, error)
 	// Out receives progress lines; nil discards. Each line is written whole under a lock.
@@ -110,118 +114,462 @@ type limitHit struct {
 	resetsAt time.Time // zero when no task knew it
 }
 
+// DefaultPollInterval is how often Run reads the store for new work when RunOptions does
+// not set it.
+const DefaultPollInterval = 2 * time.Second
+
+// RunOptions select the work Run does.
+type RunOptions struct {
+	Options
+	// Goal, when set, runs only this goal's tasks.
+	Goal string
+	// Task, when set, runs only this one task.
+	Task string
+	// PollInterval is how often the store is read for new work (a goal approved or a task
+	// added mid-run, a claim released); defaults to DefaultPollInterval. Waited through Sleep.
+	PollInterval time.Duration
+}
+
+// TaskResult is how a single task (one without a goal) ended.
+type TaskResult struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// RunResult is how each goal Run worked on ended, in the order Run took them up, and the
+// final status of each single task it ran.
+type RunResult struct {
+	Goals []Result     `json:"goals"`
+	Tasks []TaskResult `json:"tasks"`
+}
+
 // RunGoal runs the goal's tasks until every task is verified (the goal becomes done) or
 // nothing more can start (the goal becomes blocked). Cancelling ctx stops new starts, waits
 // for running tasks and leaves the goal blocked so a later run continues it. A returned
 // error means mill itself failed; running tasks have finished by then.
 func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Result, error) {
+	rr, err := s.Run(ctx, RunOptions{Options: o, Goal: goalID})
+	if err != nil {
+		return Result{}, err
+	}
+	for _, r := range rr.Goals {
+		if r.GoalID == goalID {
+			return r, nil
+		}
+	}
+	return Result{}, fmt.Errorf("goal %s: the run ended without a result for it; run `mill run %s` again", goalID, goalID)
+}
+
+// runState is one Run's bookkeeping.
+type runState struct {
+	o       RunOptions
+	claimer store.Claimer
+	running map[string]store.Task
+	started map[string]bool // tasks started in this run; none starts twice
+	done    chan finished
+	limit   limitHit // the usage limit is account-wide: once hit, nothing new starts
+	// goals this run works on and has not ended yet, and the order goals were taken up.
+	open    map[string]bool
+	order   []string
+	results map[string]Result
+	marked  map[string]bool // goals set running by this run since they were last ended
+	singles []string        // single tasks started, in start order
+	busy    map[string]bool // busy tasks already logged
+}
+
+func (st *runState) take(goalID string) {
+	if _, seen := st.results[goalID]; !seen && !st.open[goalID] {
+		st.order = append(st.order, goalID)
+	}
+	st.open[goalID] = true
+}
+
+func (st *runState) selected(t store.Task) bool {
+	return (st.o.Goal == "" || t.GoalID == st.o.Goal) && (st.o.Task == "" || t.ID == st.o.Task)
+}
+
+// Run runs pending tasks of every approved, running or blocked goal (and of done goals with
+// an unfinished task) and pending single tasks, narrowed by o.Goal and o.Task, with
+// max_parallel, owns overlap and dependencies applied across all of them. It reads the store
+// again every poll interval while it runs, so work added mid-run is started. Each goal ends
+// done or blocked as soon as it has nothing running and nothing more it can start. Run returns
+// when nothing is running and nothing more can start, or after ctx is cancelled and running
+// tasks have finished (the goals it was working on then end blocked as interrupted). A returned
+// error means mill itself failed; running tasks have finished by then.
+func (s *Scheduler) Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if s.MaxParallel < 1 {
-		return Result{}, fmt.Errorf("max_parallel must be >= 1, got %d", s.MaxParallel)
+		return RunResult{}, fmt.Errorf("max_parallel must be >= 1, got %d", s.MaxParallel)
+	}
+	if o.PollInterval <= 0 {
+		o.PollInterval = DefaultPollInterval
 	}
 	// Store writes must land even after ctx is cancelled.
 	bg := context.WithoutCancel(ctx)
-	g, err := s.Store.GetGoal(bg, goalID)
+	st := &runState{o: o, claimer: s.Claimer, running: map[string]store.Task{}, started: map[string]bool{},
+		done: make(chan finished), open: map[string]bool{}, results: map[string]Result{},
+		marked: map[string]bool{}, busy: map[string]bool{}}
+	if st.claimer.Owner == "" {
+		st.claimer = store.NewClaimer("run")
+	}
+	if o.Goal != "" {
+		if err := s.checkGoal(bg, o.Goal); err != nil {
+			return RunResult{}, err
+		}
+		st.take(o.Goal)
+	}
+	if o.Task != "" {
+		if _, err := s.Store.GetTask(bg, o.Task); err != nil {
+			return RunResult{}, fmt.Errorf("task %s: %w; list tasks with `mill status`", o.Task, err)
+		}
+	}
+	if o.RetryBlocked {
+		var goals []string
+		switch {
+		case o.Goal != "":
+			goals = []string{o.Goal}
+		case o.Task == "":
+			sch, err := s.Store.ScheduleCandidates(bg)
+			if err != nil {
+				return RunResult{}, err
+			}
+			for _, g := range sch.Goals {
+				goals = append(goals, g.ID)
+			}
+		}
+		for _, g := range goals {
+			ids, err := s.Store.ResetGoalTasks(bg, g, []string{store.TaskBlocked, store.TaskFailed}, "", ReasonRetry)
+			if err != nil {
+				return RunResult{}, err
+			}
+			for _, id := range ids {
+				s.logf("%s: back to pending (%s)", id, ReasonRetry)
+			}
+			if len(ids) > 0 {
+				st.take(g)
+			}
+		}
+	}
+
+	var loopErr error
+	for {
+		waiting := false
+		if loopErr == nil && ctx.Err() == nil && len(st.limit.ids) == 0 {
+			w, err := s.poll(ctx, bg, st)
+			waiting = w
+			if err != nil {
+				loopErr = err
+			} else if err := s.endIdleGoals(ctx, bg, st, w); err != nil {
+				loopErr = err
+			}
+		}
+		if len(st.running) == 0 {
+			if len(st.limit.ids) > 0 {
+				if !o.WaitOnLimit || loopErr != nil || ctx.Err() != nil {
+					break
+				}
+				now := s.now()
+				resume := now.Add(LimitUnknownWait)
+				if !st.limit.resetsAt.IsZero() {
+					resume = st.limit.resetsAt.Add(LimitResetSlack)
+				}
+				prefix := ""
+				if o.Goal != "" {
+					prefix = "goal " + o.Goal + ": "
+				}
+				s.logf("%susage limit reached; waiting until %s to resume (Ctrl-C stops)", prefix, pipeline.FormatResetTime(resume, now))
+				if err := s.sleep(ctx, resume.Sub(now)); err != nil {
+					break
+				}
+				for _, id := range st.limit.ids {
+					if err := s.Store.SetTaskStatus(bg, id, store.TaskPending, "", ReasonLimitReset); err != nil {
+						loopErr = err
+						break
+					}
+					delete(st.started, id)
+					s.logf("%s: back to pending (%s)", id, ReasonLimitReset)
+				}
+				st.limit = limitHit{}
+				continue
+			}
+			if loopErr != nil || ctx.Err() != nil || !waiting {
+				break
+			}
+			// Tasks wait on a claim held by another command: look again after the interval.
+			if err := s.sleep(ctx, o.PollInterval); err != nil {
+				break
+			}
+			continue
+		}
+		var f finished
+		if loopErr == nil && ctx.Err() == nil && len(st.limit.ids) == 0 && len(st.running) < s.MaxParallel {
+			// There is room: new work found by the next poll could start before a task ends.
+			var ok bool
+			if f, ok = s.waitOrPoll(ctx, st.done, o.PollInterval); !ok {
+				continue
+			}
+		} else {
+			f = <-st.done
+		}
+		if err := s.finish(bg, st, f); err != nil {
+			loopErr = errors.Join(loopErr, err)
+		}
+	}
+	if loopErr != nil {
+		return RunResult{}, loopErr
+	}
+
+	for _, g := range st.order {
+		if st.open[g] {
+			if err := s.endGoal(ctx, bg, st, g); err != nil {
+				return RunResult{}, err
+			}
+		}
+	}
+	var out RunResult
+	for _, g := range st.order {
+		out.Goals = append(out.Goals, st.results[g])
+	}
+	for _, id := range st.singles {
+		if ctx.Err() != nil {
+			t, err := s.Store.GetTask(bg, id)
+			if err != nil {
+				return RunResult{}, err
+			}
+			// Interrupted and rate-limited single tasks continue with the next run, like goal tasks.
+			if t.Status == store.TaskBlocked && (t.Reason == ReasonInterrupted || slices.Contains(st.limit.ids, id)) {
+				if err := s.Store.SetTaskStatus(bg, id, store.TaskPending, "", ReasonInterrupted); err != nil {
+					return RunResult{}, err
+				}
+			}
+		}
+		t, err := s.Store.GetTask(bg, id)
+		if err != nil {
+			return RunResult{}, err
+		}
+		out.Tasks = append(out.Tasks, TaskResult{TaskID: id, Status: t.Status, Reason: t.Reason})
+	}
+	return out, nil
+}
+
+// checkGoal refuses a goal that cannot run: a draft, a done goal with every task finished,
+// or an unknown status.
+func (s *Scheduler) checkGoal(ctx context.Context, goalID string) error {
+	g, err := s.Store.GetGoal(ctx, goalID)
 	if err != nil {
-		return Result{}, err
+		return err
 	}
 	switch g.Status {
 	case store.GoalApproved, store.GoalRunning, store.GoalBlocked:
 	case store.GoalDraft:
-		return Result{}, fmt.Errorf("goal %s is a draft: review it with `mill plan show %s` and approve it with `mill plan approve %s` first", goalID, goalID, goalID)
+		return fmt.Errorf("goal %s is a draft: review it with `mill plan show %s` and approve it with `mill plan approve %s` first", goalID, goalID, goalID)
 	case store.GoalDone:
 		// Safety net: a done goal with an unfinished task (sent back for changes) runs as approved.
-		tasks, err := s.Store.GoalTasks(bg, goalID)
+		tasks, err := s.Store.GoalTasks(ctx, goalID)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
-		unfinished := false
 		for _, t := range tasks {
 			if !store.Done(t.Status) {
-				unfinished = true
-				break
+				return nil
 			}
 		}
-		if !unfinished {
-			return Result{}, fmt.Errorf("goal %s is already done: all its tasks are verified", goalID)
-		}
+		return fmt.Errorf("goal %s is already done: all its tasks are verified", goalID)
 	default:
-		return Result{}, fmt.Errorf("goal %s has unknown status %q", goalID, g.Status)
+		return fmt.Errorf("goal %s has unknown status %q", goalID, g.Status)
 	}
+	return nil
+}
 
-	if o.RetryBlocked {
-		ids, err := s.Store.ResetGoalTasks(bg, goalID, []string{store.TaskBlocked, store.TaskFailed}, "", ReasonRetry)
-		if err != nil {
-			return Result{}, err
-		}
-		for _, id := range ids {
-			s.logf("%s: back to pending (%s)", id, ReasonRetry)
-		}
+// waitOrPoll waits for a task to finish or for the poll interval, whichever comes first. ok
+// is false when the interval passed (or ctx ended) first.
+func (s *Scheduler) waitOrPoll(ctx context.Context, done <-chan finished, d time.Duration) (finished, bool) {
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tick := make(chan struct{})
+	go func() {
+		s.sleep(sctx, d) // an error means ctx ended; either way the loop looks again
+		close(tick)
+	}()
+	select {
+	case f := <-done:
+		cancel()
+		<-tick // Sleep is never called twice at once
+		return f, true
+	case <-tick:
+		return finished{}, false
 	}
-	if err := s.Store.SetGoalStatus(bg, goalID, store.GoalRunning, ""); err != nil {
-		return Result{}, err
-	}
+}
 
-	running := map[string]store.Task{}
-	started := map[string]bool{} // tasks started in this call; none starts twice
-	done := make(chan finished)
-	var loopErr error
-	var limit limitHit // the usage limit is account-wide: once hit, nothing new starts
-	for {
-		if loopErr == nil && ctx.Err() == nil && len(limit.ids) == 0 {
-			if err := s.startReady(ctx, bg, goalID, running, started, done); err != nil {
-				loopErr = err
-			}
+// finish records a task that ended and releases its claim.
+func (s *Scheduler) finish(bg context.Context, st *runState, f finished) error {
+	delete(st.running, f.id)
+	err := s.Store.ReleaseClaims(bg, st.claimer, []string{f.id})
+	if f.err != nil {
+		s.logf("%s: mill error: %v", f.id, f.err)
+	}
+	if f.out.RateLimited {
+		st.limit.ids = append(st.limit.ids, f.id)
+		if f.out.ResetsAt.After(st.limit.resetsAt) {
+			st.limit.resetsAt = f.out.ResetsAt
 		}
-		if len(running) == 0 {
-			if len(limit.ids) == 0 || !o.WaitOnLimit || loopErr != nil || ctx.Err() != nil {
-				break
-			}
-			now := s.now()
-			resume := now.Add(LimitUnknownWait)
-			if !limit.resetsAt.IsZero() {
-				resume = limit.resetsAt.Add(LimitResetSlack)
-			}
-			s.logf("goal %s: usage limit reached; waiting until %s to resume (Ctrl-C stops)", goalID, pipeline.FormatResetTime(resume, now))
-			if err := s.sleep(ctx, resume.Sub(now)); err != nil {
-				break
-			}
-			for _, id := range limit.ids {
-				if err := s.Store.SetTaskStatus(bg, id, store.TaskPending, "", ReasonLimitReset); err != nil {
-					loopErr = err
-					break
-				}
-				delete(started, id)
-				s.logf("%s: back to pending (%s)", id, ReasonLimitReset)
-			}
-			limit = limitHit{}
+	}
+	if t, terr := s.Store.GetTask(bg, f.id); terr != nil {
+		err = errors.Join(err, terr)
+	} else if t.Reason != "" {
+		s.logf("%s: %s: %s", t.ID, t.Status, t.Reason)
+	} else {
+		s.logf("%s: %s", t.ID, t.Status)
+	}
+	return err
+}
+
+// poll reads the store and starts ready tasks in order while there is room. waiting reports
+// whether a ready task could not start yet: no room, its owns overlap a running task, or it is
+// busy elsewhere.
+func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, err error) {
+	sch, err := s.Store.ScheduleCandidates(bg)
+	if err != nil {
+		return false, err
+	}
+	status := map[string]string{}
+	for _, t := range sch.Tasks {
+		status[t.ID] = t.Status
+	}
+	goalStatus := map[string]string{}
+	for _, g := range sch.Goals {
+		goalStatus[g.ID] = g.Status
+	}
+	for _, t := range sch.Tasks {
+		if !st.selected(t) || t.Status != store.TaskPending {
 			continue
 		}
-		f := <-done
-		delete(running, f.id)
-		if f.err != nil {
-			s.logf("%s: mill error: %v", f.id, f.err)
+		if _, ok := st.running[t.ID]; ok || st.started[t.ID] {
+			continue
 		}
-		if f.out.RateLimited {
-			limit.ids = append(limit.ids, f.id)
-			if f.out.ResetsAt.After(limit.resetsAt) {
-				limit.resetsAt = f.out.ResetsAt
+		ready := true
+		for _, d := range sch.Deps[t.ID] {
+			ds, ok := status[d]
+			if !ok {
+				dt, err := s.Store.GetTask(bg, d)
+				if err != nil {
+					return false, err
+				}
+				ds = dt.Status
+				status[d] = ds
+			}
+			if !store.Done(ds) {
+				ready = false
 			}
 		}
-		if t, err := s.Store.GetTask(bg, f.id); err != nil {
-			loopErr = errors.Join(loopErr, err)
-		} else if t.Reason != "" {
-			s.logf("%s: %s: %s", t.ID, t.Status, t.Reason)
-		} else {
-			s.logf("%s: %s", t.ID, t.Status)
+		if !ready {
+			continue
+		}
+		if len(st.running) >= s.MaxParallel || overlapsRunning(t, st.running) {
+			waiting = true
+			continue
+		}
+		if err := s.Store.ClaimTasks(bg, st.claimer, []string{t.ID}); err != nil {
+			var busy *store.BusyError
+			if !errors.As(err, &busy) {
+				return waiting, err
+			}
+			waiting = true
+			if !st.busy[t.ID] {
+				st.busy[t.ID] = true
+				s.logf("%s: busy (%s); starting it when it is free", t.ID, busy.Doing)
+			}
+			continue
+		}
+		delete(st.busy, t.ID)
+		if t.GoalID != "" {
+			st.take(t.GoalID)
+			if !st.marked[t.GoalID] {
+				if goalStatus[t.GoalID] != store.GoalRunning {
+					if err := s.Store.SetGoalStatus(bg, t.GoalID, store.GoalRunning, ""); err != nil {
+						return waiting, errors.Join(err, s.Store.ReleaseClaims(bg, st.claimer, []string{t.ID}))
+					}
+				}
+				st.marked[t.GoalID] = true
+			}
+		} else if !slices.Contains(st.singles, t.ID) {
+			st.singles = append(st.singles, t.ID)
+		}
+		st.running[t.ID] = t
+		st.started[t.ID] = true
+		s.logf("%s: started", t.ID)
+		go func(id string) {
+			out, err := s.RunTask(ctx, id)
+			st.done <- finished{id, out, err}
+		}(t.ID)
+	}
+	return waiting, nil
+}
+
+// endIdleGoals ends each open goal that has nothing running and nothing more it can start.
+// waiting is poll's report; a goal with a task waiting to start stays open.
+func (s *Scheduler) endIdleGoals(ctx, bg context.Context, st *runState, waiting bool) error {
+	busyGoal := map[string]bool{}
+	for _, t := range st.running {
+		busyGoal[t.GoalID] = true
+	}
+	for _, g := range st.order {
+		if !st.open[g] || busyGoal[g] {
+			continue
+		}
+		if waiting {
+			// A ready task that did not start keeps its goal open.
+			idle, err := s.goalIdle(bg, st, g)
+			if err != nil {
+				return err
+			}
+			if !idle {
+				continue
+			}
+		}
+		if err := s.endGoal(ctx, bg, st, g); err != nil {
+			return err
 		}
 	}
-	if loopErr != nil {
-		return Result{}, loopErr
-	}
+	return nil
+}
 
+// goalIdle reports whether no selected task of the goal is ready to start.
+func (s *Scheduler) goalIdle(bg context.Context, st *runState, goalID string) (bool, error) {
 	tasks, err := s.Store.GoalTasks(bg, goalID)
 	if err != nil {
-		return Result{}, err
+		return false, err
+	}
+	status := map[string]string{}
+	for _, t := range tasks {
+		status[t.ID] = t.Status
+	}
+	for _, t := range tasks {
+		if !st.selected(t) || t.Status != store.TaskPending || st.started[t.ID] {
+			continue
+		}
+		deps, err := s.Store.TaskDeps(bg, t.ID)
+		if err != nil {
+			return false, err
+		}
+		ready := true
+		for _, d := range deps {
+			if !store.Done(status[d]) {
+				ready = false
+			}
+		}
+		if ready {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// endGoal sets an open goal done or blocked with the reason RunGoal has always given.
+func (s *Scheduler) endGoal(ctx, bg context.Context, st *runState, goalID string) error {
+	tasks, err := s.Store.GoalTasks(bg, goalID)
+	if err != nil {
+		return err
 	}
 	res := Result{GoalID: goalID}
 	allDone := true
@@ -235,76 +583,38 @@ func (s *Scheduler) RunGoal(ctx context.Context, goalID string, o Options) (Resu
 		res.Status = store.GoalDone
 	case ctx.Err() != nil:
 		if _, err := s.Store.ResetGoalTasks(bg, goalID, []string{store.TaskBlocked}, ReasonInterrupted, ReasonInterrupted); err != nil {
-			return Result{}, err
+			return err
 		}
 		// Rate-limited tasks continue with the next run, like interrupted ones.
-		for _, id := range limit.ids {
-			if err := s.Store.SetTaskStatus(bg, id, store.TaskPending, "", ReasonInterrupted); err != nil {
-				return Result{}, err
+		for _, t := range tasks {
+			if !slices.Contains(st.limit.ids, t.ID) {
+				continue
+			}
+			if err := s.Store.SetTaskStatus(bg, t.ID, store.TaskPending, "", ReasonInterrupted); err != nil {
+				return err
 			}
 		}
 		res.Status, res.Reason = store.GoalBlocked, InterruptedReason(goalID)
-	case len(limit.ids) > 0:
-		res.Status, res.Reason = store.GoalBlocked, s.limitReason(goalID, limit)
+	case len(st.limit.ids) > 0:
+		res.Status, res.Reason = store.GoalBlocked, s.limitReason(goalID, st.limit)
 	default:
-		reason, err := s.blockedReason(bg, tasks, started)
+		reason, err := s.blockedReason(bg, tasks, st.started)
 		if err != nil {
-			return Result{}, err
+			return err
 		}
 		res.Status, res.Reason = store.GoalBlocked, reason
 	}
 	if err := s.Store.SetGoalStatus(bg, goalID, res.Status, res.Reason); err != nil {
-		return Result{}, err
+		return err
 	}
 	if res.Reason != "" {
 		s.logf("goal %s: %s: %s", goalID, res.Status, res.Reason)
 	} else {
 		s.logf("goal %s: %s", goalID, res.Status)
 	}
-	return res, nil
-}
-
-// startReady starts ready tasks in plan order while there is room.
-func (s *Scheduler) startReady(ctx, bg context.Context, goalID string, running map[string]store.Task, started map[string]bool, done chan<- finished) error {
-	tasks, err := s.Store.GoalTasks(bg, goalID)
-	if err != nil {
-		return err
-	}
-	status := map[string]string{}
-	for _, t := range tasks {
-		status[t.ID] = t.Status
-	}
-	for _, t := range tasks {
-		if len(running) >= s.MaxParallel {
-			return nil
-		}
-		if t.Status != store.TaskPending {
-			continue
-		}
-		if _, ok := running[t.ID]; ok || started[t.ID] {
-			continue
-		}
-		deps, err := s.Store.TaskDeps(bg, t.ID)
-		if err != nil {
-			return err
-		}
-		ready := true
-		for _, d := range deps {
-			if !store.Done(status[d]) {
-				ready = false
-			}
-		}
-		if !ready || overlapsRunning(t, running) {
-			continue
-		}
-		running[t.ID] = t
-		started[t.ID] = true
-		s.logf("%s: started", t.ID)
-		go func(id string) {
-			out, err := s.RunTask(ctx, id)
-			done <- finished{id, out, err}
-		}(t.ID)
-	}
+	st.results[goalID] = res
+	delete(st.open, goalID)
+	delete(st.marked, goalID)
 	return nil
 }
 
