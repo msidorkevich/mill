@@ -21,6 +21,7 @@ func InHerdr(getenv func(string) string, lookPath func(string) (string, error)) 
 func Select(kind string, getenv func(string) string, lookPath func(string) (string, error)) (Host, string, error) {
 	herdr := func() Host {
 		h := NewHerdr()
+		h.Workspace = getenv("HERDR_WORKSPACE_ID")
 		if p, err := lookPath("herdr"); err == nil {
 			h.Bin = p
 		}

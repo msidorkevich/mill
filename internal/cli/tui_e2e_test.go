@@ -371,7 +371,8 @@ func TestTUIPlanRunReviewApproveAndRejectWithExecHost(t *testing.T) {
 	}
 }
 
-// fakeHerdrOnPath puts testdata/tui/herdr first on PATH and returns its log file.
+// fakeHerdrOnPath puts testdata/tui/herdr first on PATH and returns its log file. It is the
+// only fake herdr of package cli; callers set HERDR_ENV (and HERDR_WORKSPACE_ID) themselves.
 func fakeHerdrOnPath(t *testing.T) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("testdata", "tui", "herdr"))
@@ -386,7 +387,7 @@ func fakeHerdrOnPath(t *testing.T) string {
 	return filepath.Join(dir, "herdr.log")
 }
 
-func TestTUIRunsGoalInHerdrPanesLikeExecHost(t *testing.T) {
+func TestTUIRunsGoalInHerdrTabsLikeExecHost(t *testing.T) {
 	t.Setenv("HERDR_ENV", "")
 	execRoot := tuiRepo(t, "exec")
 	d := newTUIDriver(t, execRoot)
@@ -415,14 +416,18 @@ func TestTUIRunsGoalInHerdrPanesLikeExecHost(t *testing.T) {
 	counts := map[string]int{}
 	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 		f := strings.Fields(l)
-		if len(f) < 2 || f[0] != "pane" {
+		if len(f) < 2 || (f[0] != "tab" && f[0] != "pane") {
 			t.Fatalf("unexpected herdr call %q in:\n%s", l, b)
 		}
-		counts[f[1]]++
+		if f[0] == "tab" && f[1] == "create" && (!strings.Contains(l, " --label mill ") || strings.Contains(l, "--focus")) {
+			t.Fatalf("tab create %q lacks the mill label or asks for focus", l)
+		}
+		counts[f[0]+" "+f[1]]++
 	}
-	// Each task's gate runs check_cmd and the task's check, each in its own pane.
-	if counts["split"] < 2*len(tuiTasks) || counts["run"] != counts["split"] || counts["close"] != counts["split"] {
-		t.Fatalf("herdr calls = %v, want a pane split, run and close per worker process:\n%s", counts, b)
+	// Each task's gate runs check_cmd and the task's check, each in its own tab.
+	created := counts["tab create"]
+	if created < 2*len(tuiTasks) || counts["pane run"] != created || counts["tab close"] != created || len(counts) != 3 {
+		t.Fatalf("herdr calls = %v, want a tab create, pane run and tab close per worker process:\n%s", counts, b)
 	}
 }
 
