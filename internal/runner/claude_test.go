@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -524,5 +525,38 @@ func TestUsageFromStreamHandlesRateLimitedStream(t *testing.T) {
 	u, model, finished, err := UsageFromStream(path)
 	if err != nil || !finished || model != "claude-haiku" || u.InputTokens != 2 {
 		t.Fatalf("u=%+v model=%q finished=%v err=%v", u, model, finished, err)
+	}
+}
+
+// lostHost starts a worker that writes only the init event, then reports what the herdr host
+// reports when the worker's pane was closed: a signalled exit with an error.
+type lostHost struct{}
+
+func (lostHost) Name() string { return "lost" }
+
+func (lostHost) Start(ctx context.Context, spec host.ProcSpec) (host.Handle, error) {
+	if err := os.WriteFile(spec.StdoutPath, []byte(lineInit+"\n"), 0o644); err != nil {
+		return nil, err
+	}
+	return lostHandle{}, nil
+}
+
+type lostHandle struct{}
+
+func (lostHandle) PID() int    { return 1 }
+func (lostHandle) Kill() error { return nil }
+func (lostHandle) Wait() (host.Exit, error) {
+	return host.Exit{Code: -1, Signaled: true}, errors.New("the herdr pane running the worker was closed or killed; the attempt is lost")
+}
+
+func TestClaudeRecordsHostErrorWhenWorkerPaneIsClosed(t *testing.T) {
+	c := NewClaude("claude", lostHost{})
+	c.Poll = 10 * time.Millisecond
+	res, err := c.Run(context.Background(), baseReq(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusError || !strings.Contains(res.Error, "herdr pane running the worker was closed or killed") {
+		t.Fatalf("result = %+v, want the closed-pane error recorded", res)
 	}
 }

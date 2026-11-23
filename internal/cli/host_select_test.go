@@ -68,3 +68,22 @@ func TestInvalidHostFlagIsUsageError(t *testing.T) {
 		t.Fatalf("run: %+v", r)
 	}
 }
+
+func TestTaskRunInsideHerdrUsesHerdrFromPath(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	log := fakeHerdrOnPath(t)
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("HERDR_WORKSPACE_ID", "w8")
+	r := run(t, root, nil, "task", "run", "--file", tf)
+	if r.code != ExitOK || !strings.Contains(r.stdout, "hello: verified") {
+		t.Fatalf("task run: %+v", r)
+	}
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the auto host never called the fake herdr: %v", err)
+	}
+	calls := string(b)
+	if !strings.Contains(calls, "tab create --workspace w8 --label mill ") || !strings.Contains(calls, "tab close w8:t2") {
+		t.Fatalf("herdr calls:\n%s", calls)
+	}
+}

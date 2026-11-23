@@ -100,8 +100,17 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 
 	res := p.result(ctx, ex, readTail(stderrPath, 2000), req.Model, c.Prices)
 	res.RawPath = streamPath
-	if waitErr != nil && res.Status == StatusOK {
-		res.Status, res.Error = StatusError, waitErr.Error()
+	// A host failure (e.g. the herdr pane running the worker was closed) is the reason the
+	// attempt failed: record it even when the stream already explains a missing result.
+	if waitErr != nil && res.Status != StatusCancelled {
+		msg := waitErr.Error()
+		if res.Status != StatusOK && res.Error != "" {
+			msg += "; " + res.Error
+		}
+		if res.Status == StatusOK {
+			res.Status = StatusError
+		}
+		res.Error = msg
 	}
 	if tailErr != nil {
 		res.Warnings = append(res.Warnings, "reading agent output: "+tailErr.Error())

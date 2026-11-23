@@ -3,7 +3,7 @@
 // A host only starts, waits for and kills processes. It never interprets their output:
 // results are always read from files, so the choice of host affects visibility, not
 // behaviour. The exec host runs plain subprocesses; the herdr host runs each worker in its
-// own herdr pane and is optional (HO3–HO4). Select picks one from host.kind.
+// own herdr tab and is optional (HO3–HO4). Select picks one from host.kind.
 package host
 
 import (

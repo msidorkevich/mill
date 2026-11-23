@@ -7,39 +7,46 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 )
 
-// fakeHerdr writes a fake herdr binary into a temp dir. It logs its argv (one call per
-// line) to the returned log file, prints split JSON, runs `sh <wrapper>` in the background
-// for `pane run` (mirroring the pane to pane.out) and records `pane close`. split overrides
-// the split behaviour with a shell snippet.
-// realSplit is the `herdr pane split` response captured from real herdr.
-const realSplit = `{"id":"cli:pane:split","result":{"pane":{"agent_status":"unknown","cwd":"/w/t","focused":false,"foreground_cwd":"/w/t","pane_id":"w8:p6","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":58},"tab_id":"w8:t1","terminal_id":"term_660ede8e24c941e","workspace_id":"w8"},"type":"pane_info"}}`
+// realTabCreate and realTabClose are `herdr tab create` and `herdr tab close` responses
+// captured from real herdr.
+const (
+	realTabCreate = `{"id":"cli:tab:create","result":{"root_pane":{"agent_status":"unknown","cwd":"/private/tmp","focused":false,"foreground_cwd":"/private/tmp","pane_id":"w8:pD8","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":60},"tab_id":"w8:t2","terminal_id":"term_660f1263366931c0","workspace_id":"w8"},"tab":{"agent_status":"unknown","focused":false,"label":"mill-probe","number":2,"pane_count":1,"tab_id":"w8:t2","workspace_id":"w8"},"type":"tab_created"}}`
+	realTabClose  = `{"id":"cli:tab:close","result":{"type":"ok"}}`
+)
 
-func fakeHerdr(t *testing.T, split string) (h *Herdr, log, dir string) {
+// fakeHerdr writes a fake herdr binary into a temp dir. It logs its argv (one call per
+// line) to the returned log file, prints the captured tab create JSON, runs `sh <wrapper>`
+// in the background in its own process group for `pane run` (mirroring the pane to
+// pane.out and writing the wrapper's pid to wrapper.pid) and answers `tab close`. create
+// overrides the tab create behaviour with a shell snippet.
+func fakeHerdr(t *testing.T, create string) (h *Herdr, log, dir string) {
 	t.Helper()
 	dir = t.TempDir()
 	log = filepath.Join(dir, "herdr.log")
-	if split == "" {
-		split = `echo '` + realSplit + `'`
+	if create == "" {
+		create = `echo '` + realTabCreate + `'`
 	}
 	script := "#!/bin/sh\n" +
 		"echo \"$*\" >> " + shQuote(log) + "\n" +
 		"case \"$1 $2\" in\n" +
-		"'pane split') " + split + " ;;\n" +
-		"'pane run') \"$4\" \"$5\" > " + shQuote(filepath.Join(dir, "pane.out")) + " 2>&1 < /dev/null & ;;\n" +
-		"'pane close') ;;\n" +
+		"'tab create') " + create + " ;;\n" +
+		"'pane run') set -m; \"$4\" \"$5\" > " + shQuote(filepath.Join(dir, "pane.out")) + " 2>&1 < /dev/null &\n" +
+		"  echo \"$!\" > " + shQuote(filepath.Join(dir, "wrapper.pid")) + " ;;\n" +
+		"'tab close') echo '" + realTabClose + "' ;;\n" +
 		"*) echo \"unexpected herdr call: $*\" >&2; exit 2 ;;\n" +
 		"esac\n"
 	bin := filepath.Join(dir, "herdr")
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return &Herdr{Bin: bin, Poll: 10 * time.Millisecond, StartTimeout: 10 * time.Second}, log, dir
+	return &Herdr{Bin: bin, Workspace: "w8", Poll: 10 * time.Millisecond, StartTimeout: 10 * time.Second, Grace: 2 * time.Second}, log, dir
 }
 
 func herdrLog(t *testing.T, log string) []string {
@@ -108,17 +115,17 @@ func TestHerdrCapturesOutputExitCodeAndExactEnv(t *testing.T) {
 	if len(calls) != 3 {
 		t.Fatalf("herdr calls = %q", calls)
 	}
-	if want := "pane split --current --direction right --no-focus --cwd " + dir; calls[0] != want {
-		t.Fatalf("split call = %q, want %q", calls[0], want)
+	if want := "tab create --workspace w8 --label mill worker --cwd " + dir; calls[0] != want {
+		t.Fatalf("create call = %q, want %q", calls[0], want)
 	}
 	wrappers, _ := filepath.Glob(filepath.Join(logs, "herdr-*.sh"))
 	if len(wrappers) != 1 {
 		t.Fatalf("wrapper scripts in log dir = %v", wrappers)
 	}
-	if want := "pane run w8:p6 sh " + wrappers[0]; calls[1] != want {
+	if want := "pane run w8:pD8 sh " + wrappers[0]; calls[1] != want {
 		t.Fatalf("run call = %q, want %q", calls[1], want)
 	}
-	if calls[2] != "pane close w8:p6" {
+	if calls[2] != "tab close w8:t2" {
 		t.Fatalf("close call = %q", calls[2])
 	}
 
@@ -165,7 +172,7 @@ func TestHerdrStdinDirAndPaneMirror(t *testing.T) {
 	if got := read(t, out); got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
-	if got := read(t, filepath.Join(fake, "pane.out")); got != want {
+	if got := read(t, filepath.Join(fake, "pane.out")); got != "mill worker: worker. Closing this tab stops the task.\n"+want {
 		t.Fatalf("pane mirror = %q, want %q", got, want)
 	}
 	if w, _ := filepath.Glob(filepath.Join(dir, "wrap", "herdr-*.sh")); len(w) != 1 {
@@ -195,8 +202,8 @@ func TestHerdrKillStopsProcessGroupAndClosesPane(t *testing.T) {
 	}
 	waitGone(t, childPID)
 	calls := herdrLog(t, log)
-	if calls[len(calls)-1] != "pane close w8:p6" {
-		t.Fatalf("herdr calls = %q, want pane close w8:p6 last", calls)
+	if calls[len(calls)-1] != "tab close w8:t2" {
+		t.Fatalf("herdr calls = %q, want tab close w8:t2 last", calls)
 	}
 }
 
@@ -211,21 +218,22 @@ func TestHerdrContextCancelKills(t *testing.T) {
 	if ex := waitHerdr(t, h); !ex.Signaled {
 		t.Fatalf("exit = %+v, want signaled", ex)
 	}
-	if calls := herdrLog(t, log); calls[len(calls)-1] != "pane close w8:p6" {
+	if calls := herdrLog(t, log); calls[len(calls)-1] != "tab close w8:t2" {
 		t.Fatalf("herdr calls = %q", calls)
 	}
 }
 
 func TestHerdrStartErrors(t *testing.T) {
 	for _, tc := range []struct {
-		name, split, want string
+		name, create, want string
 	}{
-		{"split fails", `echo 'no current pane' >&2; exit 1`, "no current pane"},
-		{"no pane field", `echo '{"result":{}}'`, ".result.pane.pane_id"},
-		{"not json", `echo 'garbage'`, ".result.pane.pane_id"},
+		{"create fails", `echo 'no such workspace' >&2; exit 1`, "no such workspace"},
+		{"no pane field", `echo '{"result":{"tab":{"tab_id":"w8:t2"}}}'`, ".result.root_pane.pane_id"},
+		{"no tab field", `echo '{"result":{"root_pane":{"pane_id":"w8:pD8"}}}'`, ".result.tab.tab_id"},
+		{"not json", `echo 'garbage'`, ".result.root_pane.pane_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			hh, _, _ := fakeHerdr(t, tc.split)
+			hh, _, _ := fakeHerdr(t, tc.create)
 			_, err := hh.Start(context.Background(), ProcSpec{Argv: []string{"/bin/true"}, StdoutPath: filepath.Join(t.TempDir(), "out")})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want it to mention %q", err, tc.want)
@@ -242,7 +250,7 @@ func TestHerdrStartErrors(t *testing.T) {
 func TestHerdrStartFailsWhenPidNeverAppears(t *testing.T) {
 	hh, log, _ := fakeHerdr(t, "")
 	// A herdr that accepts `pane run` but never runs the wrapper.
-	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n[ \"$2\" = split ] && echo '" + realSplit + "'\nexit 0\n"
+	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n[ \"$2\" = create ] && echo '" + realTabCreate + "'\nexit 0\n"
 	if err := os.WriteFile(hh.Bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +259,7 @@ func TestHerdrStartFailsWhenPidNeverAppears(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "pid") {
 		t.Fatalf("err = %v, want a pid timeout", err)
 	}
-	if calls := herdrLog(t, log); calls[len(calls)-1] != "pane close w8:p6" {
+	if calls := herdrLog(t, log); calls[len(calls)-1] != "tab close w8:t2" {
 		t.Fatalf("pane not closed after failed start: %q", calls)
 	}
 }
@@ -304,24 +312,144 @@ func TestSelect(t *testing.T) {
 	}
 }
 
-func TestHerdrAcceptsPlainStringPaneID(t *testing.T) {
-	hh, log, _ := fakeHerdr(t, `echo '{"result":{"pane":"p1"}}'`)
+// waitHerdrResult waits for Wait and returns its result and how long it took.
+func waitHerdrResult(t *testing.T, h Handle) (Exit, error, time.Duration) {
+	t.Helper()
+	type res struct {
+		ex  Exit
+		err error
+	}
+	start := time.Now()
+	c := make(chan res, 1)
+	go func() { ex, err := h.Wait(); c <- res{ex, err} }()
+	select {
+	case r := <-c:
+		return r.ex, r.err, time.Since(start)
+	case <-time.After(20 * time.Second):
+		t.Fatal("Wait did not return")
+	}
+	return Exit{}, nil, 0
+}
+
+func TestHerdrRunsEachWorkerInOwnLabelledTabWithNotice(t *testing.T) {
+	hh, log, fake := fakeHerdr(t, "")
 	dir := t.TempDir()
 	h, err := hh.Start(context.Background(), ProcSpec{
-		Argv:       []string{"/bin/sh", "-c", "exit 0"},
-		Dir:        dir,
-		Env:        []string{"PATH=/usr/bin:/bin"},
-		StdoutPath: filepath.Join(dir, "out"),
-		StderrPath: filepath.Join(dir, "err"),
+		Name: "g12/docs a1 implementer", Argv: []string{"/bin/sh", "-c", "echo output"}, Dir: dir,
+		Env: []string{"PATH=/usr/bin:/bin"}, StdoutPath: filepath.Join(dir, "out"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.Wait(); err != nil {
-		t.Fatal(err)
+	if ex := waitHerdr(t, h); ex.Code != 0 {
+		t.Fatalf("exit = %+v", ex)
 	}
 	calls := herdrLog(t, log)
-	if len(calls) != 3 || !strings.HasPrefix(calls[1], "pane run p1 ") || calls[2] != "pane close p1" {
-		t.Fatalf("herdr calls = %q, want pane run/close with p1", calls)
+	if want := "tab create --workspace w8 --label mill g12/docs a1 implementer --cwd " + dir; calls[0] != want {
+		t.Fatalf("create call = %q, want %q", calls[0], want)
+	}
+	if !strings.HasPrefix(calls[1], "pane run w8:pD8 sh ") || calls[len(calls)-1] != "tab close w8:t2" {
+		t.Fatalf("herdr calls = %q, want the run in root pane w8:pD8 and tab close w8:t2 last", calls)
+	}
+	for _, c := range calls {
+		if strings.Contains(c, "--focus") || strings.Contains(c, "split") {
+			t.Fatalf("herdr call %q focuses or splits the operator's tab", c)
+		}
+	}
+	if got, want := read(t, filepath.Join(fake, "pane.out")), "mill worker: g12/docs a1 implementer. Closing this tab stops the task.\noutput\n"; got != want {
+		t.Fatalf("pane shows %q, want %q", got, want)
+	}
+	if got := read(t, filepath.Join(dir, "out")); got != "output\n" {
+		t.Fatalf("stdout = %q, want the command's output only", got)
+	}
+
+	// Without a workspace, herdr picks its own: no --workspace flag.
+	hh.Workspace = ""
+	h, err = hh.Start(context.Background(), ProcSpec{Argv: []string{"/bin/true"}, Dir: dir, StdoutPath: filepath.Join(dir, "out2")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitHerdr(t, h)
+	calls = herdrLog(t, log)
+	if want := "tab create --label mill worker --cwd " + dir; !slices.Contains(calls, want) {
+		t.Fatalf("herdr calls = %q, want %q", calls, want)
+	}
+}
+
+func TestHerdrWaitReportsClosedPane(t *testing.T) {
+	hh, log, fake := fakeHerdr(t, "")
+	hh.Grace = 300 * time.Millisecond
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "child.pid")
+	h, err := hh.Start(context.Background(), ProcSpec{
+		Argv:       []string{"/bin/sh", "-c", "sleep 30 & echo $! > " + childFile + "; wait"},
+		Env:        []string{"PATH=/usr/bin:/bin"},
+		StdoutPath: filepath.Join(dir, "out"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID := waitForPID(t, childFile)
+	// Closing the pane kills the wrapper before it can write its exit file.
+	if err := KillGroup(waitForPID(t, filepath.Join(fake, "wrapper.pid"))); err != nil {
+		t.Fatal(err)
+	}
+	ex, err, took := waitHerdrResult(t, h)
+	if err == nil || !strings.Contains(err.Error(), "herdr pane running the worker") || !strings.Contains(err.Error(), "was closed or killed") {
+		t.Fatalf("Wait err = %v, want the closed pane error", err)
+	}
+	if ex.Code != -1 || !ex.Signaled {
+		t.Fatalf("exit = %+v, want code -1 signaled", ex)
+	}
+	if took > 5*time.Second {
+		t.Fatalf("Wait took %s after the pane closed", took)
+	}
+	waitGone(t, childPID)
+	if calls := herdrLog(t, log); calls[len(calls)-1] != "tab close w8:t2" {
+		t.Fatalf("herdr calls = %q, want tab close w8:t2 last", calls)
+	}
+}
+
+func TestHerdrWaitReturnsAfterCancelWhenExitFileNeverAppears(t *testing.T) {
+	hh, log, fake := fakeHerdr(t, "")
+	hh.StartTimeout, hh.Grace = 300*time.Millisecond, 300*time.Millisecond
+	// A wrapper that reports a worker pid, stays alive and never writes its exit file.
+	wpid := filepath.Join(fake, "wrapper.pid")
+	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n" +
+		"case \"$1 $2\" in\n" +
+		"'tab create') echo '" + realTabCreate + "' ;;\n" +
+		"'pane run') set -m; p=\"${5%.sh}.pid\"\n" +
+		"  sh -c 'sleep 60 & echo \"$! $$\" > \"$0\"; while :; do sleep 1; done' \"$p\" \"$5\" > /dev/null 2>&1 < /dev/null &\n" +
+		"  echo \"$!\" > " + shQuote(wpid) + " ;;\n" +
+		"'tab close') echo '" + realTabClose + "' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(hh.Bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h, err := hh.Start(ctx, ProcSpec{Argv: []string{"/bin/true"}, StdoutPath: filepath.Join(t.TempDir(), "out")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := KillGroup(waitForPID(t, wpid)); err != nil {
+			t.Error(err)
+		}
+	})
+	cancel()
+	ex, err, took := waitHerdrResult(t, h)
+	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("Wait err = %v, want the cancelled error", err)
+	}
+	if ex.Code != -1 || !ex.Signaled {
+		t.Fatalf("exit = %+v, want code -1 signaled", ex)
+	}
+	// StartTimeout plus grace, with slack for slow machines.
+	if took > hh.StartTimeout+hh.Grace+2*time.Second {
+		t.Fatalf("Wait took %s after cancel", took)
+	}
+	if calls := herdrLog(t, log); calls[len(calls)-1] != "tab close w8:t2" {
+		t.Fatalf("herdr calls = %q, want tab close w8:t2 last", calls)
 	}
 }

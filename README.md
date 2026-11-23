@@ -426,7 +426,12 @@ mill run <goal> --host herdr
 ```
 
 `--host auto|exec|herdr` is accepted by `mill task run` and `mill run`. With the herdr host
-each worker gets its own pane, so you can watch agents work; mill still reads results from
-files, never from the pane. `mill doctor` reports a `host` line with the choice
+each worker runs in its own new herdr tab in your workspace (`HERDR_WORKSPACE_ID`), labelled
+`mill <task> <role>` (for example `mill g12/docs a1 implementer`), so you can watch agents work.
+The tab is never focused, so your focus stays where it is, and it closes when the worker ends.
+The tab's pane first prints `mill worker: <name>. Closing this tab stops the task.`: closing it
+kills the worker, mill then records the attempt as failed with the reason that the herdr pane
+was closed or killed and the attempt is lost, and a retry continues. mill still reads results
+from files, never from the pane. `mill doctor` reports a `host` line with the choice
 (`auto → exec`, `auto → herdr`, `exec`, `herdr`) or the error when `host.kind = herdr` cannot
 be satisfied.
