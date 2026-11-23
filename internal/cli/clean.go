@@ -25,12 +25,8 @@ func runClean(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	defer s.Close()
-	release, err := lockAndRecover(ctx, env, "clean", paths, s, cfg.Prices)
-	if err != nil {
-		return fail(err)
-	}
-	defer release()
-
+	// No run lock: cleanup claims each landed task while it removes its leftovers and skips
+	// busy ones.
 	tasks, err := s.TaskSummaries(ctx, store.TaskLanded)
 	if err != nil {
 		return fail(err)
@@ -41,13 +37,18 @@ func runClean(ctx context.Context, env Env, args []string) int {
 		}
 		return done
 	}
-	o := cleanup.Options{Store: s, Root: paths.Root, Remote: cfg.Remote, DeleteRemote: *remote, DryRun: *dry, Out: env.Stdout}
+	o := cleanup.Options{Store: s, Root: paths.Root, Remote: cfg.Remote, DeleteRemote: *remote, DryRun: *dry, Out: env.Stdout,
+		Claimer: store.NewClaimer("clean")}
 	var worktrees, branches, remotes, failures int
 	var skipped []string
 	for _, t := range tasks {
 		r, err := cleanup.Task(ctx, o, t.ID)
 		if err != nil {
 			return fail(err)
+		}
+		if r.Busy != "" {
+			skipped = append(skipped, fmt.Sprintf("%s: busy (%s); run `mill clean` again once it finishes", t.ID, r.Busy))
+			continue
 		}
 		for _, f := range r.Failures {
 			failures++

@@ -26,35 +26,34 @@ func runSync(ctx context.Context, env Env, args []string) int {
 	defer s.Close()
 
 	// With --json, stdout holds only the document; progress goes nowhere.
+	// No run lock: the syncer claims each task it changes and skips busy ones.
 	var out io.Writer = env.Stdout
-	recoverEnv := env
 	if *asJSON {
 		out = nil
-		recoverEnv.Stdout = env.Stderr
 	}
-	release, err := lockAndRecover(ctx, recoverEnv, "sync", paths, s, cfg.Prices)
-	if err != nil {
-		return fail(err)
-	}
-	defer release()
-
 	res, err := syncer.Sync(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: out, Home: env.Home})
 	if err != nil {
 		return fail(err)
 	}
 	if *asJSON {
-		return encodeJSON(env, "mill sync", struct {
+		if code := encodeJSON(env, "mill sync", struct {
 			Schema string `json:"schema"`
 			syncer.Result
-		}{"mill/sync@1", res})
+		}{"mill/sync@1", res}); code != ExitOK || len(res.Busy) == 0 {
+			return code
+		}
+		return ExitError
 	}
 	printSync(env.Stdout, res)
+	if len(res.Busy) > 0 {
+		return ExitError
+	}
 	return ExitOK
 }
 
 func printSync(w io.Writer, r syncer.Result) {
 	fmt.Fprintf(w, "\nSynced with %s/%s at %s.\n", r.Remote, r.BaseBranch, short(r.BaseSHA))
-	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.GoalsLanded)+len(r.Cleaned)+len(r.NotCleaned) == 0 {
+	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.GoalsLanded)+len(r.Cleaned)+len(r.NotCleaned)+len(r.Busy) == 0 {
 		fmt.Fprintln(w, "Nothing changed.")
 		return
 	}
@@ -121,7 +120,19 @@ func printSync(w io.Writer, r syncer.Result) {
 			fmt.Fprintf(w, "  %s  %s\n", id, n.Reason)
 		}
 	}
+	printBusy(w, r.Busy, "mill sync")
 	if len(r.Blocked) > 0 {
 		fmt.Fprintln(w, "\nNext: inspect blocked tasks with `mill task show <id>`.")
+	}
+}
+
+// printBusy lists tasks command left alone because they are being worked on.
+func printBusy(w io.Writer, busy []syncer.Busy, command string) {
+	if len(busy) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "Busy (being worked on; run `%s` again later):\n", command)
+	for _, b := range busy {
+		fmt.Fprintf(w, "  %s  %s\n", b.TaskID, b.Doing)
 	}
 }

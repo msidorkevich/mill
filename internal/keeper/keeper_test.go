@@ -110,7 +110,9 @@ func setup(t *testing.T, checkCmd string, script runner.Script) *env {
 		HeadSHA: head, GateSHA: head, Worktree: wt}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartAttempt(ctx, taskID, 1, "implementer"); err != nil {
+	if aid, err := s.StartAttempt(ctx, taskID, 1, "implementer"); err != nil {
+		t.Fatal(err)
+	} else if err := s.FinishAttempt(ctx, aid, "ok", budget.Usage{}, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AppendEvent(ctx, "task-verdict", g.ID, taskID, map[string]any{"attempt": 1, "head": head,
@@ -445,5 +447,36 @@ func TestRebasedPublishedTaskIsRepublished(t *testing.T) {
 	}
 	if tk, _ := e.o.Store.GetTask(ctx, taskID); tk.Status != store.TaskPublished {
 		t.Fatalf("status = %s", tk.Status)
+	}
+}
+
+func TestPassLeavesBusyTaskUnchangedAndReportsIt(t *testing.T) {
+	e := setup(t, "true", runner.Script{})
+	ctx := context.Background()
+	aid, err := e.o.Store.StartAttempt(ctx, taskID, 2, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.o.Store.SetAttemptProcess(ctx, aid, 4242, "claude", ""); err != nil {
+		t.Fatal(err)
+	}
+	tip := e.moveMain(t, "shared.txt", mainSide)
+	e.recordResolution(t, tip)
+
+	res := e.pass(t)
+	if len(res.Busy) != 1 || res.Busy[0].TaskID != taskID || res.Busy[0].Doing != "attempt 2 (reviewer) running" ||
+		len(res.Rebased) != 0 || len(res.Blocked) != 0 {
+		t.Fatalf("result = %+v\n%s", res, e.out)
+	}
+	e.assertUnchanged(t)
+	if tk, _ := e.o.Store.GetTask(ctx, taskID); tk.Status != store.TaskVerified {
+		t.Errorf("status = %s", tk.Status)
+	}
+	running, err := e.o.Store.RunningAttempts(ctx)
+	if err != nil || len(running) != 1 || running[0].ID != aid || running[0].PID != 4242 {
+		t.Errorf("running attempts = %+v, %v; want attempt %d with pid 4242 untouched", running, err, aid)
+	}
+	if claims, err := e.o.Store.ClaimedTasks(ctx); err != nil || len(claims) != 0 {
+		t.Errorf("claims left = %+v, %v", claims, err)
 	}
 }

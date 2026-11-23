@@ -4,7 +4,8 @@
 // fixes branches whose gate turned red after a restack, re-publishes published tasks that
 // changed and publishes approved tasks whose dependencies now allow it.
 //
-// The caller holds the run lock.
+// It takes no run lock: it claims each task (store.ClaimTasks) before changing it or running
+// the pipeline on it, and leaves busy tasks alone, reporting them in Result.Busy.
 package keeper
 
 import (
@@ -47,6 +48,9 @@ type Options struct {
 	Goal     string    // only this goal's tasks; empty means every goal
 	Out      io.Writer // one progress line per action; nil discards
 	Force    bool      // run the combined check even when nothing changed since the last one
+	// Claimer claims each task before the pass changes it; the zero value means
+	// store.NewClaimer("keep").
+	Claimer store.Claimer
 }
 
 // Rebased is a task whose own commits were replayed onto its moved base.
@@ -85,6 +89,9 @@ type Result struct {
 	Skipped        []Skipped               `json:"skipped"`
 	// Queue is what the pass did with approved tasks waiting to be published.
 	Queue Queue `json:"queue"`
+	// Busy lists tasks the pass left unchanged because they are being worked on (tasks the
+	// sync step left alone are in Sync.Busy).
+	Busy []syncer.Busy `json:"busy"`
 }
 
 type keeper struct {
@@ -99,16 +106,46 @@ func (k *keeper) logf(format string, a ...any) {
 	}
 }
 
+// withClaim claims task id, runs fn and releases the claim, also when fn fails. fn runs only
+// when the task still has status once claimed. A busy task is listed in Result.Busy and fn
+// does not run.
+func (k *keeper) withClaim(ctx context.Context, id, status string, fn func() error) error {
+	err := k.Store.ClaimTasks(ctx, k.Claimer, []string{id})
+	var busy *store.BusyError
+	if errors.As(err, &busy) {
+		k.res.Busy = append(k.res.Busy, syncer.Busy{TaskID: id, Doing: busy.Doing})
+		k.logf("%s: busy (%s); left unchanged", id, busy.Doing)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	ferr := func() error {
+		t, err := k.Store.GetTask(ctx, id)
+		if err != nil || t.Status != status {
+			return err // changed since it was read: leave it to the next pass
+		}
+		return fn()
+	}()
+	if rerr := k.Store.ReleaseClaims(context.WithoutCancel(ctx), k.Claimer, []string{id}); rerr != nil {
+		return errors.Join(ferr, rerr)
+	}
+	return ferr
+}
+
 // Pass runs one reconcile pass. Problems with one task block that task and are reported in
 // the result; an error means the pass itself could not continue.
 func Pass(ctx context.Context, o Options) (Result, error) {
 	res := Result{Rebased: []Rebased{}, ResolvedRerere: []string{}, ResolvedAgent: []string{}, Fixed: []string{},
 		Blocked: []Blocked{}, Republished: []syncer.Republished{}, NeedsRepublish: []syncer.NeedsRepublish{}, Skipped: []Skipped{},
-		Queue: Queue{Published: []QueuePublished{}, Waiting: []QueueWaiting{}}}
+		Queue: Queue{Published: []QueuePublished{}, Waiting: []QueueWaiting{}}, Busy: []syncer.Busy{}}
+	if o.Claimer.Owner == "" {
+		o.Claimer = store.NewClaimer("keep")
+	}
 	if o.Pipeline == nil {
 		return res, errors.New("keeper: no pipeline to run the resolver, verifier and fixer with")
 	}
-	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true, LeaveFanIn: true})
+	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true, LeaveFanIn: true, Claimer: o.Claimer})
 	res.Sync = sr
 	if err != nil {
 		return res, err
@@ -121,7 +158,9 @@ func Pass(ctx context.Context, o Options) (Result, error) {
 		if err != nil {
 			return res, err
 		}
-		if err := k.fix(ctx, t, gr.Gate, t.Status == store.TaskPublished); err != nil {
+		if err := k.withClaim(ctx, t.ID, t.Status, func() error {
+			return k.fix(ctx, t, gr.Gate, t.Status == store.TaskPublished)
+		}); err != nil {
 			return res, err
 		}
 	}
@@ -256,8 +295,10 @@ func (k *keeper) task(ctx context.Context, t store.Task, br store.Branch) error 
 	if len(files) == 0 {
 		return nil
 	}
-	k.logf("%s: conflicts with %s (%s) in %s; rebasing", t.ID, onto, short(tip), strings.Join(files, ", "))
-	return k.rebase(ctx, t, br, onto, tip, landed)
+	return k.withClaim(ctx, t.ID, t.Status, func() error {
+		k.logf("%s: conflicts with %s (%s) in %s; rebasing", t.ID, onto, short(tip), strings.Join(files, ", "))
+		return k.rebase(ctx, t, br, onto, tip, landed)
+	})
 }
 
 func (k *keeper) skip(id, reason string) {

@@ -2,7 +2,9 @@
 // KP3): it marks merged tasks landed (published ones, and verified ones whose branch was merged
 // directly), restacks their children, re-gates and re-publishes them, and marks goals landed.
 //
-// The caller holds the run lock.
+// It takes no run lock: it claims each task (store.ClaimTasks) before changing its records or
+// branches and releases the claim after its store updates. A busy task is left unchanged and
+// reported in Result.Busy.
 package syncer
 
 import (
@@ -51,6 +53,15 @@ type Options struct {
 	// Home is the user's home directory, used to find the worktree root when cleaning up
 	// landed tasks; "" means the current user's.
 	Home string
+	// Claimer claims each task before the sync changes it; the zero value means
+	// store.NewClaimer("sync").
+	Claimer store.Claimer
+}
+
+// Busy is a task the sync would have changed but left alone because it is being worked on.
+type Busy struct {
+	TaskID string `json:"task_id"`
+	Doing  string `json:"doing"` // what holds it, e.g. "attempt 2 (implementer) running"
 }
 
 // Landed is a task found merged on the remote.
@@ -131,6 +142,8 @@ type Result struct {
 	// NotCleaned lists the cleanup steps that were skipped or failed.
 	Cleaned    []Cleaned    `json:"cleaned"`
 	NotCleaned []NotCleaned `json:"not_cleaned"`
+	// Busy lists tasks left unchanged because they are being worked on; run sync again later.
+	Busy []Busy `json:"busy"`
 }
 
 type syncer struct {
@@ -145,13 +158,43 @@ func (s *syncer) logf(format string, a ...any) {
 	}
 }
 
+// withClaim claims task id, runs fn and releases the claim, also when fn fails. fn runs only
+// when the task still has status once claimed. A busy task is listed in Result.Busy and fn
+// does not run.
+func (s *syncer) withClaim(ctx context.Context, id, status string, fn func() error) error {
+	err := s.Store.ClaimTasks(ctx, s.Claimer, []string{id})
+	var busy *store.BusyError
+	if errors.As(err, &busy) {
+		s.res.Busy = append(s.res.Busy, Busy{TaskID: id, Doing: busy.Doing})
+		s.logf("%s: busy (%s); left unchanged", id, busy.Doing)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	ferr := func() error {
+		t, err := s.Store.GetTask(ctx, id)
+		if err != nil || t.Status != status {
+			return err // changed since it was read: leave it to the next sync
+		}
+		return fn()
+	}()
+	if rerr := s.Store.ReleaseClaims(context.WithoutCancel(ctx), s.Claimer, []string{id}); rerr != nil {
+		return errors.Join(ferr, rerr)
+	}
+	return ferr
+}
+
 // Sync fetches the remote, marks merged tasks landed, restacks and re-publishes their
 // children and marks fully landed goals. Problems with one task block that task and are
 // reported in the result; an error means the sync itself could not continue.
 func Sync(ctx context.Context, o Options) (Result, error) {
 	res := Result{Remote: o.Cfg.Remote, BaseBranch: o.Cfg.BaseBranch,
 		Landed: []Landed{}, Restacked: []Restacked{}, Republished: []Republished{}, NeedsRepublish: []NeedsRepublish{}, Blocked: []Blocked{},
-		GoalsLanded: []string{}, Cleaned: []Cleaned{}, NotCleaned: []NotCleaned{}}
+		GoalsLanded: []string{}, Cleaned: []Cleaned{}, NotCleaned: []NotCleaned{}, Busy: []Busy{}}
+	if o.Claimer.Owner == "" {
+		o.Claimer = store.NewClaimer("sync")
+	}
 	root := o.Paths.Root
 	if o.Cfg.Remote == "" {
 		return res, fmt.Errorf("no remote is set; set `remote` in %s", o.Paths.Config)
@@ -200,7 +243,7 @@ func (s *syncer) cleanLanded(ctx context.Context) {
 	if mode == "off" || len(s.res.Landed) == 0 {
 		return
 	}
-	o := cleanup.Options{Store: s.Store, Root: s.Paths.Root, Remote: s.Cfg.Remote, DeleteRemote: mode == "all", KeepDirty: true}
+	o := cleanup.Options{Store: s.Store, Root: s.Paths.Root, Remote: s.Cfg.Remote, DeleteRemote: mode == "all", KeepDirty: true, Claimer: s.Claimer}
 	notCleaned := func(id, reason string) {
 		s.res.NotCleaned = append(s.res.NotCleaned, NotCleaned{TaskID: id, Reason: reason})
 		s.logf("%s: not cleaned up: %s", id, reason)
@@ -210,6 +253,10 @@ func (s *syncer) cleanLanded(ctx context.Context) {
 		r, err := cleanup.Task(ctx, o, l.TaskID)
 		if err != nil {
 			notCleaned(l.TaskID, fmt.Sprintf("load its branch: %v; run `mill clean`", err))
+			continue
+		}
+		if r.Busy != "" {
+			notCleaned(l.TaskID, fmt.Sprintf("busy (%s); run `mill clean` once it finishes", r.Busy))
 			continue
 		}
 		if r.Kept != "" {
@@ -288,7 +335,10 @@ func (s *syncer) detectPublished(ctx context.Context) error {
 		if method == "" {
 			continue
 		}
-		if err := s.land(ctx, ts.ID, method, commit, map[string]string{"published_sha": br.PublishedSHA}); err != nil {
+		err = s.withClaim(ctx, ts.ID, store.TaskPublished, func() error {
+			return s.land(ctx, ts.ID, method, commit, map[string]string{"published_sha": br.PublishedSHA})
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -326,7 +376,10 @@ func (s *syncer) detectMerged(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("merge detection for %s: %w", ts.ID, err)
 		}
-		if err := s.land(ctx, ts.ID, MethodMerged, commit, map[string]string{"head_sha": br.HeadSHA}); err != nil {
+		err = s.withClaim(ctx, ts.ID, store.TaskVerified, func() error {
+			return s.land(ctx, ts.ID, MethodMerged, commit, map[string]string{"head_sha": br.HeadSHA})
+		})
+		if err != nil {
 			return err
 		}
 	}
@@ -483,7 +536,7 @@ func (s *syncer) restack(ctx context.Context, t store.Task) error {
 	default:
 		return nil // the dependency is being reworked; wait for it
 	}
-	return s.rebase(ctx, t, br, onto, ontoSHA, landed)
+	return s.withClaim(ctx, t.ID, t.Status, func() error { return s.rebase(ctx, t, br, onto, ontoSHA, landed) })
 }
 
 // restackFanIn restacks a fan-in task whose dependencies moved or landed onto its deepest
@@ -504,6 +557,11 @@ func (s *syncer) restackFanIn(ctx context.Context, t store.Task, br store.Branch
 	if !moved {
 		return nil
 	}
+	return s.withClaim(ctx, t.ID, t.Status, func() error { return s.restackFanInClaimed(ctx, t, br, tg) })
+}
+
+// restackFanInClaimed restacks the claimed fan-in task t onto tg.
+func (s *syncer) restackFanInClaimed(ctx context.Context, t store.Task, br store.Branch, tg fanin.Target) error {
 	if ok, err := s.preflight(ctx, t, br, tg.Onto); err != nil || !ok {
 		return err
 	}
@@ -656,7 +714,7 @@ func (s *syncer) republishIfStale(ctx context.Context, t store.Task, br store.Br
 	if !stale {
 		return nil
 	}
-	return s.republish(ctx, t)
+	return s.withClaim(ctx, t.ID, t.Status, func() error { return s.republish(ctx, t) })
 }
 
 // republish pushes a published task again. A refusal by the dependency rule leaves it

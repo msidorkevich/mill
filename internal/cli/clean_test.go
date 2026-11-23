@@ -10,6 +10,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -474,4 +475,31 @@ func TestSyncKeepsDirtyWorktreeOfLandedTask(t *testing.T) {
 	if tk, _ := openStore(t, root).GetTask(context.Background(), "g2/a"); tk.Status != store.TaskLanded {
 		t.Errorf("g2/a status = %s", tk.Status)
 	}
+}
+
+func TestCleanWorksWhileRunLockIsHeldAndSkipsBusyTask(t *testing.T) {
+	root, _ := chainPublished(t, true)
+	ctx := context.Background()
+	a, b := branchRow(t, root, "g2/a"), branchRow(t, root, "g2/b")
+	setStatus(t, root, "g2/a", store.TaskLanded)
+	setStatus(t, root, "g2/b", store.TaskLanded)
+	w := startBusyAttempt(t, root, "g2/b")
+	lock, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+
+	r := run(t, root, nil, "clean")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Skipped:\n  g2/b: busy ("+w.doing+")") {
+		t.Fatalf("clean: %+v", r)
+	}
+	if _, err := os.Stat(a.Worktree); !os.IsNotExist(err) || gitx.BranchExists(ctx, root, a.Name) {
+		t.Errorf("g2/a not cleaned (err=%v)", err)
+	}
+	if _, err := os.Stat(b.Worktree); err != nil || !gitx.BranchExists(ctx, root, b.Name) || branchRow(t, root, "g2/b").Worktree != b.Worktree {
+		t.Errorf("busy g2/b was cleaned (err=%v)", err)
+	}
+	w.assertUntouched(t)
+	assertNoClaims(t, root)
 }

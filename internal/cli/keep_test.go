@@ -12,6 +12,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 const independentPlan = `{
@@ -106,7 +107,7 @@ func TestKeepJSONIsOneDocumentWithoutProgress(t *testing.T) {
 	}
 }
 
-func TestKeepRefusesWhileAnotherHolderHasTheLock(t *testing.T) {
+func TestKeepRunsItsPassWhileAnotherHolderHasTheLock(t *testing.T) {
 	root := keepRepo(t, "true")
 	lock, err := runlock.Acquire(project.PathsAt(root).RunLock)
 	if err != nil {
@@ -114,13 +115,59 @@ func TestKeepRefusesWhileAnotherHolderHasTheLock(t *testing.T) {
 	}
 	defer lock.Release()
 	r := run(t, root, nil, "keep")
-	if r.code != ExitError || r.stderr == "" || strings.Contains(r.stdout, "Combined check") {
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Combined check: passed") {
 		t.Fatalf("keep with held lock: %+v", r)
 	}
-	lock.Release()
-	if r := run(t, root, nil, "keep"); r.code != ExitOK {
-		t.Fatalf("keep after release: %+v", r)
+	assertNoClaims(t, root)
+}
+
+func TestKeepReportsBusyTaskAndLeavesItUnchanged(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	ctx := context.Background()
+	s := openStore(t, root)
+	oldChild, _ := s.GetBranch(ctx, "g2/b")
+	w := startBusyAttempt(t, root, "g2/b")
+	f := forge(t, bare)
+	mergeReview(t, f, "g2/a")
+	lock, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer lock.Release()
+
+	r := run(t, root, nil, "keep")
+	if r.code != ExitError || !strings.Contains(r.stdout, "Busy (being worked on; run `mill keep` again later):\n  g2/b  "+w.doing) {
+		t.Fatalf("keep: %+v", r)
+	}
+	if tk, _ := s.GetTask(ctx, "g2/a"); tk.Status != store.TaskLanded {
+		t.Errorf("g2/a status = %s, want landed", tk.Status)
+	}
+	if got, _ := s.GetBranch(ctx, "g2/b"); got.HeadSHA != oldChild.HeadSHA || got.Base != oldChild.Base || got.BaseSHA != oldChild.BaseSHA {
+		t.Errorf("busy g2/b branch changed: %+v, was %+v", got, oldChild)
+	}
+	w.assertUntouched(t)
+
+	r = run(t, root, nil, "keep", "--json")
+	var doc struct {
+		Keeper struct {
+			Sync struct {
+				Busy []struct {
+					TaskID string `json:"task_id"`
+					Doing  string `json:"doing"`
+				} `json:"busy"`
+			} `json:"sync"`
+			Busy []json.RawMessage `json:"busy"`
+		} `json:"keeper"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("keep --json: %v\n%+v", err, r)
+	}
+	if r.code != ExitError || len(doc.Keeper.Sync.Busy) != 1 || doc.Keeper.Sync.Busy[0].TaskID != "g2/b" ||
+		doc.Keeper.Sync.Busy[0].Doing != w.doing || doc.Keeper.Busy == nil {
+		t.Fatalf("keep --json: %+v", r)
+	}
+	w.assertUntouched(t)
+	assertNoClaims(t, root)
 }
 
 func TestKeepWatchRepeatsPassesUntilCancelled(t *testing.T) {
