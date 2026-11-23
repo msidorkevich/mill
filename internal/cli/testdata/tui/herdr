@@ -1,0 +1,12 @@
+#!/bin/sh
+# Fake herdr for the TUI end-to-end tests. It logs every call (one per line) to herdr.log
+# next to itself, answers `pane split` with the pane JSON real herdr prints, runs the
+# command of `pane run` in the background and accepts `pane close`.
+dir=$(dirname "$0")
+echo "$*" >> "$dir/herdr.log"
+case "$1 $2" in
+'pane split') echo '{"id":"cli:pane:split","result":{"pane":{"agent_status":"unknown","cwd":"/w/t","focused":false,"foreground_cwd":"/w/t","pane_id":"w8:p6","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":58},"tab_id":"w8:t1","terminal_id":"term_660ede8e24c941e","workspace_id":"w8"},"type":"pane_info"}}' ;;
+'pane run') "$4" "$5" >> "$dir/pane.out" 2>&1 < /dev/null & ;;
+'pane close') ;;
+*) echo "unexpected herdr call: $*" >&2; exit 2 ;;
+esac
