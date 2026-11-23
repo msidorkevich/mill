@@ -84,3 +84,40 @@ func TestAgentsViewSelectedTask(t *testing.T) {
 		t.Errorf("SelectedTask = %q", got)
 	}
 }
+
+func TestAgentsViewShowsGateRowWithLogLastLine(t *testing.T) {
+	s := seed(t)
+	if err := s.SetTaskStatus(context.Background(), "g1/b", store.TaskRunning, store.PhaseGate, ""); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.StartAttempt(context.Background(), "g1/b", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishAttempt(context.Background(), id, "done", budget.Usage{}, false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	m, _ := newModel(t, s)
+	dir := filepath.Join(m.opts.Paths.Runs, "g1/b", "a1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gate-0.log"), []byte("building\nFAIL pkg\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.opts.Now = func() time.Time { return clock.Add(65 * time.Second) }
+	m.Update(tickMsg(clock))
+	press(m, "tab", "tab", "tab")
+	out := m.View()
+	for _, want := range []string{"g1/b", "#1", "gate", "1m05s", "FAIL pkg (/"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("View() lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "nothing running") {
+		t.Errorf("claims nothing running:\n%s", out)
+	}
+	if got := m.views[m.active].SelectedTask(); got != "g1/b" {
+		t.Errorf("SelectedTask = %q", got)
+	}
+}

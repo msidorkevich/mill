@@ -31,7 +31,8 @@ type snapshot struct {
 	Tasks   map[string][]goalTask // by goal id, in plan order
 	Review  []store.ReviewTask
 	Running []store.Attempt
-	Err     error // the poll failed; the other fields keep the previous values
+	Stages  []store.RunningStage // running tasks without a running attempt (gate, prepare, ...)
+	Err     error                // the poll failed; the other fields keep the previous values
 }
 
 // goalTask is a goal's task with its dependencies (full task ids).

@@ -427,6 +427,39 @@ func (s *Store) RunningAttempts(ctx context.Context) ([]Attempt, error) {
 	return s.queryAttempts(ctx, `WHERE status = ?`, AttemptRunning)
 }
 
+// RunningStage is a running task that has no running agent attempt: it is in a stage mill
+// runs itself (prepare, gate, commit, checks, rebase, ...), or between two agent runs.
+type RunningStage struct {
+	TaskID string    `json:"task_id"`
+	Phase  string    `json:"phase"` // as `mill goal show` prints it in "running (<phase>)"
+	N      int       `json:"n"`     // highest attempt number used (0 if none)
+	Since  time.Time `json:"since"` // when the task entered the phase
+}
+
+// RunningStages lists tasks whose status is running and that have no running attempt.
+func (s *Store) RunningStages(ctx context.Context) ([]RunningStage, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.phase, t.updated_at,
+		COALESCE((SELECT MAX(a.n) FROM attempts a WHERE a.task_id = t.id), 0)
+		FROM tasks t WHERE t.status = ?
+		AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.task_id = t.id AND a.status = ?)
+		ORDER BY t.updated_at, t.id`, TaskRunning, AttemptRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RunningStage
+	for rows.Next() {
+		var r RunningStage
+		var since string
+		if err := rows.Scan(&r.TaskID, &r.Phase, &since, &r.N); err != nil {
+			return nil, err
+		}
+		r.Since, _ = parseTime(since)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // Attempts lists a task's attempts in order.
 func (s *Store) Attempts(ctx context.Context, taskID string) ([]Attempt, error) {
 	return s.queryAttempts(ctx, `WHERE task_id = ?`, taskID)

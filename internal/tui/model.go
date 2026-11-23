@@ -23,6 +23,7 @@ type Store interface {
 	TaskDeps(ctx context.Context, taskID string) ([]string, error)
 	ReviewTasks(ctx context.Context) ([]store.ReviewTask, error)
 	RunningAttempts(ctx context.Context) ([]store.Attempt, error)
+	RunningStages(ctx context.Context) ([]store.RunningStage, error)
 	Attempts(ctx context.Context, taskID string) ([]store.Attempt, error)
 	GetBranch(ctx context.Context, taskID string) (store.Branch, error)
 }
@@ -102,7 +103,7 @@ func New(opts Options) *Model {
 		cmds:   cmds,
 		acts:   acts,
 		detail: detail,
-		views:  []view{newGoalsView(cmds), newReviewView(acts), detail, newAgentsView(opts.Now)},
+		views:  []view{newGoalsView(cmds), newReviewView(acts), detail, newAgentsView(opts.Now, opts.Paths)},
 		names:  []string{"Goals", "Review", "Task detail", "Agents"},
 		width:  100,
 		height: 30,
@@ -163,7 +164,11 @@ func (m *Model) read(ctx context.Context, s *snapshot) error {
 	if err != nil {
 		return err
 	}
-	s.Goals, s.Tasks, s.Review, s.Running = goals, tasks, review, running
+	stages, err := m.opts.Store.RunningStages(ctx)
+	if err != nil {
+		return err
+	}
+	s.Goals, s.Tasks, s.Review, s.Running, s.Stages = goals, tasks, review, running, stages
 	return nil
 }
 

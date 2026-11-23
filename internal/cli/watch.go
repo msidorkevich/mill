@@ -7,11 +7,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/runner"
 	"github.com/msidorkevich/mill/internal/store"
 )
@@ -40,7 +43,7 @@ func runWatch(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "mill watch: %v\n", err)
 		return ExitError
 	}
-	_, _, s, err := openProject(ctx, env)
+	paths, _, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
@@ -52,7 +55,7 @@ func runWatch(ctx context.Context, env Env, args []string) int {
 	}
 
 	if *once || !isTerminal(env.Stdout) {
-		if err := renderWatch(ctx, env.Stdout, s, sel, time.Now()); err != nil {
+		if err := renderWatch(ctx, env.Stdout, paths, s, sel, time.Now()); err != nil {
 			return fail(err)
 		}
 		return ExitOK
@@ -64,7 +67,7 @@ func runWatch(ctx context.Context, env Env, args []string) int {
 	defer tick.Stop()
 	for {
 		fmt.Fprint(env.Stdout, "\x1b[H\x1b[2J")
-		if err := renderWatch(ctx, env.Stdout, s, sel, time.Now()); err != nil && ctx.Err() == nil {
+		if err := renderWatch(ctx, env.Stdout, paths, s, sel, time.Now()); err != nil && ctx.Err() == nil {
 			return fail(err)
 		}
 		select {
@@ -124,7 +127,7 @@ func watchScope(ctx context.Context, s *store.Store, sel string) (label string, 
 	return "task " + sel, statuses, nil
 }
 
-func renderWatch(ctx context.Context, w io.Writer, s *store.Store, sel string, now time.Time) error {
+func renderWatch(ctx context.Context, w io.Writer, paths project.Paths, s *store.Store, sel string, now time.Time) error {
 	label, statuses, err := watchScope(ctx, s, sel)
 	if err != nil {
 		return err
@@ -154,7 +157,17 @@ func renderWatch(ctx context.Context, w io.Writer, s *store.Store, sel string, n
 			running = append(running, a)
 		}
 	}
-	if len(running) == 0 {
+	allStages, err := s.RunningStages(ctx)
+	if err != nil {
+		return err
+	}
+	var stages []store.RunningStage
+	for _, r := range allStages {
+		if _, ok := statuses[r.TaskID]; ok {
+			stages = append(stages, r)
+		}
+	}
+	if len(running) == 0 && len(stages) == 0 {
 		fmt.Fprintln(w, "nothing running")
 		return nil
 	}
@@ -168,7 +181,54 @@ func renderWatch(ctx context.Context, w io.Writer, s *store.Store, sel string, n
 		fmt.Fprintf(tw, "%s\t#%d\t%s\t%s\t%s\t%s\t%s\n", a.TaskID, a.N, a.Role,
 			fmtElapsed(now.Sub(a.StartedAt)), fmtInt(a.Usage.Tokens(budget.CountBillable)), cost, latestAction(a))
 	}
+	for _, r := range stages {
+		stage := r.Phase
+		if stage == "" {
+			stage = "running"
+		}
+		fmt.Fprintf(tw, "%s\t#%d\t%s\t%s\t-\t-\t%s\n", r.TaskID, r.N, stage,
+			fmtElapsed(now.Sub(r.Since)), stageDetail(paths, r))
+	}
 	return tw.Flush()
+}
+
+// stageDetail describes a stage mill runs itself. For a gate it is the newest gate log's last non-empty line and its path.
+func stageDetail(paths project.Paths, r store.RunningStage) string {
+	if r.Phase != store.PhaseGate {
+		return "-"
+	}
+	dir := filepath.Join(paths.Runs, r.TaskID, fmt.Sprintf("a%d", r.N))
+	logs, _ := filepath.Glob(filepath.Join(dir, "gate-*.log"))
+	if len(logs) == 0 {
+		return "(no gate log yet)"
+	}
+	newest, newestMod := "", time.Time{}
+	sort.Strings(logs)
+	for _, l := range logs {
+		if st, err := os.Stat(l); err == nil && !st.ModTime().Before(newestMod) {
+			newest, newestMod = l, st.ModTime()
+		}
+	}
+	if newest == "" {
+		return "(gate log unreadable: " + logs[0] + ")"
+	}
+	data, err := os.ReadFile(newest)
+	if err != nil {
+		return "(gate log unreadable: " + err.Error() + ")"
+	}
+	last := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		if l := strings.TrimSpace(line); l != "" {
+			last = l
+		}
+	}
+	if r := []rune(last); len(r) > maxActionWidth {
+		last = string(r[:maxActionWidth-1]) + "…"
+	}
+	if last == "" {
+		return newest
+	}
+	return last + " (" + newest + ")"
 }
 
 func latestAction(a store.Attempt) string {

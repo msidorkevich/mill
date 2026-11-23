@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/plan"
@@ -113,5 +114,91 @@ func TestWatchSaysNothingRunningWhenIdle(t *testing.T) {
 	r := run(t, root, nil, "watch", "--once")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "nothing running") {
 		t.Fatalf("watch: %+v", r)
+	}
+}
+
+// stageRepo has goal g1 whose task a is running in phase, with no running attempt. The store
+// clock is fixed at the returned time.
+func stageRepo(t *testing.T, phase string) (string, time.Time) {
+	t.Helper()
+	root := gitRepo(t)
+	if r := run(t, root, nil, "init"); r.code != ExitOK {
+		t.Fatalf("init: %+v", r)
+	}
+	at := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{Now: func() time.Time { return at }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	g, err := s.CreateGoal(ctx, "goal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := taskspec.Spec{ID: "a", Title: "a", Kind: "implement", Spec: "do it", Acceptance: []string{"done"},
+		Checks: []string{}, Owns: []string{}, Size: "S", DependsOn: []string{}}
+	if err := s.ApproveGoal(ctx, g.ID, plan.Plan{Goal: "goal", Assumptions: []string{}, Tasks: []taskspec.Spec{spec}}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.StartAttempt(ctx, "g1/a", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishAttempt(ctx, id, "done", budget.Usage{}, false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "g1/a", store.TaskRunning, phase, ""); err != nil {
+		t.Fatal(err)
+	}
+	return root, at
+}
+
+func TestWatchListsGateStageWithElapsedAndGateLogLastLine(t *testing.T) {
+	root, at := stageRepo(t, store.PhaseGate)
+	paths := project.PathsAt(root)
+	dir := filepath.Join(paths.Runs, "g1/a", "a1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "gate-0.log")
+	if err := os.WriteFile(logPath, []byte("compiling\nok  pkg 0.3s\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(context.Background(), paths.DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var b strings.Builder
+	if err := renderWatch(context.Background(), &b, paths, s, "", at.Add(95*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{"g1/a", "#1", "gate", "1m35s", logPath, "ok  pkg 0.3s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "nothing running") {
+		t.Errorf("claims nothing running:\n%s", out)
+	}
+}
+
+func TestWatchListsOtherRunningStages(t *testing.T) {
+	root, at := stageRepo(t, "commit")
+	paths := project.PathsAt(root)
+	s, err := store.Open(context.Background(), paths.DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var b strings.Builder
+	if err := renderWatch(context.Background(), &b, paths, s, "", at.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "g1/a") || !strings.Contains(out, "commit") || !strings.Contains(out, "0m05s") || strings.Contains(out, "nothing running") {
+		t.Errorf("stage not listed:\n%s", out)
 	}
 }
