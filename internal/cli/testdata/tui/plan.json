@@ -1,0 +1,12 @@
+{
+  "goal": "Greeting app",
+  "assumptions": [],
+  "tasks": [
+    {"id": "app", "title": "App", "kind": "implement", "spec": "write app.txt that greets with lib.txt",
+     "acceptance": ["app.txt exists next to lib.txt"], "checks": ["test -f lib.txt && test -f app.txt"],
+     "owns": ["app.txt"], "depends_on": ["lib"], "size": "S"},
+    {"id": "lib", "title": "Lib", "kind": "implement", "spec": "write lib.txt with the greeting",
+     "acceptance": ["lib.txt exists"], "checks": ["test -f lib.txt"],
+     "owns": ["lib.txt"], "depends_on": [], "size": "S"}
+  ]
+}
