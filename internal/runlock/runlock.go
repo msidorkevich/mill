@@ -1,4 +1,5 @@
-// Package runlock keeps two mill runs from working on one repository at the same time.
+// Package runlock enforces one scheduler per repository: whoever holds the lock is the
+// scheduler for that repository, and Held lets other processes probe for it.
 //
 // The lock is an fcntl write lock (F_SETLK) over the whole file. fcntl locks belong to the
 // process, not to the open file, so a child that is still starting up and shares mill's open
@@ -95,4 +96,37 @@ func (l *Lock) Release() error {
 		return fmt.Errorf("unlock run lock: %w", uerr)
 	}
 	return cerr
+}
+
+// Held reports whether some process holds the lock on path, without taking it. When this
+// process holds it, Held returns the current pid without opening the file, because closing
+// a descriptor would drop the fcntl lock. Otherwise it asks the kernel with F_GETLK. A
+// missing file means not held; any other failure is an error, never a guess.
+func Held(path string) (pid int, isHeld bool, err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return 0, false, fmt.Errorf("resolve run lock path %s: %w", path, err)
+	}
+	abs = filepath.Clean(abs)
+	heldMu.Lock()
+	defer heldMu.Unlock()
+	if held[abs] {
+		return os.Getpid(), true, nil
+	}
+	f, err := os.OpenFile(abs, os.O_RDONLY, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("open run lock %s: %w", abs, err)
+	}
+	defer f.Close()
+	fl := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 0}
+	if err := syscall.FcntlFlock(f.Fd(), syscall.F_GETLK, &fl); err != nil {
+		return 0, false, fmt.Errorf("probe run lock %s: %w", abs, err)
+	}
+	if fl.Type == syscall.F_UNLCK {
+		return 0, false, nil
+	}
+	return int(fl.Pid), true, nil
 }
