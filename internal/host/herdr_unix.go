@@ -94,13 +94,26 @@ func (h *Herdr) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
 	}
 	var split struct {
 		Result struct {
-			Pane string `json:"pane"`
+			Pane json.RawMessage `json:"pane"`
 		} `json:"result"`
 	}
-	if err := json.Unmarshal(out, &split); err != nil || split.Result.Pane == "" {
-		return nil, fmt.Errorf("herdr host: pane split returned no .result.pane in %q: check the herdr version", strings.TrimSpace(string(out)))
+	pane := ""
+	if err := json.Unmarshal(out, &split); err == nil {
+		// Real herdr returns an object with pane_id; a plain string id is also accepted.
+		var obj struct {
+			PaneID string `json:"pane_id"`
+		}
+		if json.Unmarshal(split.Result.Pane, &pane) != nil {
+			pane = ""
+			if json.Unmarshal(split.Result.Pane, &obj) == nil {
+				pane = obj.PaneID
+			}
+		}
 	}
-	hd := &herdrHandle{host: h, pane: split.Result.Pane, files: files, done: make(chan struct{}), watched: make(chan struct{})}
+	if pane == "" {
+		return nil, fmt.Errorf("herdr host: pane split returned no .result.pane.pane_id in %q: check the herdr version", strings.TrimSpace(string(out)))
+	}
+	hd := &herdrHandle{host: h, pane: pane, files: files, done: make(chan struct{}), watched: make(chan struct{})}
 
 	if _, err := h.herdr("pane", "run", hd.pane, "sh", files.wrapper); err != nil {
 		return nil, errors.Join(err, hd.closePane())

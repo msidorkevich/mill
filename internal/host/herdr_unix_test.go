@@ -17,12 +17,15 @@ import (
 // line) to the returned log file, prints split JSON, runs `sh <wrapper>` in the background
 // for `pane run` (mirroring the pane to pane.out) and records `pane close`. split overrides
 // the split behaviour with a shell snippet.
+// realSplit is the `herdr pane split` response captured from real herdr.
+const realSplit = `{"id":"cli:pane:split","result":{"pane":{"agent_status":"unknown","cwd":"/w/t","focused":false,"foreground_cwd":"/w/t","pane_id":"w8:p6","revision":0,"scroll":{"max_offset_from_bottom":0,"offset_from_bottom":0,"viewport_rows":58},"tab_id":"w8:t1","terminal_id":"term_660ede8e24c941e","workspace_id":"w8"},"type":"pane_info"}}`
+
 func fakeHerdr(t *testing.T, split string) (h *Herdr, log, dir string) {
 	t.Helper()
 	dir = t.TempDir()
 	log = filepath.Join(dir, "herdr.log")
 	if split == "" {
-		split = `echo '{"result":{"pane":"p1"}}'`
+		split = `echo '` + realSplit + `'`
 	}
 	script := "#!/bin/sh\n" +
 		"echo \"$*\" >> " + shQuote(log) + "\n" +
@@ -112,10 +115,10 @@ func TestHerdrCapturesOutputExitCodeAndExactEnv(t *testing.T) {
 	if len(wrappers) != 1 {
 		t.Fatalf("wrapper scripts in log dir = %v", wrappers)
 	}
-	if want := "pane run p1 sh " + wrappers[0]; calls[1] != want {
+	if want := "pane run w8:p6 sh " + wrappers[0]; calls[1] != want {
 		t.Fatalf("run call = %q, want %q", calls[1], want)
 	}
-	if calls[2] != "pane close p1" {
+	if calls[2] != "pane close w8:p6" {
 		t.Fatalf("close call = %q", calls[2])
 	}
 
@@ -192,8 +195,8 @@ func TestHerdrKillStopsProcessGroupAndClosesPane(t *testing.T) {
 	}
 	waitGone(t, childPID)
 	calls := herdrLog(t, log)
-	if calls[len(calls)-1] != "pane close p1" {
-		t.Fatalf("herdr calls = %q, want pane close p1 last", calls)
+	if calls[len(calls)-1] != "pane close w8:p6" {
+		t.Fatalf("herdr calls = %q, want pane close w8:p6 last", calls)
 	}
 }
 
@@ -208,7 +211,7 @@ func TestHerdrContextCancelKills(t *testing.T) {
 	if ex := waitHerdr(t, h); !ex.Signaled {
 		t.Fatalf("exit = %+v, want signaled", ex)
 	}
-	if calls := herdrLog(t, log); calls[len(calls)-1] != "pane close p1" {
+	if calls := herdrLog(t, log); calls[len(calls)-1] != "pane close w8:p6" {
 		t.Fatalf("herdr calls = %q", calls)
 	}
 }
@@ -218,8 +221,8 @@ func TestHerdrStartErrors(t *testing.T) {
 		name, split, want string
 	}{
 		{"split fails", `echo 'no current pane' >&2; exit 1`, "no current pane"},
-		{"no pane field", `echo '{"result":{}}'`, ".result.pane"},
-		{"not json", `echo 'garbage'`, ".result.pane"},
+		{"no pane field", `echo '{"result":{}}'`, ".result.pane.pane_id"},
+		{"not json", `echo 'garbage'`, ".result.pane.pane_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hh, _, _ := fakeHerdr(t, tc.split)
@@ -239,7 +242,7 @@ func TestHerdrStartErrors(t *testing.T) {
 func TestHerdrStartFailsWhenPidNeverAppears(t *testing.T) {
 	hh, log, _ := fakeHerdr(t, "")
 	// A herdr that accepts `pane run` but never runs the wrapper.
-	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n[ \"$2\" = split ] && echo '{\"result\":{\"pane\":\"p1\"}}'\nexit 0\n"
+	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n[ \"$2\" = split ] && echo '" + realSplit + "'\nexit 0\n"
 	if err := os.WriteFile(hh.Bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +251,7 @@ func TestHerdrStartFailsWhenPidNeverAppears(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "pid") {
 		t.Fatalf("err = %v, want a pid timeout", err)
 	}
-	if calls := herdrLog(t, log); calls[len(calls)-1] != "pane close p1" {
+	if calls := herdrLog(t, log); calls[len(calls)-1] != "pane close w8:p6" {
 		t.Fatalf("pane not closed after failed start: %q", calls)
 	}
 }
@@ -298,5 +301,27 @@ func TestSelect(t *testing.T) {
 	}
 	if !InHerdr(env("1"), found) || InHerdr(env("0"), found) || InHerdr(env("1"), missing) {
 		t.Error("InHerdr disagrees with HERDR_ENV and PATH")
+	}
+}
+
+func TestHerdrAcceptsPlainStringPaneID(t *testing.T) {
+	hh, log, _ := fakeHerdr(t, `echo '{"result":{"pane":"p1"}}'`)
+	dir := t.TempDir()
+	h, err := hh.Start(context.Background(), ProcSpec{
+		Argv:       []string{"/bin/sh", "-c", "exit 0"},
+		Dir:        dir,
+		Env:        []string{"PATH=/usr/bin:/bin"},
+		StdoutPath: filepath.Join(dir, "out"),
+		StderrPath: filepath.Join(dir, "err"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	calls := herdrLog(t, log)
+	if len(calls) != 3 || !strings.HasPrefix(calls[1], "pane run p1 ") || calls[2] != "pane close p1" {
+		t.Fatalf("herdr calls = %q, want pane run/close with p1", calls)
 	}
 }
