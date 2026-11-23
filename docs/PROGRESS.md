@@ -631,3 +631,15 @@ and mine, updated in its own PRs).
   them; one was `go get -u ./...` in the main checkout. It failed before writing anything (the
   tree stayed clean) and I repaired the damaged spec text. From now on, code that carries text
   goes in script files, never inline shell-quoted strings.
+
+### Follow-ups found in M5
+
+- [ ] **New task branches referred to landed dependencies' deleted branches** (bug, fix in
+      progress as task `prepare-landed-deps`). After the first five `g12` tasks landed,
+      `mill run g12 --retry-blocked` failed both remaining tasks before any agent started:
+      `merge dependency g12/herdr-wiring: … not something we can merge`. Cause: preparing a new
+      task's branch still merged every dependency's branch by name, but `clean_on_land` (task
+      `clean-on-land`) had deleted the branches of the landed ones. A landed dependency's code is
+      already in the base branch, so it needs no branch. Fix: base new branches like restacks
+      already do (`internal/fanin`): landed dependencies come from the remote base tip, and only
+      unlanded dependencies are merged by branch. No tokens were spent on the failed attempt.
