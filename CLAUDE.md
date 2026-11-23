@@ -1,6 +1,6 @@
 # mill: conventions for agents working on this repo
 
-mill is a Go CLI (Go 1.24, module `github.com/msidorkevich/mill`). Requirements: docs/REQUIREMENTS.md.
+mill is a Go CLI (Go 1.27, module `github.com/msidorkevich/mill`). Requirements: docs/REQUIREMENTS.md.
 
 ## Code
 - Match the style of the surrounding code. Standard library first; no new dependencies.

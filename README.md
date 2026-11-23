@@ -11,7 +11,7 @@ Status: **M1 (single-task pipeline)**. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## Build and test
 
-Needs Go 1.24+ and git 2.38+.
+Needs Go 1.27+ and git 2.38+.
 
 ```sh
 make check     # gofmt, go vet, go test (zero tokens, no network)
