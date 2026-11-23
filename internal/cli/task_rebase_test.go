@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -311,4 +313,43 @@ func TestTaskRebaseAcceptsPublishedDependency(t *testing.T) {
 	if r := run(t, root, nil, "task", "rebase", "g2/b"); r.code != ExitError || !strings.Contains(r.stderr, "dependency g2/a is pending") {
 		t.Fatalf("rebase onto pending dependency: %+v", r)
 	}
+}
+
+func TestTaskRebaseRefusesTaskWithRunningAttempt(t *testing.T) {
+	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
+	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+		t.Fatalf("run: %+v", r)
+	}
+	s := openStore(t, root)
+	setStatus(t, root, "g1/a", store.TaskBlocked)
+	commitOnMain(t, root, "m.txt", "m\n")
+	_, n := runningAttempt(t, s, "g1/a")
+	otherID, _ := runningAttempt(t, s, "g1/b")
+	w := startWorker(t, s, otherID)
+	before := snapshotTask(t, s, "g1/a")
+	head := gitC(t, root, "rev-parse", before.Branch.Name)
+
+	r := run(t, root, nil, "task", "rebase", "g1/a")
+	want := fmt.Sprintf("mill task rebase: task g1/a is busy: attempt %d (verifier) running", n)
+	if r.code != ExitError || !strings.Contains(r.stderr, want) {
+		t.Fatalf("rebase: %+v", r)
+	}
+	if after := snapshotTask(t, s, "g1/a"); !reflect.DeepEqual(after, before) {
+		t.Errorf("task changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+	if got := gitC(t, root, "rev-parse", before.Branch.Name); got != head {
+		t.Errorf("branch moved: %s -> %s", head, got)
+	}
+	assertNoReviewClaims(t, root)
+	assertWorkerUntouched(t, s, "g1/b", w)
+}
+
+func TestTaskRebaseWorksWhileUnrelatedRunHoldsLock(t *testing.T) {
+	root := soloRepo(t, `{"solo.txt": "s\n"}`)
+	holdRunLock(t, root)
+	commitOnMain(t, root, "m.txt", "m\n")
+	if r := run(t, root, nil, "task", "rebase", "solo"); r.code != ExitOK || !strings.Contains(r.stdout, "Rebased solo onto main") {
+		t.Fatalf("rebase while locked: %+v", r)
+	}
+	assertNoReviewClaims(t, root)
 }
