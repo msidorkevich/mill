@@ -24,6 +24,7 @@ type Store interface {
 	ReviewTasks(ctx context.Context) ([]store.ReviewTask, error)
 	RunningAttempts(ctx context.Context) ([]store.Attempt, error)
 	Attempts(ctx context.Context, taskID string) ([]store.Attempt, error)
+	GetBranch(ctx context.Context, taskID string) (store.Branch, error)
 }
 
 // Options build a Model.
@@ -35,6 +36,10 @@ type Options struct {
 	Getenv   func(string) string          // defaults to os.Getenv (used by later views)
 	LookPath func(string) (string, error) // defaults to exec.LookPath (used by later views)
 	Edit     EditFunc                     // runs $EDITOR on a file; defaults to tea.ExecProcess
+	// Herdr runs herdr with args and captures it; defaults to exec'ing herdr.
+	Herdr func(ctx context.Context, args []string) (stdout, stderr string, code int, err error)
+	// ShellCmd builds the interactive shell command for o outside herdr; defaults to exec.Command.
+	ShellCmd func(shell, dir string) *exec.Cmd
 }
 
 // Indexes of the views the model switches to itself.
@@ -79,6 +84,16 @@ func New(opts Options) *Model {
 	if opts.Edit == nil {
 		opts.Edit = execEditor
 	}
+	if opts.Herdr == nil {
+		opts.Herdr = execHerdr
+	}
+	if opts.ShellCmd == nil {
+		opts.ShellCmd = func(shell, dir string) *exec.Cmd {
+			c := exec.Command(shell)
+			c.Dir = dir
+			return c
+		}
+	}
 	cmds := &commands{runner: opts.Runner}
 	acts := newTaskActions(cmds, opts.Getenv, opts.Edit)
 	detail := newDetailView(acts, opts.Store)
@@ -87,7 +102,7 @@ func New(opts Options) *Model {
 		cmds:   cmds,
 		acts:   acts,
 		detail: detail,
-		views:  []view{newGoalsView(cmds), newReviewView(acts), detail, newAgentsView()},
+		views:  []view{newGoalsView(cmds), newReviewView(acts), detail, newAgentsView(opts.Now)},
 		names:  []string{"Goals", "Review", "Task detail", "Agents"},
 		width:  100,
 		height: 30,
@@ -160,6 +175,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
+	case shellDoneMsg:
+		if msg.err != nil {
+			m.cmds.note("open worktree: the shell failed: %v", msg.err)
+		}
+		return m, m.poll()
 	case procDoneMsg:
 		m.cmds.finish(msg)
 		return m, tea.Batch(m.poll(), m.detail.Update(msg))
