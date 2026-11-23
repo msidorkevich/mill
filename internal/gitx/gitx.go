@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // Run executes git in dir and returns trimmed stdout. Errors include git's stderr.
@@ -289,11 +290,35 @@ func identity(ctx context.Context, dir string) []string {
 	return args
 }
 
-// Fetch fetches the branches of remote (its configured remote-tracking refs).
+// fetchLocks serializes fetches of the same repository within the process: two concurrent
+// fetches updating the same remote-tracking refs can fail with "cannot lock ref".
+var fetchLocks sync.Map // repository key -> *sync.Mutex
+
+// repoLock returns the fetch mutex of the repository dir belongs to. Worktrees share their
+// main repository's refs, so the key is the common git directory.
+func repoLock(ctx context.Context, dir string) *sync.Mutex {
+	key, err := Run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil || key == "" {
+		if key, err = filepath.Abs(dir); err != nil {
+			key = dir
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(key); err == nil {
+		key = resolved
+	}
+	m, _ := fetchLocks.LoadOrStore(key, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// Fetch fetches the branches of remote (its configured remote-tracking refs). Fetches of the
+// same repository run one at a time.
 func Fetch(ctx context.Context, dir, remote string) error {
 	if strings.HasPrefix(remote, "-") || remote == "" {
 		return fmt.Errorf("fetch: invalid remote %q", remote)
 	}
+	mu := repoLock(ctx, dir)
+	mu.Lock()
+	defer mu.Unlock()
 	_, err := Run(ctx, dir, "fetch", "--quiet", "--prune", remote)
 	return err
 }

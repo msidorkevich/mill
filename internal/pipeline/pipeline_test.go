@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1193,5 +1194,258 @@ func TestFormatResetTimeShowsDateWhenNotToday(t *testing.T) {
 	}
 	if got := FormatResetTime(now.Add(48*time.Hour), now); got != "Nov 24 10:00" {
 		t.Fatalf("other day = %q", got)
+	}
+}
+
+// withRemote gives the repo a bare origin holding main.
+func (e *env) withRemote(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	bare := t.TempDir()
+	if _, err := gitx.Run(ctx, bare, "init", "-q", "--bare", "-b", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitx.Run(ctx, e.root, "remote", "add", "origin", bare); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitx.Run(ctx, e.root, "push", "-q", "origin", "main"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// land merges task id's branch into origin's main, marks it landed and cleans up its local
+// branch and worktree, as clean_on_land does. Local main stays behind. It returns the new
+// remote main tip.
+func (e *env) land(t *testing.T, id string) string {
+	t.Helper()
+	ctx := context.Background()
+	br, err := e.p.Store.GetBranch(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gitx.Fetch(ctx, e.root, "origin"); err != nil {
+		t.Fatal(err)
+	}
+	tip, err := gitx.RevParse(ctx, e.root, "refs/remotes/origin/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(t.TempDir(), "land")
+	if err := gitx.AddDetachedWorktree(ctx, e.root, scratch, tip); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitx.Merge(ctx, scratch, br.HeadSHA, "land "+id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitx.Run(ctx, scratch, "push", "-q", "origin", "HEAD:refs/heads/main"); err != nil {
+		t.Fatal(err)
+	}
+	landed, err := gitx.RevParse(ctx, scratch, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wt := range []string{scratch, br.Worktree} {
+		if err := gitx.RemoveWorktree(ctx, e.root, wt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := gitx.DeleteBranch(ctx, e.root, br.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.p.Store.SetTaskStatus(ctx, id, store.TaskLanded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	return landed
+}
+
+func (e *env) runAll(t *testing.T, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if out := e.run(t, id); out.Status != store.TaskVerified {
+			t.Fatalf("%s: %+v\n%s", id, out, e.out)
+		}
+	}
+}
+
+func hasFiles(t *testing.T, dir string, files ...string) {
+	t.Helper()
+	for _, f := range files {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Fatalf("%s missing in %s: %v", f, dir, err)
+		}
+	}
+}
+
+func TestLandedDependencyBaseIsRemoteBaseTip(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.withRemote(t)
+	e.goal(t, nil, []string{"a"})
+	e.runAll(t, "g1/a")
+	tip := e.land(t, "g1/a")
+	e.runAll(t, "g1/b")
+	ctx := context.Background()
+	bb, _ := e.p.Store.GetBranch(ctx, "g1/b")
+	if bb.Base != "main" || bb.BaseSHA != tip || bb.StartSHA != tip {
+		t.Fatalf("b branch = %+v, remote tip %s", bb, tip)
+	}
+	hasFiles(t, bb.Worktree, "a.txt", "b.txt")
+}
+
+func TestFanInWithLandedDependencyStartsFromUnlandedAndMergesBaseTip(t *testing.T) {
+	cases := map[string]struct {
+		deps    [][]string
+		run     []string
+		land    []string
+		parent  string
+		fanin   string
+		present []string
+	}{
+		// c depends on a (landed) and b.
+		"other landed": {deps: [][]string{nil, nil, {"a", "b"}}, run: []string{"g1/a", "g1/b"}, land: []string{"g1/a"},
+			parent: "g1/b", fanin: "g1/c", present: []string{"a.txt", "b.txt"}},
+		// d depends on b (the plan's deepest, landed after a) and c.
+		"deepest landed": {deps: [][]string{nil, {"a"}, nil, {"b", "c"}}, run: []string{"g1/a", "g1/b", "g1/c"}, land: []string{"g1/a", "g1/b"},
+			parent: "g1/c", fanin: "g1/d", present: []string{"a.txt", "b.txt", "c.txt"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var impls, verdicts []runner.Step
+			for i := 0; i <= len(tc.run); i++ {
+				f := string(rune('a'+i)) + ".txt"
+				impls = append(impls, goalImpl(f, f+"\n"))
+				verdicts = append(verdicts, verdict("pass"))
+			}
+			e := setup(t, `true`, runner.Script{runner.RoleImplementer: impls, runner.RoleVerifier: verdicts}, nil)
+			e.withRemote(t)
+			e.goal(t, tc.deps...)
+			e.runAll(t, tc.run...)
+			var tip string
+			for _, id := range tc.land {
+				tip = e.land(t, id)
+			}
+			e.runAll(t, tc.fanin)
+			ctx := context.Background()
+			bp, _ := e.p.Store.GetBranch(ctx, tc.parent)
+			bf, _ := e.p.Store.GetBranch(ctx, tc.fanin)
+			if bf.Base != bp.Name || bf.BaseSHA != bp.HeadSHA {
+				t.Fatalf("fan-in branch = %+v, want base %s at %s", bf, bp.Name, bp.HeadSHA)
+			}
+			parents, _ := gitx.Run(ctx, bf.Worktree, "rev-parse", bf.StartSHA+"^@")
+			if p := strings.Fields(parents); len(p) != 2 || p[0] != bp.HeadSHA || p[1] != tip {
+				t.Fatalf("start %s parents %q, want %s and remote tip %s", bf.StartSHA, parents, bp.HeadSHA, tip)
+			}
+			hasFiles(t, bf.Worktree, append(tc.present, string(rune('a'+len(tc.run)))+".txt")...)
+		})
+	}
+}
+
+func TestFanInWithAllDependenciesLandedStartsFromBaseTip(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n"), goalImpl("c.txt", "c\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass"), verdict("pass")},
+	}, nil)
+	e.withRemote(t)
+	e.goal(t, nil, nil, []string{"a", "b"})
+	e.runAll(t, "g1/a", "g1/b")
+	e.land(t, "g1/a")
+	tip := e.land(t, "g1/b")
+	e.runAll(t, "g1/c")
+	bc, _ := e.p.Store.GetBranch(context.Background(), "g1/c")
+	if bc.Base != "main" || bc.BaseSHA != tip || bc.StartSHA != tip {
+		t.Fatalf("c branch = %+v, remote tip %s", bc, tip)
+	}
+	hasFiles(t, bc.Worktree, "a.txt", "b.txt", "c.txt")
+}
+
+func TestLandedDependencyUsesExistingRemoteTrackingTipWhenFetchFails(t *testing.T) {
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
+		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+	}, nil)
+	e.withRemote(t)
+	e.goal(t, nil, []string{"a"})
+	e.runAll(t, "g1/a")
+	tip := e.land(t, "g1/a") // leaves refs/remotes/origin/main at tip
+	ctx := context.Background()
+	gone := filepath.Join(t.TempDir(), "unreachable.git")
+	if _, err := gitx.Run(ctx, e.root, "remote", "set-url", "origin", gone); err != nil {
+		t.Fatal(err)
+	}
+	e.runAll(t, "g1/b")
+	bb, _ := e.p.Store.GetBranch(ctx, "g1/b")
+	if bb.Base != "main" || bb.BaseSHA != tip || bb.StartSHA != tip {
+		t.Fatalf("b branch = %+v, remote-tracking tip %s", bb, tip)
+	}
+	hasFiles(t, bb.Worktree, "a.txt", "b.txt")
+	if out := e.out.String(); !strings.Contains(out, "g1/b: warning: fetch origin failed") || !strings.Contains(out, "origin/main") {
+		t.Fatalf("no fetch warning in output:\n%s", out)
+	}
+}
+
+func TestNewBranchFailsWhenFetchFailsAndNoRemoteTrackingBranch(t *testing.T) {
+	e := setup(t, `true`, runner.Script{}, nil)
+	ctx := context.Background()
+	gone := filepath.Join(t.TempDir(), "unreachable.git")
+	if _, err := gitx.Run(ctx, e.root, "remote", "add", "origin", gone); err != nil {
+		t.Fatal(err)
+	}
+	e.goal(t, nil)
+	_, _, _, err := e.p.baseFor(ctx, store.Task{ID: "g1/a"})
+	if err == nil || !strings.Contains(err.Error(), "fetch origin") || !strings.Contains(err.Error(), "no origin/main") {
+		t.Fatalf("err = %v, want a fetch failure with nothing to fall back on", err)
+	}
+}
+
+func TestConcurrentNewBranchesFetchWithoutLockErrors(t *testing.T) {
+	e := setup(t, `true`, runner.Script{}, nil)
+	e.withRemote(t)
+	e.goal(t, nil, nil, nil, nil, nil, nil, nil, nil)
+	ctx := context.Background()
+	bare, err := gitx.Run(ctx, e.root, "remote", "get-url", "origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pusher := filepath.Join(t.TempDir(), "pusher")
+	if _, err := gitx.Run(ctx, filepath.Dir(pusher), "clone", "-q", bare, pusher); err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < 5; round++ {
+		// Give every round new remote commits and branches so each fetch updates refs.
+		if _, err := gitx.Run(ctx, pusher, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "round"); err != nil {
+			t.Fatal(err)
+		}
+		refspecs := []string{"push", "-q", "--force", "origin", "HEAD:main"}
+		for b := 0; b < 40; b++ {
+			refspecs = append(refspecs, fmt.Sprintf("HEAD:refs/heads/extra-%d", b))
+		}
+		if _, err := gitx.Run(ctx, pusher, refspecs...); err != nil {
+			t.Fatal(err)
+		}
+		want, err := gitx.RevParse(ctx, pusher, "HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		errs := make([]error, 8)
+		shas := make([]string, 8)
+		for i := range errs {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				_, shas[i], _, errs[i] = e.p.baseFor(ctx, store.Task{ID: "g1/" + string(rune('a'+i))})
+			}(i)
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d task %d: %v", round, i, err)
+			}
+			if shas[i] != want {
+				t.Fatalf("round %d task %d starts at %s, want remote tip %s", round, i, shas[i], want)
+			}
+		}
 	}
 }

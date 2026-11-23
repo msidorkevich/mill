@@ -1,6 +1,7 @@
 // Package fanin restacks a task with several dependencies (a fan-in task) onto them: it resets
 // the branch to its deepest parent's head (or to the remote base branch tip when that parent
 // landed), merges the other parents that have not landed and replays the task's own commits.
+// Start applies the same rules to the starting point of a new task branch.
 //
 // It is shared by the keeper, sync and `mill task rebase`; it lives in its own package because
 // the keeper imports the syncer. It only reads the store: callers record the new branch row.
@@ -43,6 +44,9 @@ type Target struct {
 	Upstream *Parent
 	// Wait is set when a dependency is not verified, published or landed: the task waits.
 	Wait string
+	// Warning is a non-fatal problem the caller should report, e.g. a failed fetch when the
+	// existing remote-tracking base branch was used instead.
+	Warning string
 }
 
 // Plan works out the target of fan-in task t: its deepest parent per the goal plan and the
@@ -146,6 +150,156 @@ func Plan(ctx context.Context, s *store.Store, cfg config.Config, root string, t
 	return tg, nil
 }
 
+// Start works out what a new branch for task t (with any number of dependencies) starts from.
+// A landed dependency's code is already in the base branch, so its own branch is never used:
+//   - no dependency, or all landed: the remote base branch tip;
+//   - one unlanded: its branch head, merging the remote base branch tip when others landed;
+//   - several unlanded: the deepest unlanded one per the goal plan, merging the other unlanded
+//     ones and, when any dependency landed, the remote base branch tip.
+//
+// Start fetches the remote first; without a configured remote the local base branch stands in
+// for the remote base branch. Parents lists the unlanded dependencies, the start first; their
+// Head is the current head of their branch.
+func Start(ctx context.Context, s *store.Store, cfg config.Config, root string, t store.Task) (Target, error) {
+	deps, err := s.TaskDeps(ctx, t.ID)
+	if err != nil {
+		return Target{}, err
+	}
+	var tg Target
+	var unlanded []Parent
+	anyLanded := false
+	for _, d := range deps {
+		dt, err := s.GetTask(ctx, d)
+		if err != nil {
+			return Target{}, err
+		}
+		if !store.Done(dt.Status) {
+			tg.Wait = fmt.Sprintf("dependency %s is %s, not verified, published or landed; run it first", d, dt.Status)
+			return tg, nil
+		}
+		if dt.Status == store.TaskLanded {
+			anyLanded = true
+			continue
+		}
+		db, err := s.GetBranch(ctx, d)
+		if err != nil {
+			return Target{}, fmt.Errorf("dependency %s is %s but has no branch: %w", d, dt.Status, err)
+		}
+		head, err := gitx.RevParse(ctx, root, db.Name)
+		if err != nil {
+			return Target{}, fmt.Errorf("head of dependency branch %q: %w", db.Name, err)
+		}
+		unlanded = append(unlanded, Parent{ID: d, Branch: db.Name, Head: head})
+	}
+
+	var upstream, upstreamTip string
+	if anyLanded || len(unlanded) == 0 {
+		if upstream, upstreamTip, tg.Warning, err = baseTip(ctx, cfg, root); err != nil {
+			return Target{}, err
+		}
+	}
+	if len(unlanded) == 0 {
+		tg.Onto, tg.Base, tg.BaseSHA, tg.Landed = upstream, cfg.BaseBranch, upstreamTip, true
+		return tg, nil
+	}
+	start := 0
+	if len(unlanded) > 1 {
+		goalID, local := store.SplitTaskID(t.ID)
+		g, err := s.GetGoal(ctx, goalID)
+		if err != nil {
+			return Target{}, fmt.Errorf("goal of fan-in task %s: %w", t.ID, err)
+		}
+		var pl plan.Plan
+		if err := json.Unmarshal(g.Plan, &pl); err != nil {
+			return Target{}, fmt.Errorf("goal %s has an unreadable plan: %w", goalID, err)
+		}
+		deepest := deepestUnlanded(pl, local, func(id string) bool {
+			for _, p := range unlanded {
+				if p.ID == store.TaskID(goalID, id) {
+					return true
+				}
+			}
+			return false
+		})
+		if deepest == "" {
+			return Target{}, fmt.Errorf("goal %s plan has no unlanded dependency of task %s", goalID, local)
+		}
+		start = -1
+		for i, p := range unlanded {
+			if p.ID == store.TaskID(goalID, deepest) {
+				start = i
+			}
+		}
+		if start < 0 {
+			return Target{}, fmt.Errorf("plan parent %s of %s is not among its stored dependencies", store.TaskID(goalID, deepest), t.ID)
+		}
+	}
+	unlanded[start].Deepest = true
+	tg.Parents = append([]Parent{unlanded[start]}, append(unlanded[:start:start], unlanded[start+1:]...)...)
+	p := tg.Parents[0]
+	tg.Onto, tg.Base, tg.BaseSHA = p.Branch, p.Branch, p.Head
+	if anyLanded {
+		tg.Upstream = &Parent{ID: cfg.BaseBranch, Branch: upstream, Head: upstreamTip}
+	}
+	return tg, nil
+}
+
+// deepestUnlanded is plan.DeepestParent restricted to the dependencies of task id for which
+// unlanded reports true.
+func deepestUnlanded(pl plan.Plan, id string, unlanded func(string) bool) string {
+	for _, pt := range pl.Tasks {
+		if pt.ID != id {
+			continue
+		}
+		best, bestDepth := "", -1
+		for _, d := range pt.DependsOn {
+			if !unlanded(d) {
+				continue
+			}
+			if n := pl.Depth(d); n >= bestDepth {
+				best, bestDepth = d, n
+			}
+		}
+		return best
+	}
+	return ""
+}
+
+// baseTip fetches the remote and returns <remote>/<base_branch> and its tip. Without a
+// configured remote it returns the local base branch and its tip instead. When the fetch fails
+// but the remote-tracking branch already exists, its (possibly stale) tip is used and the fetch
+// failure is returned as a warning; it fails only when there is no remote-tracking branch.
+func baseTip(ctx context.Context, cfg config.Config, root string) (ref, tip, warning string, err error) {
+	if cfg.Remote != "" {
+		if _, err := gitx.Run(ctx, root, "remote", "get-url", "--", cfg.Remote); err == nil {
+			ref = cfg.Remote + "/" + cfg.BaseBranch
+			fetchErr := gitx.Fetch(ctx, root, cfg.Remote)
+			tip, err := gitx.RevParse(ctx, root, "refs/remotes/"+ref)
+			if fetchErr != nil {
+				if err != nil {
+					return "", "", "", fmt.Errorf("fetch %s: %w; there is no %s to fall back on, check the remote and retry", cfg.Remote, fetchErr, ref)
+				}
+				warning = fmt.Sprintf("fetch %s failed (%v); using the existing %s at %.12s, which may be stale", cfg.Remote, oneLine(fetchErr.Error()), ref, tip)
+				return ref, tip, warning, nil
+			}
+			if err != nil {
+				return "", "", "", fmt.Errorf("remote %s has no branch %s; push %s to %s first: %w", cfg.Remote, cfg.BaseBranch, cfg.BaseBranch, cfg.Remote, err)
+			}
+			return ref, tip, "", nil
+		}
+	}
+	tip, err = gitx.RevParse(ctx, root, cfg.BaseBranch)
+	if err != nil {
+		return "", "", "", fmt.Errorf("base branch %q: %w", cfg.BaseBranch, err)
+	}
+	return cfg.BaseBranch, tip, "", nil
+}
+
+// oneLine joins a multi-line message (such as git's stderr) into one line.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // landed is the commit that shows the parent has landed: its landing commit, or its head when
 // the landing is not recorded.
 func (p Parent) landed() string {
@@ -245,7 +399,10 @@ func (tg Target) Moved(ctx context.Context, root string, br store.Branch) (bool,
 // and have not landed, then the remote base branch when a landed parent needs it.
 func (tg Target) Merges() []Parent {
 	var out []Parent
-	for _, p := range tg.Parents[1:] {
+	for i, p := range tg.Parents {
+		if i == 0 {
+			continue
+		}
 		if !p.Landed {
 			out = append(out, p)
 		}
