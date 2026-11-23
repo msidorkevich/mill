@@ -89,3 +89,29 @@ func toolInput(raw json.RawMessage) string {
 
 // oneLine collapses all whitespace runs, so the result fits on one terminal line.
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// Actions reads a claude stream-json file and describes every action in it, oldest first, in
+// the format LastAction uses: one line per assistant event, for its last tool call or text.
+// Lines that do not parse, such as a partially written last line, are skipped.
+func Actions(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read agent stream: %w", err)
+	}
+	defer f.Close()
+	var out []string
+	r := bufio.NewReaderSize(f, 1<<20)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if a := actionOf(line); a != "" {
+			out = append(out, a)
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return nil, fmt.Errorf("read agent stream %s: %w", path, rerr)
+		}
+	}
+	return out, nil
+}

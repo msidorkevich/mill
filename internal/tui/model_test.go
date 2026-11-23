@@ -331,7 +331,7 @@ func TestQuitReturnsTeaQuit(t *testing.T) {
 func TestTabsSwitchViews(t *testing.T) {
 	m, _ := newModel(t, seed(t))
 	press(m, "tab")
-	if v := screen(m); !strings.Contains(v, "coming soon") || strings.Contains(v, "Build the widget") {
+	if v := screen(m); !strings.Contains(v, "no tasks await review") || strings.Contains(v, "Build the widget") {
 		t.Errorf("tab did not switch to Review:\n%s", v)
 	}
 	press(m, "shift+tab")
