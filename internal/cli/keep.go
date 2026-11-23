@@ -131,7 +131,7 @@ func keepOnce(ctx context.Context, env Env, o keepOpts) int {
 	defer release()
 
 	out := &lockedWriter{w: progress}
-	p, err := newPipeline(env, "keep", paths, cfg, s, out)
+	p, err := newPipeline(env, "keep", paths, cfg, "", s, out)
 	if err != nil {
 		return fail(err)
 	}

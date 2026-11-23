@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -81,8 +83,12 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "task run")
 	file := fs.String("file", "", "task file (JSON)")
 	retry := fs.Bool("retry", false, "run a blocked or failed task again, with the spec from --file")
+	hostFlag := hostFlagVar(fs)
 	if code, ok := parse(fs, args); !ok {
 		return code
+	}
+	if !validHostFlag(env, "task run", *hostFlag) {
+		return ExitUsage
 	}
 	if *file == "" {
 		fmt.Fprintln(env.Stderr, "mill task run: --file is required")
@@ -136,7 +142,7 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		}
 	}
 
-	p, err := newPipeline(env, "task run", paths, cfg, s, env.Stdout)
+	p, err := newPipeline(env, "task run", paths, cfg, *hostFlag, s, env.Stdout)
 	if err != nil {
 		return fail(err)
 	}
@@ -234,10 +240,14 @@ func interruptedUsage(ctx context.Context, out io.Writer, s *store.Store, prices
 }
 
 // newPipeline builds the pipeline from the project config: host, runner and agent env.
-func newPipeline(env Env, name string, paths project.Paths, cfg config.Config, s *store.Store, out io.Writer) (*pipeline.Pipeline, error) {
-	h := host.Host(host.NewExec())
-	if cfg.Host.Kind == "herdr" {
-		fmt.Fprintf(env.Stderr, "mill %s: the herdr host is not implemented yet; using exec\n", name)
+// hostKind overrides host.kind from the config when not empty.
+func newPipeline(env Env, name string, paths project.Paths, cfg config.Config, hostKind string, s *store.Store, out io.Writer) (*pipeline.Pipeline, error) {
+	if hostKind == "" {
+		hostKind = cfg.Host.Kind
+	}
+	h, _, err := host.Select(hostKind, os.Getenv, exec.LookPath)
+	if err != nil {
+		return nil, err
 	}
 	var r runner.Runner
 	var agentEnv []string
@@ -596,4 +606,18 @@ func insideDir(pid int, dir string) bool {
 	}
 	rel, err := filepath.Rel(dir, cwd)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// hostFlagVar registers --host, which overrides host.kind for one command.
+func hostFlagVar(fs *flag.FlagSet) *string {
+	return fs.String("host", "", "host for agent processes: auto, exec or herdr (default: host.kind from the config)")
+}
+
+func validHostFlag(env Env, name, v string) bool {
+	switch v {
+	case "", "auto", "exec", "herdr":
+		return true
+	}
+	fmt.Fprintf(env.Stderr, "mill %s: --host must be auto, exec or herdr, got %q\n", name, v)
+	return false
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 )
@@ -175,23 +176,12 @@ func Run(ctx context.Context, opts Options) Report {
 	}
 
 	// host
-	_, herdrErr := opts.LookPath("herdr")
-	inHerdr := opts.Getenv("HERDR_PANE_ID") != ""
 	if !cfgOK {
 		add("host", Skip, "needs a valid config")
+	} else if _, desc, err := host.Select(cfg.Host.Kind, opts.Getenv, opts.LookPath); err != nil {
+		add("host", Fail, "%v", err)
 	} else {
-		switch cfg.Host.Kind {
-		case "exec":
-			add("host", OK, "exec")
-		case "auto":
-			if herdrErr == nil && inHerdr {
-				add("host", Warn, "auto would pick herdr, but the herdr host is not implemented yet; using exec")
-			} else {
-				add("host", OK, "auto → exec")
-			}
-		case "herdr":
-			add("host", Warn, "host.kind = herdr is not implemented yet; exec will be used")
-		}
+		add("host", OK, "%s", desc)
 	}
 
 	// gitignore

@@ -28,9 +28,13 @@ func runRun(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "run")
 	retry := fs.Bool("retry-blocked", false, "put blocked and failed tasks back to pending first")
 	waitLimit := fs.Bool("wait-on-limit", false, "when a usage limit is reached, wait for it to reset and continue")
-	id, code, ok := goalArg(env, "run", "mill run <goal> [--retry-blocked] [--wait-on-limit]", fs, args)
+	hostFlag := hostFlagVar(fs)
+	id, code, ok := goalArg(env, "run", "mill run <goal> [--retry-blocked] [--wait-on-limit] [--host auto|exec|herdr]", fs, args)
 	if !ok {
 		return code
+	}
+	if !validHostFlag(env, "run", *hostFlag) {
+		return ExitUsage
 	}
 	fail := func(err error) int {
 		fmt.Fprintf(env.Stderr, "mill run: %v\n", err)
@@ -52,7 +56,7 @@ func runRun(ctx context.Context, env Env, args []string) int {
 	defer release()
 
 	out := &lockedWriter{w: env.Stdout}
-	p, err := newPipeline(env, "run", paths, cfg, s, out)
+	p, err := newPipeline(env, "run", paths, cfg, *hostFlag, s, out)
 	if err != nil {
 		return fail(err)
 	}
