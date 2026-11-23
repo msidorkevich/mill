@@ -113,7 +113,12 @@ func TestSyncMarksVerifiedBranchMergedDirectlyAsLanded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	last := evs[len(evs)-1]
+	var last store.Event
+	for _, e := range evs {
+		if e.Kind == "task-landed" {
+			last = e
+		}
+	}
 	var d map[string]string
 	if err := json.Unmarshal(last.Data, &d); err != nil {
 		t.Fatal(err)

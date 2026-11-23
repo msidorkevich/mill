@@ -298,13 +298,31 @@ a fan-in task waits for its other dependencies to land. Approving again force-pu
 onto `<remote>/<base_branch>`, re-gated and re-published, so their review branches track main.
 When every task of a goal has landed, the goal becomes `landed`.
 
+**Cleaning on land.** At the end of each sync (so also during `mill keep`), after the children
+of newly landed tasks were restacked, sync cleans up the tasks that landed in that pass, as
+`clean_on_land` in `.mill/config.toml` says:
+
+| `clean_on_land` | removes |
+|---|---|
+| `"all"` (default) | worktree, local `mill/*` branch and the remote `review/*` branch |
+| `"local"` | worktree and local branch; the remote review branch stays |
+| `"off"` | nothing |
+
+It does what `mill clean` (with `--remote` for `"all"`) does for that task: a remote branch is
+deleted only while it still points at the published commit. A worktree with uncommitted changes
+is kept, together with its branch, and reported. The sync summary lists what was cleaned up
+("Cleaned up:") and what was not ("Not cleaned up"); `mill sync --json` and `mill keep --json`
+carry them as `cleaned` and `not_cleaned`. Cleanup problems never fail the sync.
+
 **Cleaning.** `mill clean` removes the worktree and local `mill/*` branch of every landed task,
 clears its recorded worktree path and records a `task-cleaned` event; the branch row and history
 stay. Tasks that are not landed are never touched. `--remote` also deletes the task's
 `review/*` branch on the remote, but only when it still points at the published commit: a branch
 the forge already deleted is skipped, and one that moved is left alone with a message.
 `--dry-run` prints what would be removed and changes nothing. It ends with a summary (worktrees,
-branches, remote branches, skipped with reasons). Running it again is harmless.
+branches, remote branches, skipped with reasons). Running it again is harmless. Sync already
+cleans up tasks as they land (see `clean_on_land`); `mill clean` remains for tasks that landed
+before that, ones sync could not clean (a dirty worktree), or with `clean_on_land = "off"`.
 
 ### Keeping branches mergeable: `mill keep`
 
