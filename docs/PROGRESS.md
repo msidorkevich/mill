@@ -631,3 +631,31 @@ and mine, updated in its own PRs).
   them; one was `go get -u ./...` in the main checkout. It failed before writing anything (the
   tree stayed clean) and I repaired the damaged spec text. From now on, code that carries text
   goes in script files, never inline shell-quoted strings.
+
+### Follow-ups found in M5
+
+- [ ] **New task branches referred to landed dependencies' deleted branches** (bug, fix in
+      progress as task `prepare-landed-deps`). After the first five `g12` tasks landed,
+      `mill run g12 --retry-blocked` failed both remaining tasks before any agent started:
+      `merge dependency g12/herdr-wiring: … not something we can merge`. Cause: preparing a new
+      task's branch still merged every dependency's branch by name, but `clean_on_land` (task
+      `clean-on-land`) had deleted the branches of the landed ones. A landed dependency's code is
+      already in the base branch, so it needs no branch. Fix: base new branches like restacks
+      already do (`internal/fanin`): landed dependencies come from the remote base tip, and only
+      unlanded dependencies are merged by branch. No tokens were spent on the failed attempt.
+- [ ] **Slow gates** (measured during `g12`). A gate takes at least 5 minutes: `internal/cli`'s
+      145 integration tests take ~300s, and no test in the repository uses `t.Parallel()`, so
+      they use about one of 8 cores. Two gates at once, next to the agents, pushed the load
+      average to 132 on 8 cores, and test file churn kept `fseventsd` near 95% CPU.
+      (Already done: `~/.cache/mill` is excluded from Time Machine.) Planned as a "fast gates"
+      goal right after M5:
+  - [ ] **A. Run independent tests in parallel:** `t.Parallel()` in every test that does not
+        share process state, replacing the 5 `t.Setenv` uses that prevent it (pass the values
+        explicitly instead). Target: `internal/cli` from ~300s to 60–90s.
+  - [ ] **B. No duplicate test runs in a gate:** `check_cmd` (`make check`) already runs every
+        package, but the planner gave tasks checks like `go test ./internal/cli/...`, so those
+        gates ran the slowest package twice. Task checks must stay narrow (`-run …`) when
+        `check_cmd` covers the package: a planner prompt rule, plus a plan validation warning.
+  - [ ] **E. Limit concurrent gates:** a `max_parallel_gates` setting (default 1), separate
+        from `max_parallel`, so agents still work in parallel while gates take turns. Fewer
+        load spikes; less important once A is done.
