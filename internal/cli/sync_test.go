@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/msidorkevich/mill/internal/project"
+	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -507,4 +510,145 @@ func TestSyncLandsVerifiedTaskWhoseBranchWasMergedDirectly(t *testing.T) {
 	if tk, _ := s.GetTask(ctx, "g2/b"); tk.Status != store.TaskVerified {
 		t.Errorf("g2/b status = %s", tk.Status)
 	}
+}
+
+// busyWorker is a running attempt on a task whose recorded worker is a live process.
+type busyWorker struct {
+	s       *store.Store
+	attempt int64
+	pid     int
+	doing   string
+	exited  chan struct{}
+}
+
+// startBusyAttempt records a running reviewer attempt on id whose worker pid is a live
+// `sleep` process, as a `mill run` in another terminal would.
+func startBusyAttempt(t *testing.T, root, id string) *busyWorker {
+	t.Helper()
+	ctx := context.Background()
+	s := openStore(t, root)
+	n, err := s.MaxAttemptN(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aid, err := s.StartAttempt(ctx, id, n+1, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	w := &busyWorker{s: s, attempt: aid, pid: cmd.Process.Pid, exited: make(chan struct{})}
+	go func() { cmd.Wait(); close(w.exited) }()
+	t.Cleanup(func() { cmd.Process.Kill(); <-w.exited })
+	if err := s.SetAttemptProcess(ctx, aid, w.pid, "claude", ""); err != nil {
+		t.Fatal(err)
+	}
+	w.doing = "attempt " + strconv.Itoa(n+1) + " (reviewer) running"
+	return w
+}
+
+// assertUntouched checks the attempt is still running with its pid and the worker is alive.
+func (w *busyWorker) assertUntouched(t *testing.T) {
+	t.Helper()
+	select {
+	case <-w.exited:
+		t.Errorf("worker pid %d was killed", w.pid)
+	default:
+	}
+	running, err := w.s.RunningAttempts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range running {
+		if a.ID == w.attempt && a.PID == w.pid {
+			return
+		}
+	}
+	t.Errorf("attempt %d is no longer running with pid %d: %+v", w.attempt, w.pid, running)
+}
+
+func assertNoClaims(t *testing.T, root string) {
+	t.Helper()
+	claims, err := openStore(t, root).ClaimedTasks(context.Background())
+	if err != nil || len(claims) != 0 {
+		t.Errorf("claims left = %+v, %v", claims, err)
+	}
+}
+
+func TestSyncLandsMergedTaskWhileRunLockIsHeld(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	lock, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	f := forge(t, bare)
+	mergeReview(t, f, "g2/a")
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Landed:") {
+		t.Fatalf("sync with held lock: %+v", r)
+	}
+	if tk, _ := openStore(t, root).GetTask(context.Background(), "g2/a"); tk.Status != store.TaskLanded {
+		t.Errorf("g2/a status = %s, want landed", tk.Status)
+	}
+	assertNoClaims(t, root)
+}
+
+func TestSyncLeavesBusyTaskUnchangedAndExitsOne(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	ctx := context.Background()
+	s := openStore(t, root)
+	oldChild, _ := s.GetBranch(ctx, "g2/b")
+	oldPub := remoteRefs(t, bare)["refs/heads/review/g2/b"]
+	w := startBusyAttempt(t, root, "g2/b")
+	f := forge(t, bare)
+	mergeReview(t, f, "g2/a")
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitError {
+		t.Fatalf("sync: %+v", r)
+	}
+	for _, want := range []string{"Landed:", "g2/a  ", "Busy (being worked on; run `mill sync` again later):\n  g2/b  " + w.doing} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
+	}
+	if strings.Contains(r.stdout, "Restacked:") {
+		t.Errorf("busy task restacked:\n%s", r.stdout)
+	}
+	if tk, _ := s.GetTask(ctx, "g2/a"); tk.Status != store.TaskLanded {
+		t.Errorf("g2/a status = %s, want landed", tk.Status)
+	}
+	if tk, _ := s.GetTask(ctx, "g2/b"); tk.Status != store.TaskPublished {
+		t.Errorf("g2/b status = %s, want published", tk.Status)
+	}
+	if got, _ := s.GetBranch(ctx, "g2/b"); got != oldChild {
+		t.Errorf("busy g2/b branch row changed: %+v, was %+v", got, oldChild)
+	}
+	if head := gitC(t, root, "rev-parse", oldChild.Name); head != oldChild.HeadSHA {
+		t.Errorf("busy g2/b git branch moved to %s", head)
+	}
+	if pub := remoteRefs(t, bare)["refs/heads/review/g2/b"]; pub != oldPub {
+		t.Errorf("busy g2/b re-published: %s, was %s", pub, oldPub)
+	}
+	w.assertUntouched(t)
+
+	r = run(t, root, nil, "sync", "--json")
+	var doc struct {
+		Busy []struct {
+			TaskID string `json:"task_id"`
+			Doing  string `json:"doing"`
+		} `json:"busy"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("sync --json: %v\n%+v", err, r)
+	}
+	if r.code != ExitError || len(doc.Busy) != 1 || doc.Busy[0].TaskID != "g2/b" || doc.Busy[0].Doing != w.doing {
+		t.Fatalf("sync --json: %+v", r)
+	}
+	w.assertUntouched(t)
+	assertNoClaims(t, root)
 }

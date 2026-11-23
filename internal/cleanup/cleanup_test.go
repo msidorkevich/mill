@@ -44,7 +44,10 @@ func landedTask(t *testing.T) (Options, store.Branch, string) {
 	if err := s.SaveBranch(ctx, br); err != nil {
 		t.Fatal(err)
 	}
-	return Options{Store: s, Root: root, Remote: "origin"}, br, wtRoot
+	if err := s.SetTaskStatus(ctx, "x", store.TaskLanded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	return Options{Store: s, Root: root, Remote: "origin", Claimer: store.NewClaimer("clean")}, br, wtRoot
 }
 
 func TestCleanupKeepsDirtyWorktreeAndBranch(t *testing.T) {
@@ -96,5 +99,40 @@ func TestCleanupRemovesWorktreeAndBranchThenPrunesEmptyDirs(t *testing.T) {
 	}
 	if n, err := PruneEmptyDirs(nil, filepath.Join(wtRoot, "missing"), false); err != nil || n != 0 {
 		t.Errorf("missing root: %d, %v", n, err)
+	}
+}
+
+func TestCleanupLeavesBusyTaskAloneAndReleasesItsClaims(t *testing.T) {
+	o, br, _ := landedTask(t)
+	ctx := context.Background()
+	if _, err := o.Store.StartAttempt(ctx, "x", 1, "implementer"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Task(ctx, o, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Busy != "attempt 1 (implementer) running" || r.Cleaned() || len(r.Failures) != 0 {
+		t.Fatalf("result = %+v", r)
+	}
+	if _, err := os.Stat(br.Worktree); err != nil || !gitx.BranchExists(ctx, o.Root, br.Name) {
+		t.Errorf("worktree or branch of a busy task removed (err=%v)", err)
+	}
+	claims, err := o.Store.ClaimedTasks(ctx)
+	if err != nil || len(claims) != 0 {
+		t.Errorf("claims left = %+v, %v", claims, err)
+	}
+}
+
+func TestCleanupClaimIsReleasedAfterCleaning(t *testing.T) {
+	o, br, _ := landedTask(t)
+	ctx := context.Background()
+	r, err := Task(ctx, o, "x")
+	if err != nil || r.Worktree != br.Worktree {
+		t.Fatalf("result = %+v, %v", r, err)
+	}
+	claims, err := o.Store.ClaimedTasks(ctx)
+	if err != nil || len(claims) != 0 {
+		t.Errorf("claims left = %+v, %v", claims, err)
 	}
 }

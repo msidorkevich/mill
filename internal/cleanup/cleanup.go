@@ -1,5 +1,6 @@
 // Package cleanup removes what a landed task leaves behind: its worktree, its local branch and,
-// optionally, its review branch on the remote. `mill clean` and the syncer share it.
+// optionally, its review branch on the remote. `mill clean` and the syncer share it. It claims
+// the task (store.ClaimTasks) while it changes it and leaves a busy task alone.
 package cleanup
 
 import (
@@ -29,6 +30,8 @@ type Options struct {
 	KeepDirty bool
 	// Out receives one line per action, in the format of `mill clean`; nil discards.
 	Out io.Writer
+	// Claimer claims the task while it is cleaned up; required unless DryRun.
+	Claimer store.Claimer
 }
 
 // Skip is a step that was not taken.
@@ -52,7 +55,10 @@ type Result struct {
 	Branch       string // the local branch deleted, "" if none
 	RemoteBranch string // the review branch deleted on the remote, "" if none
 	// Kept explains why the worktree and branch were kept (KeepDirty); "" otherwise.
-	Kept     string
+	Kept string
+	// Busy says what holds the task when it was left alone because it is being worked on;
+	// "" otherwise.
+	Busy     string
 	Skipped  []Skip
 	Failures []Failure
 }
@@ -60,9 +66,39 @@ type Result struct {
 // Cleaned reports whether anything was removed.
 func (r Result) Cleaned() bool { return r.Worktree != "" || r.Branch != "" || r.RemoteBranch != "" }
 
-// Task cleans up one landed task. Step failures are collected in the result; an error means
-// the task's branch record could not be read.
-func Task(ctx context.Context, o Options, id string) (Result, error) {
+// Task cleans up one landed task. A busy task is left alone and reported in Result.Busy.
+// Step failures are collected in the result; an error means the task could not be claimed or
+// its branch record could not be read.
+func Task(ctx context.Context, o Options, id string) (r Result, err error) {
+	if o.DryRun {
+		return task(ctx, o, id)
+	}
+	err = o.Store.ClaimTasks(ctx, o.Claimer, []string{id})
+	var busy *store.BusyError
+	if errors.As(err, &busy) {
+		return Result{TaskID: id, Busy: busy.Doing}, nil
+	}
+	if err != nil {
+		return Result{TaskID: id}, err
+	}
+	defer func() {
+		if rerr := o.Store.ReleaseClaims(context.WithoutCancel(ctx), o.Claimer, []string{id}); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
+	}()
+	t, err := o.Store.GetTask(ctx, id)
+	if err != nil {
+		return Result{TaskID: id}, err
+	}
+	if t.Status != store.TaskLanded {
+		r := Result{TaskID: id}
+		r.Skipped = append(r.Skipped, Skip{Why: "no longer landed (now " + t.Status + "); left alone"})
+		return r, nil
+	}
+	return task(ctx, o, id)
+}
+
+func task(ctx context.Context, o Options, id string) (Result, error) {
 	r := Result{TaskID: id}
 	b, err := o.Store.GetBranch(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {

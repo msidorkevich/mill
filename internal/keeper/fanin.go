@@ -61,7 +61,7 @@ func (k *keeper) restackFanIn(ctx context.Context, t store.Task, br store.Branch
 		}
 		k.logf("%s: conflicts with %s; restacking onto %s (%s)", t.ID, strings.Join(conflicts, "; "), tg.Onto, short(tg.BaseSHA))
 	}
-	return k.restack(ctx, t, br, tg)
+	return k.withClaim(ctx, t.ID, t.Status, func() error { return k.restack(ctx, t, br, tg) })
 }
 
 // restack rebuilds the fan-in task on tg with the resolver for conflicts, then settles it.

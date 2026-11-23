@@ -10,6 +10,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/keeper"
+	"github.com/msidorkevich/mill/internal/syncer"
 )
 
 const (
@@ -72,13 +73,17 @@ func runKeep(ctx context.Context, env Env, args []string) int {
 	}
 	o := keepOpts{goal: goal, combined: *combined, asJSON: *asJSON}
 	for {
-		if code := keepOnce(ctx, env, o); code != ExitOK {
+		code, busy := keepOnce(ctx, env, o)
+		if code != ExitOK {
 			if *watch && ctx.Err() != nil {
 				return ExitOK
 			}
 			return code
 		}
 		if !*watch {
+			if busy {
+				return ExitError
+			}
 			return ExitOK
 		}
 		if !keepWait(ctx, *interval) || ctx.Err() != nil {
@@ -87,11 +92,13 @@ func runKeep(ctx context.Context, env Env, args []string) int {
 	}
 }
 
-// keepOnce runs one pass under the run lock and prints its result.
-func keepOnce(ctx context.Context, env Env, o keepOpts) int {
-	fail := func(err error) int {
+// keepOnce runs one pass and prints its result; busy reports whether it left tasks alone
+// because they are being worked on. It takes no run lock: the keeper claims each task it
+// changes.
+func keepOnce(ctx context.Context, env Env, o keepOpts) (code int, busy bool) {
+	fail := func(err error) (int, bool) {
 		fmt.Fprintf(env.Stderr, "mill keep: %v\n", err)
-		return ExitError
+		return ExitError, false
 	}
 	paths, cfg, s, err := openProject(ctx, env)
 	if err != nil {
@@ -119,16 +126,9 @@ func keepOnce(ctx context.Context, env Env, o keepOpts) int {
 
 	// With --json, stdout holds only the document; progress goes to stderr.
 	var progress io.Writer = env.Stdout
-	recoverEnv := env
 	if o.asJSON {
 		progress = env.Stderr
-		recoverEnv.Stdout = env.Stderr
 	}
-	release, err := lockAndRecover(ctx, recoverEnv, "keep", paths, s, cfg.Prices)
-	if err != nil {
-		return fail(err)
-	}
-	defer release()
 
 	out := &lockedWriter{w: progress}
 	p, err := newPipeline(env, "keep", paths, cfg, "", s, out)
@@ -148,6 +148,7 @@ func keepOnce(ctx context.Context, env Env, o keepOpts) int {
 			return fail(err)
 		}
 		kres = &r
+		busy = len(r.Busy)+len(r.Sync.Busy) > 0
 	}
 	// Combined returns without running when fewer than two branches are ready.
 	cres, err := keeper.Combined(ctx, ko)
@@ -155,10 +156,10 @@ func keepOnce(ctx context.Context, env Env, o keepOpts) int {
 		return fail(err)
 	}
 	if o.asJSON {
-		return encodeJSON(env, "mill keep", keepDoc{Schema: "mill/keep@1", Keeper: kres, Combined: &cres})
+		return encodeJSON(env, "mill keep", keepDoc{Schema: "mill/keep@1", Keeper: kres, Combined: &cres}), busy
 	}
 	printKeep(env.Stdout, kres, cres)
-	return ExitOK
+	return ExitOK, busy
 }
 
 func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
@@ -205,6 +206,10 @@ func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
 		section("Published from queue", queued)
 		section("Waiting", waiting)
 		section("Blocked", blockedL)
+		if busy := append(append([]syncer.Busy{}, r.Sync.Busy...), r.Busy...); len(busy) > 0 {
+			empty = false
+			printBusy(w, busy, "mill keep")
+		}
 	}
 	cachedNote := ""
 	if c.Cached {

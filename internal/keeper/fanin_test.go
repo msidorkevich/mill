@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/runner"
@@ -84,7 +85,9 @@ func setupFanIn(t *testing.T, checkCmd string, script runner.Script) *fanIn {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.StartAttempt(ctx, fanInID, 1, "implementer"); err != nil {
+	if aid, err := s.StartAttempt(ctx, fanInID, 1, "implementer"); err != nil {
+		t.Fatal(err)
+	} else if err := s.FinishAttempt(ctx, aid, "ok", budget.Usage{}, false, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.AppendEvent(ctx, "task-verdict", g.ID, fanInID, map[string]any{"attempt": 1, "head": f.cHead,

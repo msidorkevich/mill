@@ -233,3 +233,55 @@ func TestSyncReportsRedGateAfterRestackWithoutBlocking(t *testing.T) {
 		t.Fatalf("gate sha %s recorded as green at the new head", br.GateSHA)
 	}
 }
+
+func TestSyncLeavesBusyMergedTaskUnchangedAndLandsTheOthers(t *testing.T) {
+	o, bare := fixture(t, "busy", "free")
+	ctx := context.Background()
+	aid, err := o.Store.StartAttempt(ctx, "busy", 2, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forge := filepath.Join(t.TempDir(), "forge")
+	git(t, t.TempDir(), "clone", "-q", bare, forge)
+	git(t, forge, "checkout", "-q", "-B", "main", "origin/main")
+	for _, id := range []string{"busy", "free"} {
+		git(t, o.Paths.Root, "push", "-q", bare, "mill/t/"+id+":refs/heads/"+id)
+		git(t, forge, "fetch", "-q", "origin")
+		git(t, forge, "merge", "-q", "--no-ff", "-m", "Merge "+id, "origin/"+id)
+	}
+	git(t, forge, "push", "-q", "origin", "main")
+
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Landed) != 1 || res.Landed[0].TaskID != "free" {
+		t.Fatalf("landed = %+v", res.Landed)
+	}
+	if len(res.Busy) != 1 || res.Busy[0] != (Busy{TaskID: "busy", Doing: "attempt 2 (reviewer) running"}) {
+		t.Fatalf("busy = %+v", res.Busy)
+	}
+	if tk, _ := o.Store.GetTask(ctx, "busy"); tk.Status != store.TaskVerified {
+		t.Errorf("busy status = %s, want it unchanged", tk.Status)
+	}
+	running, err := o.Store.RunningAttempts(ctx)
+	if err != nil || len(running) != 1 || running[0].ID != aid {
+		t.Errorf("running attempts = %+v, %v", running, err)
+	}
+	if claims, err := o.Store.ClaimedTasks(ctx); err != nil || len(claims) != 0 {
+		t.Errorf("claims left = %+v, %v", claims, err)
+	}
+}
+
+func TestSyncClaimsAreReleasedAfterLanding(t *testing.T) {
+	o, bare := fixture(t, "x")
+	ctx := context.Background()
+	git(t, o.Paths.Root, "push", "-q", bare, "mill/t/x:main")
+	res, err := Sync(ctx, o)
+	if err != nil || len(res.Landed) != 1 || len(res.Busy) != 0 {
+		t.Fatalf("res = %+v, %v", res, err)
+	}
+	if claims, err := o.Store.ClaimedTasks(ctx); err != nil || len(claims) != 0 {
+		t.Errorf("claims left = %+v, %v", claims, err)
+	}
+}
