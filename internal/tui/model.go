@@ -23,6 +23,7 @@ type Store interface {
 	TaskDeps(ctx context.Context, taskID string) ([]string, error)
 	ReviewTasks(ctx context.Context) ([]store.ReviewTask, error)
 	RunningAttempts(ctx context.Context) ([]store.Attempt, error)
+	Attempts(ctx context.Context, taskID string) ([]store.Attempt, error)
 }
 
 // Options build a Model.
@@ -33,7 +34,14 @@ type Options struct {
 	Now      func() time.Time             // defaults to time.Now
 	Getenv   func(string) string          // defaults to os.Getenv (used by later views)
 	LookPath func(string) (string, error) // defaults to exec.LookPath (used by later views)
+	Edit     EditFunc                     // runs $EDITOR on a file; defaults to tea.ExecProcess
 }
+
+// Indexes of the views the model switches to itself.
+const (
+	viewReview = 1
+	viewDetail = 2
+)
 
 // pollInterval is how often the model re-reads the store.
 const pollInterval = time.Second
@@ -45,6 +53,8 @@ type tickMsg time.Time
 type Model struct {
 	opts     Options
 	cmds     *commands
+	acts     *taskActions
+	detail   *detailView
 	views    []view
 	names    []string
 	active   int
@@ -66,11 +76,18 @@ func New(opts Options) *Model {
 	if opts.LookPath == nil {
 		opts.LookPath = exec.LookPath
 	}
+	if opts.Edit == nil {
+		opts.Edit = execEditor
+	}
 	cmds := &commands{runner: opts.Runner}
+	acts := newTaskActions(cmds, opts.Getenv, opts.Edit)
+	detail := newDetailView(acts, opts.Store)
 	return &Model{
 		opts:   opts,
 		cmds:   cmds,
-		views:  []view{newGoalsView(cmds), newReviewView(), newDetailView(), newAgentsView()},
+		acts:   acts,
+		detail: detail,
+		views:  []view{newGoalsView(cmds), newReviewView(acts), detail, newAgentsView()},
 		names:  []string{"Goals", "Review", "Task detail", "Agents"},
 		width:  100,
 		height: 30,
@@ -145,7 +162,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case procDoneMsg:
 		m.cmds.finish(msg)
-		return m, m.poll()
+		return m, tea.Batch(m.poll(), m.detail.Update(msg))
+	case openDetailMsg:
+		m.active = viewDetail
+		return m, m.detail.Update(msg)
+	case backToReviewMsg:
+		m.active = viewReview
+		return m, nil
+	case detailMsg:
+		return m, m.detail.Update(msg)
+	case editedMsg, retryReadyMsg:
+		cmd, _ := m.acts.handle(msg)
+		return m, cmd
 	case tea.KeyMsg:
 		return m, m.key(msg)
 	}
