@@ -2,8 +2,8 @@
 //
 // A host only starts, waits for and kills processes. It never interprets their output:
 // results are always read from files, so the choice of host affects visibility, not
-// behaviour. The exec host (plain subprocesses) is the default; a herdr host comes later
-// and stays optional (HO3–HO4).
+// behaviour. The exec host runs plain subprocesses; the herdr host runs each worker in its
+// own herdr pane and is optional (HO3–HO4). Select picks one from host.kind.
 package host
 
 import (
@@ -21,6 +21,7 @@ type ProcSpec struct {
 	StdinPath  string   // file fed to stdin; "" = no stdin
 	StdoutPath string   // file receiving stdout; "" = discarded
 	StderrPath string   // file receiving stderr; "" = discarded
+	LogDir     string   // where visual hosts keep wrapper scripts; "" = StdoutPath's directory, else a temp dir
 }
 
 // Exit describes how a process ended.
