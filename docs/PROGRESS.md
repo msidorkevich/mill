@@ -722,7 +722,50 @@ More follow-ups found while landing M5:
       started, mill should rebase it before the gate (or at least warn in the review).
 - [ ] **Clashes between verified branches are found by hand.** `herdr-robust` and
       `tui-herdr-e2e` each passed alone but together redeclared a test helper and disagreed on
-      herdr's protocol. The keeper's combined check would catch it, but only for published
-      branches; it should also run before publishing a batch.
+      herdr's protocol. It happened again in `g13`: `short-locks-review-rebase` and
+      `short-locks-sync-keep-clean`, built in parallel, both defined `assertNoClaims` in package
+      `cli`. The keeper's combined check would catch it, but only for published branches; it
+      should also run on verified sibling branches before publishing a batch (`review approve
+      --goal`), and the planner prompt should tell parallel tasks to give test helpers
+      task-specific names.
 - [ ] **Locks block unrelated work** (publish, sync, single tasks): covered by the next goal,
       one scheduler for all goals.
+
+## One scheduler for all goals: in progress (goal `g13`)
+
+Planned by mill's planner ($0.70, 9 tasks), reviewed and edited before approval (a claim held by
+a reused pid must not count as live; the docs task neither edits PROGRESS nor reruns `make
+check`). Design: commands that only change records or publish claim the tasks they change in the
+store instead of taking the repository lock; one scheduler runs every approved goal and queued
+single task, and picks up new work while running; only the scheduler runs crash recovery.
+
+First run: 7 of 9 verified ($9.22); the end-to-end task was blocked before it started because
+two of its dependencies collided (see below). Published so far: `store-task-claims`,
+`short-locks-sync-keep-clean`, `scheduler-all-goals`, `runlock-holder-probe` (checked merged
+together: they compile and their packages pass).
+
+### Follow-ups found in `g13`
+
+- [ ] **The verifier does not see the rest of the plan.** It rejected
+      `run-command-one-scheduler` because `sync`, `keep` and `clean` still took the run lock on
+      that branch, which is the sibling task `short-locks-sync-keep-clean`'s job, built in
+      parallel. The implementer then did the sibling's work in the sibling's files, and the two
+      branches collided. The verifier prompt should list the other tasks of the goal with their
+      files and summaries, and treat findings in another task's scope as out of scope.
+- [ ] **An edit to another task's files is only a warning.** The owns check recorded
+      `owns-outside` for five files that belonged to a sibling task and let the attempt pass.
+      When a file is owned by another task of the same goal, the owns check should fail the
+      attempt (revert hint included), not warn.
+- [ ] **Overlapping acceptance criteria.** The planner gave `run-command-one-scheduler` a
+      criterion ("recovery output only from `mill run` and `mill task run`") that could only be
+      met by changing a sibling's files, so a revert failed the same way a second time; I
+      corrected the criterion with `mill task edit`. My plan review checked file ownership but
+      not whether each criterion can be met within the task's own files; plan validation (or
+      the planner prompt) should check that too.
+- [ ] **`mill task edit` needs bare ids and explicit fields.** Editing a goal task from
+      `mill task show --json` failed twice: the id must be the bare plan id
+      (`run-command-one-scheduler`, not `g13/...`) and `depends_on` must be present even though
+      `task show` leaves it out. `task edit` should accept what `task show --json` prints.
+- [ ] **Publish before restarting a run.** I restarted `g13` before publishing its ready tasks,
+      so the run's lock blocked publishing again. Goes away with this goal; until then, publish
+      first.
