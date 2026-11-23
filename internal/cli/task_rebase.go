@@ -9,7 +9,6 @@ import (
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/fanin"
 	"github.com/msidorkevich/mill/internal/gitx"
-	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -29,15 +28,11 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 	}
 	defer s.Close()
 
-	lock, err := runlock.Acquire(paths.RunLock)
+	release, err := claimTasks(ctx, env, s, "task rebase", id)
 	if err != nil {
 		return fail(err)
 	}
-	defer func() {
-		if err := lock.Release(); err != nil {
-			fmt.Fprintf(env.Stderr, "mill task rebase: %v\n", err)
-		}
-	}()
+	defer release()
 
 	t, err := s.GetTask(ctx, id)
 	if err != nil {

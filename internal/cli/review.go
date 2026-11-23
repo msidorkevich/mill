@@ -15,7 +15,6 @@ import (
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/prompt"
 	"github.com/msidorkevich/mill/internal/publish"
-	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -365,6 +364,11 @@ func runReviewChanges(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	defer s.Close()
+	release, err := claimTasks(ctx, env, s, "review changes", id)
+	if err != nil {
+		return fail(err)
+	}
+	defer release()
 	t, err := reviewable(ctx, s, id, "sent back for changes")
 	if err != nil {
 		return fail(err)
@@ -437,6 +441,11 @@ func runReviewReject(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	defer s.Close()
+	release, err := claimTasks(ctx, env, s, "review reject", id)
+	if err != nil {
+		return fail(err)
+	}
+	defer release()
 	if _, err := reviewable(ctx, s, id, "rejected"); err != nil {
 		return fail(err)
 	}
@@ -488,15 +497,6 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	defer s.Close()
-	lock, err := runlock.Acquire(paths.RunLock)
-	if err != nil {
-		return fail(err)
-	}
-	defer func() {
-		if err := lock.Release(); err != nil {
-			fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
-		}
-	}()
 
 	if *goalID != "" {
 		if ids, err = goalReviewOrder(ctx, s, *goalID); err != nil {
@@ -508,12 +508,40 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 	}
 	code := ExitOK
 	for _, id := range ids {
-		if err := approveOne(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id}); err != nil {
+		if err := approveClaimed(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id}); err != nil {
 			fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
 			code = ExitError
 		}
 	}
 	return code
+}
+
+// approveClaimed claims one task for the whole of its publish (the store updates before
+// and after the push and the push itself) and releases the claim when it is done. A busy
+// task is refused with a *store.BusyError and left as it is.
+func approveClaimed(ctx context.Context, env Env, s *store.Store, o publish.Options) error {
+	release, err := claimTasks(ctx, env, s, "review approve", o.TaskID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return approveOne(ctx, env, s, o)
+}
+
+// claimTasks claims ids for this process running the mill subcommand command, so no other
+// mill command changes them meanwhile. The returned release deletes the claims and reports
+// a failure to do so on stderr; call it on every exit path.
+func claimTasks(ctx context.Context, env Env, s *store.Store, command string, ids ...string) (release func(), err error) {
+	c := store.NewClaimer(command)
+	if err := s.ClaimTasks(ctx, c, ids); err != nil {
+		return nil, err
+	}
+	return func() {
+		// Release even when ctx was cancelled, or the claim would outlive the command.
+		if err := s.ReleaseClaims(context.WithoutCancel(ctx), c, ids); err != nil {
+			fmt.Fprintf(env.Stderr, "mill %s: %v; the claim is dropped once this process exits\n", command, err)
+		}
+	}, nil
 }
 
 // approveOne publishes one task, or queues its approval when only an unpublished dependency

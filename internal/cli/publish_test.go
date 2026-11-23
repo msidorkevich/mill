@@ -2,14 +2,15 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/project"
-	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -380,7 +381,7 @@ func TestApproveRefusesWithoutConfiguredRemote(t *testing.T) {
 	}
 }
 
-func TestApproveRefusesUnverifiedTaskAndHeldLock(t *testing.T) {
+func TestApproveRefusesUnverifiedTask(t *testing.T) {
 	root, bare := publishedGoal(t)
 	setStatus(t, root, "g1/a", store.TaskBlocked)
 	r := run(t, root, nil, "review", "approve", "g1/a")
@@ -396,25 +397,64 @@ func TestApproveRefusesUnverifiedTaskAndHeldLock(t *testing.T) {
 	if !gitx.BranchExists(context.Background(), root, "mill/g1/a") {
 		t.Error("task branch disappeared")
 	}
+	assertNoReviewClaims(t, root)
+}
 
-	setStatus(t, root, "g1/a", store.TaskVerified)
-	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r = run(t, root, nil, "review", "approve", "g1/a")
-	if r.code != ExitError || !strings.Contains(r.stderr, "another mill run is active") {
+func TestApprovePublishesWhileUnrelatedRunHoldsLock(t *testing.T) {
+	root, bare := publishedGoal(t)
+	s := openStore(t, root)
+	holdRunLock(t, root)
+	otherID, _ := runningAttempt(t, s, "g1/b")
+	w := startWorker(t, s, otherID)
+
+	r := run(t, root, nil, "review", "approve", "g1/a")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Published g1/a") {
 		t.Fatalf("approve while locked: %+v", r)
 	}
-	if err := l.Release(); err != nil {
-		t.Fatal(err)
+	if _, ok := remoteRefs(t, bare)["refs/heads/review/g1/a"]; !ok {
+		t.Error("approve did not push the review branch")
 	}
-	if _, ok := remoteRefs(t, bare)["refs/heads/review/g1/a"]; ok {
-		t.Error("approve while locked pushed a branch")
+	if tk, _ := s.GetTask(context.Background(), "g1/a"); tk.Status != store.TaskPublished {
+		t.Errorf("task = %+v", tk)
 	}
-	if r := run(t, root, nil, "review", "approve", "g1/a"); r.code != ExitOK {
-		t.Fatalf("approve after release: %+v", r)
+	assertNoReviewClaims(t, root)
+	assertWorkerUntouched(t, s, "g1/b", w)
+}
+
+func TestApprovePublishesFreeTasksAndReportsBusyOnes(t *testing.T) {
+	root, bare := publishedGoal(t)
+	s := openStore(t, root)
+	bID, n := runningAttempt(t, s, "g1/b")
+	w := startWorker(t, s, bID)
+	before := snapshotTask(t, s, "g1/b")
+
+	r := run(t, root, nil, "review", "approve", "g1/a", "g1/b")
+	busy := fmt.Sprintf("mill review approve: task g1/b is busy: attempt %d (verifier) running", n)
+	if r.code != ExitError || !strings.Contains(r.stdout, "Published g1/a") || !strings.Contains(r.stderr, busy) {
+		t.Fatalf("approve: %+v", r)
 	}
+	refs := remoteRefs(t, bare)
+	if _, ok := refs["refs/heads/review/g1/a"]; !ok {
+		t.Error("the free task was not published")
+	}
+	if _, ok := refs["refs/heads/review/g1/b"]; ok {
+		t.Error("the busy task was pushed")
+	}
+	if after := snapshotTask(t, s, "g1/b"); !reflect.DeepEqual(after, before) {
+		t.Errorf("busy task changed:\nbefore %+v\nafter  %+v", before, after)
+	}
+	assertNoReviewClaims(t, root)
+	assertWorkerUntouched(t, s, "g1/b", w)
+
+	r = run(t, root, nil, "review", "approve", "--goal", "g1")
+	if r.code != ExitError || !strings.Contains(r.stderr, busy) {
+		t.Fatalf("approve --goal: %+v", r)
+	}
+	if _, ok := remoteRefs(t, bare)["refs/heads/review/g1/b"]; ok {
+		t.Error("approve --goal pushed the busy task")
+	}
+	assertNoReviewClaims(t, root)
+	assertWorkerUntouched(t, s, "g1/b", w)
 }
 
 func TestApproveChildOfLandedParentNeedsSyncFirst(t *testing.T) {
