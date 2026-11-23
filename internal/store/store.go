@@ -19,14 +19,18 @@ import (
 
 // Store is an open mill database.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	db    *sql.DB
+	now   func() time.Time
+	alive func(TaskClaim) (bool, error)
 }
 
 // Options configure Open.
 type Options struct {
 	// Now returns the current time. Defaults to time.Now. Tests inject a fixed clock.
 	Now func() time.Time
+	// ClaimAlive reports whether the process holding a task claim is still running it.
+	// Defaults to a check that the pid exists and still runs the claiming mill command.
+	ClaimAlive func(TaskClaim) (bool, error)
 }
 
 // Open opens (or creates) the database at path, enables WAL mode and applies pending
@@ -47,9 +51,12 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	// One writer at a time; SQLite serializes writes anyway and this avoids SQLITE_BUSY churn.
 	db.SetMaxOpenConns(1)
 
-	s := &Store{db: db, now: opts.Now}
+	s := &Store{db: db, now: opts.Now, alive: opts.ClaimAlive}
 	if s.now == nil {
 		s.now = time.Now
+	}
+	if s.alive == nil {
+		s.alive = claimProcessAlive
 	}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()

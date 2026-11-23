@@ -122,6 +122,17 @@ ALTER TABLE branches ADD COLUMN gate_sha TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN approved_at TEXT NULL;
 ALTER TABLE tasks ADD COLUMN approved_attempt INTEGER NULL;
 `,
+	// 9: short-lived per-task claims held by a mill command while it works on the tasks.
+	`
+CREATE TABLE task_claims (
+	task_id    TEXT PRIMARY KEY REFERENCES tasks(id),
+	owner      TEXT NOT NULL,                -- Claimer.Owner: pid and a random nonce
+	pid        INTEGER NOT NULL,
+	command    TEXT NOT NULL DEFAULT '',     -- mill subcommand, e.g. "run"
+	executable TEXT NOT NULL DEFAULT '',     -- argv[0] of the claiming process
+	claimed_at TEXT NOT NULL
+);
+`,
 }
 
 // LatestVersion is the schema version this build writes.
