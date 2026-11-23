@@ -639,7 +639,8 @@ type AbandonedUsage struct {
 
 // RecoverInterrupted repairs the state a killed run left behind: running tasks go back to
 // pending and running attempts become abandoned, in one transaction, recording the usage
-// given per attempt id (attempts not in usage keep zero). It records a task-recovered event
+// given per attempt id (attempts not in usage keep zero), and task claims of dead
+// processes are deleted. It records a task-recovered event
 // per task. Only call it while holding the run lock.
 func (s *Store) RecoverInterrupted(ctx context.Context, usage map[int64]AbandonedUsage) (tasks int, attempts int, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -713,6 +714,9 @@ func (s *Store) RecoverInterrupted(ctx context.Context, usage map[int64]Abandone
 		}
 	}
 	n := len(aids)
+	if err := s.deleteDeadClaimsTx(ctx, tx); err != nil {
+		return 0, 0, fmt.Errorf("recover interrupted run: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("recover interrupted run: %w", err)
 	}
