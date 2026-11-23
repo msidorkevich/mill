@@ -241,3 +241,49 @@ func TestReviewRejectLeavesLandedDescendantsAlone(t *testing.T) {
 		t.Errorf("landed task changed: %+v", c)
 	}
 }
+
+func TestReviewChangesReopensDoneGoalAndRunRerunsTask(t *testing.T) {
+	root := verifiedGoal(t)
+	ctx := context.Background()
+	s := openStore(t, root)
+	if g, _ := s.GetGoal(ctx, "g1"); g.Status != store.GoalDone {
+		t.Fatalf("goal before = %+v", g)
+	}
+	r := run(t, root, nil, "review", "changes", "g1/c", "-m", "Tidy up.")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Goal g1 was done and is reopened") || !strings.Contains(r.stdout, "`mill run g1`") {
+		t.Fatalf("changes: %+v", r)
+	}
+	g, _ := s.GetGoal(ctx, "g1")
+	if g.Status != store.GoalApproved || !strings.Contains(g.Reason, "g1/c") || !strings.Contains(g.Reason, "changes requested") {
+		t.Fatalf("goal after = %+v", g)
+	}
+	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK || !strings.Contains(r.stdout, "g1/c: started") || strings.Contains(r.stdout, "g1/a: started") {
+		t.Fatalf("rerun: %+v", r)
+	}
+	if tk, _ := s.GetTask(ctx, "g1/c"); tk.Status != store.TaskVerified {
+		t.Fatalf("task = %+v", tk)
+	}
+	if g, _ := s.GetGoal(ctx, "g1"); g.Status != store.GoalDone {
+		t.Fatalf("goal after rerun = %+v", g)
+	}
+}
+
+func TestReviewRejectReopensDoneGoal(t *testing.T) {
+	root := verifiedGoal(t)
+	ctx := context.Background()
+	s := openStore(t, root)
+	r := run(t, root, nil, "review", "reject", "g1/c", "-m", "wrong approach")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Goal g1 was done and is reopened") {
+		t.Fatalf("reject: %+v", r)
+	}
+	g, _ := s.GetGoal(ctx, "g1")
+	if g.Status != store.GoalApproved || !strings.Contains(g.Reason, "g1/c") || !strings.Contains(g.Reason, "rejected") {
+		t.Fatalf("goal = %+v", g)
+	}
+	if tk, _ := s.GetTask(ctx, "g1/c"); tk.Status != store.TaskBlocked {
+		t.Fatalf("task = %+v", tk)
+	}
+	if r := run(t, root, nil, "run", "g1", "--retry-blocked"); r.code != ExitOK || !strings.Contains(r.stdout, "g1/c: started") {
+		t.Fatalf("rerun: %+v", r)
+	}
+}

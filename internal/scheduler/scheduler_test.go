@@ -345,6 +345,9 @@ func TestDraftAndDoneGoalsAreRefused(t *testing.T) {
 		!strings.Contains(err.Error(), "mill plan approve "+draft.ID) {
 		t.Fatalf("draft: %v", err)
 	}
+	if err := s.SetTaskStatus(ctx, g+"/a", store.TaskVerified, "", ""); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetGoalStatus(ctx, g, store.GoalDone, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -666,5 +669,29 @@ func TestCancelDuringLimitWaitLeavesGoalInterrupted(t *testing.T) {
 	gl, _ := s.GetGoal(context.Background(), g)
 	if gl.Status != store.GoalBlocked || gl.Reason != InterruptedReason(g) {
 		t.Fatalf("goal = %+v", gl)
+	}
+}
+
+func TestDoneGoalWithUnfinishedTaskRunsAsApproved(t *testing.T) {
+	ctx := context.Background()
+	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
+	a, b := g+"/a", g+"/b"
+	if err := s.SetTaskStatus(ctx, a, store.TaskVerified, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetGoalStatus(ctx, g, store.GoalDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	f := newFake(s)
+	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run}
+	res, err := sch.RunGoal(ctx, g, Options{})
+	if err != nil || res.Status != store.GoalDone {
+		t.Fatalf("RunGoal = %+v, %v", res, err)
+	}
+	if got := status(t, s, b).Status; got != store.TaskVerified {
+		t.Errorf("%s = %s", b, got)
+	}
+	if len(f.events) != 2 || f.events[0] != "start "+b {
+		t.Errorf("events = %v, want only %s to run", f.events, b)
 	}
 }

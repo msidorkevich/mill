@@ -381,6 +381,9 @@ func runReviewChanges(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	fmt.Fprintf(env.Stdout, "Recorded %d finding(s) for %s; it is pending again.\n", len(findings), id)
+	if err := reopenGoal(ctx, env, s, id, "changes requested", "mill run %s"); err != nil {
+		return fail(err)
+	}
 	if t.Status == store.TaskPublished {
 		fmt.Fprintf(env.Stdout, "Note: %s stays published on its remote branch until it is republished.\n", id)
 	}
@@ -390,6 +393,28 @@ func runReviewChanges(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stdout, "\nNext: `mill task run --file <file> --retry`.")
 	}
 	return ExitOK
+}
+
+// reopenGoal sets the goal of a task that was sent back to approved when the goal is done or
+// landed, so `mill run <goal>` accepts it again. Tasks without a goal are left alone.
+func reopenGoal(ctx context.Context, env Env, s *store.Store, taskID, why, nextFmt string) error {
+	goalID, _ := store.SplitTaskID(taskID)
+	if goalID == "" {
+		return nil
+	}
+	g, err := s.GetGoal(ctx, goalID)
+	if err != nil {
+		return fmt.Errorf("%s was sent back but its goal cannot be loaded: %w; run `mill goal show %s`", taskID, err, goalID)
+	}
+	if g.Status != store.GoalDone && g.Status != store.GoalLanded {
+		return nil
+	}
+	reason := fmt.Sprintf("reopened because %s was sent back (%s)", taskID, why)
+	if err := s.SetGoalStatus(ctx, goalID, store.GoalApproved, reason); err != nil {
+		return fmt.Errorf("%s was sent back but goal %s could not be reopened: %w; run `mill plan approve %s`", taskID, goalID, err, goalID)
+	}
+	fmt.Fprintf(env.Stdout, "Goal %s was %s and is reopened (approved). Next: `%s`.\n", goalID, g.Status, fmt.Sprintf(nextFmt, goalID))
+	return nil
 }
 
 func runReviewReject(ctx context.Context, env Env, args []string) int {
@@ -420,6 +445,9 @@ func runReviewReject(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	fmt.Fprintf(env.Stdout, "Rejected %s: blocked with reason %q.\n", id, "rejected: "+strings.TrimSpace(*msg))
+	if err := reopenGoal(ctx, env, s, id, "rejected", "mill run %s --retry-blocked"); err != nil {
+		return fail(err)
+	}
 	if len(held) == 0 {
 		fmt.Fprintln(env.Stdout, "No other task depends on it.")
 		return ExitOK
