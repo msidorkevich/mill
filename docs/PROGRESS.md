@@ -634,8 +634,9 @@ and mine, updated in its own PRs).
 
 ### Follow-ups found in M5
 
-- [ ] **New task branches referred to landed dependencies' deleted branches** (bug, fix in
-      progress as task `prepare-landed-deps`). After the first five `g12` tasks landed,
+- [x] **New task branches referred to landed dependencies' deleted branches** (bug, fixed by
+      task `prepare-landed-deps`, PR #35; review added one fetch at a time and an offline
+      fallback). After the first five `g12` tasks landed,
       `mill run g12 --retry-blocked` failed both remaining tasks before any agent started:
       `merge dependency g12/herdr-wiring: … not something we can merge`. Cause: preparing a new
       task's branch still merged every dependency's branch by name, but `clean_on_land` (task
@@ -659,3 +660,39 @@ and mine, updated in its own PRs).
   - [ ] **E. Limit concurrent gates:** a `max_parallel_gates` setting (default 1), separate
         from `max_parallel`, so agents still work in parallel while gates take turns. Fewer
         load spikes; less important once A is done.
+- [x] **herdr host could not read herdr's real response** (bug, fixed by task `herdr-pane-id`,
+      PR #36). `pane split` returns the pane as an object (`.result.pane.pane_id`); the host
+      expected a string, because I described herdr's output from memory when planning M5 and
+      the tests used that made-up shape. Tests now use a response captured from real herdr.
+- [ ] **A failed branch preparation leaves its branch and worktree behind.** The failed
+      dependency merge above had already created both task branches; the next retry stopped at
+      `branch … already exists in git but mill has no record of it`. I checked them (no work of
+      their own, clean worktrees) and removed them by hand. Fix: remove what preparation created
+      when it fails.
+- [ ] **herdr host robustness** (task `herdr-robust`, running). The operator closed two worker
+      panes that mill had opened in their own tab without saying what they were. mill then
+      waited forever for exit files that never came, and ignored Ctrl-C and SIGTERM (it had to
+      be killed with SIGKILL; recovery then worked: tokens recorded, uncommitted work
+      committed). Fix: each worker in its own labelled tab (`mill <task> <role>`, never
+      focused) that says closing it stops the task; a closed pane fails the attempt within ~2s;
+      cancellation always returns. Also found: run inside herdr, `internal/cli`'s tests created
+      and closed real herdr panes; tests must never reach the real herdr.
+- [ ] **`mill watch` says "nothing running" during gates** (task `watch-shows-gates`, queued).
+      It lists only agent attempts, and the gate is not one; the TUI Agents view has the same
+      gap. Fix: show every running stage with elapsed time and the gate log's last line.
+- [ ] **One scheduler for all goals** (operator decision 2026-11-23; planned as the next goal,
+      before fast gates). Today each `mill run <goal>` or `mill task run` starts its own
+      scheduler, and the repository lock allows one such process, so only one goal (or one
+      single task) runs at a time, and work had to be queued by hand. A goal is only a group of
+      tasks, so there is no reason for that. Design:
+  - `mill run` without arguments runs every ready task of every approved goal and every queued
+    single task; `max_parallel`, file ownership and budgets apply across all of them.
+  - A running scheduler picks up newly approved work from the store: `mill plan approve` or
+    `mill task run` during a run joins it instead of being refused.
+  - `mill run <goal>` stays as a filter.
+  - The lock means "one scheduler per repository". `mill review approve/changes/reject` hold
+    it only while they write, so publishing never waits for a run.
+  - Per-goal budgets, statuses and dependency rules stay as they are (they are task data).
+
+Order after M5: `herdr-robust`, `watch-shows-gates`, one scheduler for all goals, fast gates
+(A, B, E).
