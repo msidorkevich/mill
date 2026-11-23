@@ -579,3 +579,55 @@ flowchart TD
   classDef landed fill:#2da44e,stroke:#1a7f37,color:#ffffff
   class gitx_rebase_steps,resolver_agent,keeper_pass,fanin_restack,combined_check,keep_command landed
 ```
+
+## Housekeeping (continued)
+
+- [x] `g11` and `goal-reopen` landed (PRs #23–#25); goal `g11` landed.
+- [x] `clean-on-land` ($1.75, PR #26): when sync or keep marks a task landed, the same pass
+      removes its worktree and local branch and deletes its `review/*` branch on the remote
+      (lease-guarded); `clean_on_land = all | local | off`. Proven on its own landing: the sync
+      that detected it cleaned up its worktree, branch and `review/clean-on-land` on GitHub.
+- [x] The merged `progress/*` branches were deleted on GitHub and locally. GitHub's "Automatically
+      delete head branches" setting is the operator's to enable (no API access from here).
+- [x] PR banners: GitHub hides "Compare & pull request" banners after about an hour, so branches
+      published earlier looked like they had disappeared. Publish messages now come with direct
+      compare links; the M6 `on_publish` hook (`gh pr create`) would remove the manual step.
+
+## M5. TUI and herdr: in progress (goal `g12`)
+
+Requirements: UI1–UI3, HO3–HO4. Exit criterion: the whole workflow works from the TUI, with and
+without herdr. Planned by mill's planner ($0.52), then edited before approval: a `go-upgrade`
+task added as the root (the operator allowed upgrading Go: go.mod moves to Go 1.27.4 through the
+toolchain directive, so no machine change is needed, and the dependencies pinned for Go 1.24 are
+updated), and `docs/PROGRESS.md` removed from a docs task's files (PROGRESS stays the operator's
+and mine, updated in its own PRs).
+
+### Design decisions
+
+- Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v0.21.1: the only new dependencies.
+- The TUI is a thin client: it polls the store for state and runs mill's own commands as
+  subprocesses for every action, so locking, recovery and logic stay in the CLI.
+- Views: goals with their graph, review queue, task detail (spec, verdict, gate, diff, log),
+  agents. Keys per UI3; `s` (skip) deferred because mill has no skip operation.
+- herdr host: one pane per worker (`pane split --no-focus` + `pane run`), a wrapper records pid
+  and exit code to files, results are still read from files; `host.kind = auto` picks herdr only
+  inside herdr.
+- End-to-end tests are a separate task (applying the planner-parallelism follow-up).
+
+### Subtasks (goal `g12`)
+
+- [ ] `go-upgrade`: Go 1.27.4, current dependencies
+- [ ] `herdr-host`: herdr host in internal/host
+- [ ] `herdr-wiring`: host selection, doctor, config comment
+- [ ] `tui-foundation`: dependencies, `mill tui`, polling, tabs, command runner
+- [ ] `tui-review-detail`: review queue, task detail, diff, log tail, `$EDITOR` changes
+- [ ] `tui-agents-open`: agents view, open worktree (herdr pane or shell)
+- [ ] `tui-herdr-e2e`: end-to-end tests across the TUI and the herdr host
+- [ ] `docs-tui-herdr`: README sections for the TUI and hosts
+
+### Process notes
+
+- I passed spec text containing backticks inside a double-quoted shell string, so the shell ran
+  them; one was `go get -u ./...` in the main checkout. It failed before writing anything (the
+  tree stayed clean) and I repaired the damaged spec text. From now on, code that carries text
+  goes in script files, never inline shell-quoted strings.
