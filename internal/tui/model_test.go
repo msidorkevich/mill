@@ -339,19 +339,8 @@ func TestTabsSwitchViews(t *testing.T) {
 		t.Errorf("shift+tab did not return to Goals:\n%s", v)
 	}
 	press(m, "shift+tab")
-	if v := screen(m); !strings.Contains(v, "coming soon") {
+	if v := screen(m); !strings.Contains(v, "nothing running") {
 		t.Errorf("shift+tab did not wrap to Agents:\n%s", v)
-	}
-}
-
-func TestOpenWorktreeNotAvailableYet(t *testing.T) {
-	m, f := newModel(t, seed(t))
-	press(m, "o")
-	if v := screen(m); !strings.Contains(v, "open worktree: not available yet") {
-		t.Errorf("view lacks the notice:\n%s", v)
-	}
-	if len(f.Calls()) != 0 {
-		t.Errorf("calls = %v, want none", f.Calls())
 	}
 }
 
