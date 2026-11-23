@@ -420,6 +420,11 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 		if err := gitx.AddWorktree(ctx, p.Paths.Root, wt, name, baseSHA); err != nil {
 			return br, err
 		}
+		// From here on this call owns the branch and worktree; remove them if preparing fails
+		// before the branch is recorded.
+		fail := func(err error) (store.Branch, error) {
+			return br, errors.Join(err, p.removeCreated(ctx, wt, name))
+		}
 		for _, m := range merges {
 			err := gitx.Merge(ctx, wt, m.rev, m.message)
 			if err == nil {
@@ -427,7 +432,7 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 			}
 			var ce *gitx.ConflictError
 			if !errors.As(err, &ce) {
-				return br, fmt.Errorf("merge dependency %s: %w", m.id, err)
+				return fail(fmt.Errorf("merge dependency %s: %w", m.id, err))
 			}
 			// Leave nothing behind so a retry starts clean.
 			if rmErr := gitx.RemoveWorktree(ctx, p.Paths.Root, wt); rmErr != nil {
@@ -441,13 +446,34 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 		}
 		startSHA, err := gitx.RevParse(ctx, wt, "HEAD")
 		if err != nil {
-			return br, err
+			return fail(err)
 		}
 		br = store.Branch{TaskID: t.ID, Name: name, Base: base, BaseSHA: baseSHA, StartSHA: startSHA, HeadSHA: startSHA, Worktree: wt}
+		if err := p.Store.SaveBranch(ctx, br); err != nil {
+			return fail(err)
+		}
+		return br, nil
 	default:
 		return br, err
 	}
 	return br, p.Store.SaveBranch(ctx, br)
+}
+
+// removeCreated removes a worktree and branch this call just created. The worktree holds only
+// the starting point, so it is removed with force.
+func (p *Pipeline) removeCreated(ctx context.Context, wt, name string) error {
+	ctx = context.WithoutCancel(ctx)
+	var errs []error
+	if err := gitx.RemoveWorktree(ctx, p.Paths.Root, wt); err != nil {
+		errs = append(errs, fmt.Errorf("removing worktree %s failed: %w", wt, err))
+	}
+	if err := gitx.DeleteBranch(ctx, p.Paths.Root, name); err != nil {
+		errs = append(errs, fmt.Errorf("deleting branch %s failed: %w", name, err))
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("cleanup after failed preparation left branch %s and worktree %s behind; remove them by hand (git worktree remove --force, git branch -D): %w", name, wt, errors.Join(errs...))
 }
 
 type mergeDep struct{ id, branch, rev, message string }
