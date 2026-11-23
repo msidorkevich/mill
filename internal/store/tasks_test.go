@@ -740,3 +740,36 @@ func TestSetTaskReasonKeepsStatusAndPhase(t *testing.T) {
 		t.Fatalf("missing task: err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestRunningStagesListsRunningTasksWithoutRunningAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	for _, id := range []string{"gating", "coding", "idle"} {
+		if err := s.CreateTask(ctx, spec(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := s.StartAttempt(ctx, "gating", 3, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishAttempt(ctx, a, "ok", budget.Usage{}, false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "gating", TaskRunning, PhaseGate, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "coding", TaskRunning, PhaseImplement, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartAttempt(ctx, "coding", 1, "implementer"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.RunningStages(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TaskID != "gating" || got[0].Phase != PhaseGate || got[0].N != 3 || got[0].Since.IsZero() {
+		t.Fatalf("stages = %+v", got)
+	}
+}
