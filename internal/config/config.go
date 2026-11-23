@@ -30,6 +30,9 @@ type Config struct {
 	// OwnsPolicy says what happens to changes outside a task's owns: "warn", "enforce" or "off".
 	OwnsPolicy      string `toml:"owns_policy"`
 	StartChildrenOn string `toml:"start_children_on"`
+	// CleanOnLand says what sync removes when a task lands: "all" (worktree, local branch
+	// and remote review branch), "local" (worktree and local branch) or "off".
+	CleanOnLand string `toml:"clean_on_land"`
 	// WorktreeRoot holds task worktrees, outside the repository so that workers never
 	// write inside it. "" means ~/.cache/mill/worktrees.
 	WorktreeRoot string `toml:"worktree_root"`
@@ -103,11 +106,12 @@ type SizeBudget struct {
 
 // Known values.
 var (
-	RunnerKinds     = []string{"claude", "fake"}
-	HostKinds       = []string{"auto", "exec", "herdr"}
-	OwnsPolicies    = []string{"warn", "enforce", "off"}
-	ChildrenOnModes = []string{"verified", "published"}
-	SizeNames       = []string{"S", "M", "L"}
+	RunnerKinds      = []string{"claude", "fake"}
+	HostKinds        = []string{"auto", "exec", "herdr"}
+	OwnsPolicies     = []string{"warn", "enforce", "off"}
+	ChildrenOnModes  = []string{"verified", "published"}
+	CleanOnLandModes = []string{"all", "local", "off"}
+	SizeNames        = []string{"S", "M", "L"}
 )
 
 // Default returns the built-in defaults. DefaultTOML documents the same values.
@@ -120,6 +124,7 @@ func Default() Config {
 		MaxAttempts:     3,
 		OwnsPolicy:      "warn",
 		StartChildrenOn: "verified",
+		CleanOnLand:     "all",
 		WorktreeRoot:    "",
 		GateTimeout:     Duration{20 * time.Minute},
 		GateRerun:       true,
@@ -160,6 +165,8 @@ max_parallel = 2          # tasks running at the same time
 max_attempts = 3          # implement attempts per task before it is blocked
 start_children_on = "verified"   # or "published"
 owns_policy = "warn"      # changes outside a task's owns: "warn" (verifier must justify them), "enforce" (finding, no gate) or "off"
+
+clean_on_land = "all"     # when sync finds a task landed, remove: "all" (worktree, local branch, remote review branch), "local" (worktree and local branch) or "off"
 
 worktree_root = ""        # where task worktrees live; "" = ~/.cache/mill/worktrees
 gate_timeout = "20m"      # per gate command
@@ -269,6 +276,9 @@ func (c Config) Validate() error {
 	}
 	if !oneOf(c.StartChildrenOn, ChildrenOnModes) {
 		add("start_children_on must be one of %v, got %q", ChildrenOnModes, c.StartChildrenOn)
+	}
+	if !oneOf(c.CleanOnLand, CleanOnLandModes) {
+		add("clean_on_land must be one of %v, got %q", CleanOnLandModes, c.CleanOnLand)
 	}
 	if !oneOf(c.OwnsPolicy, OwnsPolicies) {
 		add("owns_policy must be one of %v, got %q", OwnsPolicies, c.OwnsPolicy)

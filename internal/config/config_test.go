@@ -259,3 +259,18 @@ func TestGateTriageSettingsDefaultOnAndAreBooleans(t *testing.T) {
 		}
 	}
 }
+
+func TestCleanOnLandDefaultsToAllAndIsValidated(t *testing.T) {
+	if got := Default().CleanOnLand; got != "all" {
+		t.Errorf("default clean_on_land = %q, want all", got)
+	}
+	for _, v := range []string{"all", "local", "off"} {
+		cfg, err := Parse(`clean_on_land = "` + v + `"`)
+		if err != nil || cfg.CleanOnLand != v {
+			t.Errorf("clean_on_land = %q: cfg %q, err %v", v, cfg.CleanOnLand, err)
+		}
+	}
+	if _, err := Parse(`clean_on_land = "remote"`); err == nil || !strings.Contains(err.Error(), "clean_on_land") {
+		t.Errorf("invalid clean_on_land accepted: %v", err)
+	}
+}

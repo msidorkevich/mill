@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -257,5 +259,219 @@ func TestCleanMissingWorktreeRootIsNotAnError(t *testing.T) {
 	}
 	if r := run(t, root, nil, "clean"); r.code != ExitOK || !strings.Contains(r.stdout, "0 empty director(ies)") {
 		t.Fatalf("clean: %+v", r)
+	}
+}
+
+// setCleanOnLand sets clean_on_land in the project config written by goalRepo.
+func setCleanOnLand(t *testing.T, root, mode string) {
+	t.Helper()
+	path := project.PathsAt(root).Config
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := strings.Replace(string(data), "max_attempts = 1\n", "max_attempts = 1\nclean_on_land = \""+mode+"\"\n", 1)
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mergeReview merges review/<id> into main on the forge and pushes it.
+func mergeReview(t *testing.T, f, id string) {
+	t.Helper()
+	gitC(t, f, "fetch", "-q", "origin")
+	gitC(t, f, "merge", "-q", "--no-ff", "-m", "Merge review/"+id, "origin/review/"+id)
+	gitC(t, f, "push", "-q", "origin", "main")
+}
+
+func eventSeq(t *testing.T, s *store.Store, id, kind string) int64 {
+	t.Helper()
+	evs, err := s.TaskEvents(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Kind == kind {
+			return evs[i].Seq
+		}
+	}
+	t.Fatalf("%s has no %s event", id, kind)
+	return 0
+}
+
+func TestSyncCleansUpLandedTaskByDefaultAfterRestackingItsChild(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	ctx := context.Background()
+	a := branchRow(t, root, "g2/a")
+	mergeReview(t, forge(t, bare), "g2/a")
+	merge := remoteRefs(t, bare)["refs/heads/main"]
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK {
+		t.Fatalf("sync: %+v", r)
+	}
+	if _, err := os.Stat(a.Worktree); !os.IsNotExist(err) {
+		t.Errorf("worktree of g2/a still exists (err=%v)", err)
+	}
+	if gitx.BranchExists(ctx, root, a.Name) {
+		t.Errorf("branch %s still exists", a.Name)
+	}
+	if sha, ok := remoteRefs(t, bare)["refs/heads/review/g2/a"]; ok {
+		t.Errorf("review/g2/a still on the remote at %s", sha)
+	}
+	s := openStore(t, root)
+	if ev := lastEvent(t, s, "g2/a", "task-cleaned"); ev["branch"] != a.Name || ev["worktree"] != a.Worktree {
+		t.Errorf("task-cleaned = %v", ev)
+	}
+	if got := branchRow(t, root, "g2/a"); got.Worktree != "" {
+		t.Errorf("branch row keeps worktree %q", got.Worktree)
+	}
+	for _, want := range []string{"Cleaned up:", "g2/a  worktree " + a.Worktree + ", branch " + a.Name + ", origin/review/g2/a"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
+	}
+
+	// The child was restacked onto main before its parent's branch went away, correctly.
+	if eventSeq(t, s, "g2/b", "task-restacked") > eventSeq(t, s, "g2/a", "task-cleaned") {
+		t.Error("g2/a was cleaned up before g2/b was restacked")
+	}
+	child := branchRow(t, root, "g2/b")
+	if child.Base != "main" || child.BaseSHA != merge || child.GateSHA != child.HeadSHA {
+		t.Errorf("child branch = %+v", child)
+	}
+	if files := gitC(t, root, "diff", "--name-only", merge, child.HeadSHA); files != "b.txt" {
+		t.Errorf("child's own changes = %q", files)
+	}
+	if got := remoteRefs(t, bare)["refs/heads/review/g2/b"]; got != child.PublishedSHA {
+		t.Errorf("review/g2/b = %s, recorded %s", got, child.PublishedSHA)
+	}
+	if _, err := os.Stat(child.Worktree); err != nil {
+		t.Errorf("child worktree: %v", err)
+	}
+}
+
+func TestSyncLeavesMovedReviewBranchOnTheRemote(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	a := branchRow(t, root, "g2/a")
+	f := forge(t, bare)
+	mergeReview(t, f, "g2/a")
+	// Someone pushes another commit to the review branch after the merge.
+	gitC(t, f, "checkout", "-q", "-B", "extra", "origin/review/g2/a")
+	forgeCommit(t, f, "extra.txt", "x\n", "extra")
+	gitC(t, f, "push", "-q", "origin", "extra:review/g2/a")
+	moved := gitC(t, f, "rev-parse", "HEAD")
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK {
+		t.Fatalf("sync: %+v", r)
+	}
+	if got := remoteRefs(t, bare)["refs/heads/review/g2/a"]; got != moved {
+		t.Errorf("review/g2/a = %q, want it left at %s", got, moved)
+	}
+	if _, err := os.Stat(a.Worktree); !os.IsNotExist(err) {
+		t.Errorf("worktree of g2/a still exists (err=%v)", err)
+	}
+	if !strings.Contains(r.stdout, "Not cleaned up") || !strings.Contains(r.stdout, "review/g2/a moved on origin") {
+		t.Errorf("moved review branch not reported:\n%s", r.stdout)
+	}
+}
+
+func TestSyncCleanOnLandLocalKeepsRemoteBranch(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	setCleanOnLand(t, root, "local")
+	a := branchRow(t, root, "g2/a")
+	mergeReview(t, forge(t, bare), "g2/a")
+
+	r := run(t, root, nil, "sync", "--json")
+	if r.code != ExitOK {
+		t.Fatalf("sync: %+v", r)
+	}
+	var doc struct {
+		Schema  string `json:"schema"`
+		Cleaned []struct {
+			TaskID       string `json:"task_id"`
+			Worktree     string `json:"worktree"`
+			Branch       string `json:"branch"`
+			RemoteBranch string `json:"remote_branch"`
+		} `json:"cleaned"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("decode %q: %v", r.stdout, err)
+	}
+	if doc.Schema != "mill/sync@1" || len(doc.Cleaned) != 1 || doc.Cleaned[0].TaskID != "g2/a" ||
+		doc.Cleaned[0].Worktree != a.Worktree || doc.Cleaned[0].Branch != a.Name || doc.Cleaned[0].RemoteBranch != "" {
+		t.Errorf("json = %+v", doc)
+	}
+	if _, err := os.Stat(a.Worktree); !os.IsNotExist(err) {
+		t.Errorf("worktree of g2/a still exists (err=%v)", err)
+	}
+	if gitx.BranchExists(context.Background(), root, a.Name) {
+		t.Errorf("branch %s still exists", a.Name)
+	}
+	if got := remoteRefs(t, bare)["refs/heads/review/g2/a"]; got != a.PublishedSHA {
+		t.Errorf("review/g2/a = %q, want it kept at %s", got, a.PublishedSHA)
+	}
+}
+
+func TestSyncCleanOnLandOffCleansNothing(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	setCleanOnLand(t, root, "off")
+	a := branchRow(t, root, "g2/a")
+	mergeReview(t, forge(t, bare), "g2/a")
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "g2/a: landed") {
+		t.Fatalf("sync: %+v", r)
+	}
+	if strings.Contains(r.stdout, "Cleaned up") {
+		t.Errorf("sync cleaned up with clean_on_land = off:\n%s", r.stdout)
+	}
+	if _, err := os.Stat(a.Worktree); err != nil || !gitx.BranchExists(context.Background(), root, a.Name) {
+		t.Errorf("g2/a worktree or branch removed (err=%v)", err)
+	}
+	if got := remoteRefs(t, bare)["refs/heads/review/g2/a"]; got != a.PublishedSHA {
+		t.Errorf("review/g2/a = %q", got)
+	}
+	evs, _ := openStore(t, root).TaskEvents(context.Background(), "g2/a")
+	for _, e := range evs {
+		if e.Kind == "task-cleaned" {
+			t.Error("task-cleaned recorded")
+		}
+	}
+	// `mill clean` still cleans it up.
+	if r := run(t, root, nil, "clean"); r.code != ExitOK || !strings.Contains(r.stdout, "1 worktree(s), 1 branch(es)") {
+		t.Errorf("clean: %+v", r)
+	}
+}
+
+func TestSyncKeepsDirtyWorktreeOfLandedTask(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	a := branchRow(t, root, "g2/a")
+	if err := os.WriteFile(filepath.Join(a.Worktree, "notes.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mergeReview(t, forge(t, bare), "g2/a")
+
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK {
+		t.Fatalf("sync: %+v", r)
+	}
+	if _, err := os.Stat(filepath.Join(a.Worktree, "notes.txt")); err != nil {
+		t.Errorf("dirty worktree removed: %v", err)
+	}
+	if !gitx.BranchExists(context.Background(), root, a.Name) || branchRow(t, root, "g2/a").Worktree != a.Worktree {
+		t.Errorf("branch of g2/a not kept")
+	}
+	for _, want := range []string{"Not cleaned up", "g2/a  worktree " + a.Worktree + " has uncommitted changes"} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
+	}
+	if strings.Contains(r.stdout, "Cleaned up:") {
+		t.Errorf("dirty task listed as cleaned:\n%s", r.stdout)
+	}
+	if tk, _ := openStore(t, root).GetTask(context.Background(), "g2/a"); tk.Status != store.TaskLanded {
+		t.Errorf("g2/a status = %s", tk.Status)
 	}
 }

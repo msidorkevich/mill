@@ -38,7 +38,7 @@ func runSync(ctx context.Context, env Env, args []string) int {
 	}
 	defer release()
 
-	res, err := syncer.Sync(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: out})
+	res, err := syncer.Sync(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: out, Home: env.Home})
 	if err != nil {
 		return fail(err)
 	}
@@ -54,7 +54,7 @@ func runSync(ctx context.Context, env Env, args []string) int {
 
 func printSync(w io.Writer, r syncer.Result) {
 	fmt.Fprintf(w, "\nSynced with %s/%s at %s.\n", r.Remote, r.BaseBranch, short(r.BaseSHA))
-	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.GoalsLanded) == 0 {
+	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.GoalsLanded)+len(r.Cleaned)+len(r.NotCleaned) == 0 {
 		fmt.Fprintln(w, "Nothing changed.")
 		return
 	}
@@ -94,6 +94,32 @@ func printSync(w io.Writer, r syncer.Result) {
 	}
 	if len(r.GoalsLanded) > 0 {
 		fmt.Fprintf(w, "Goals landed: %s\n", strings.Join(r.GoalsLanded, ", "))
+	}
+	if len(r.Cleaned) > 0 {
+		fmt.Fprintln(w, "Cleaned up:")
+		for _, c := range r.Cleaned {
+			var parts []string
+			if c.Worktree != "" {
+				parts = append(parts, "worktree "+c.Worktree)
+			}
+			if c.Branch != "" {
+				parts = append(parts, "branch "+c.Branch)
+			}
+			if c.RemoteBranch != "" {
+				parts = append(parts, r.Remote+"/"+c.RemoteBranch)
+			}
+			fmt.Fprintf(w, "  %s  %s\n", c.TaskID, strings.Join(parts, ", "))
+		}
+	}
+	if len(r.NotCleaned) > 0 {
+		fmt.Fprintln(w, "Not cleaned up (run `mill clean` once resolved):")
+		for _, n := range r.NotCleaned {
+			id := n.TaskID
+			if id == "" {
+				id = "-"
+			}
+			fmt.Fprintf(w, "  %s  %s\n", id, n.Reason)
+		}
 	}
 	if len(r.Blocked) > 0 {
 		fmt.Fprintln(w, "\nNext: inspect blocked tasks with `mill task show <id>`.")

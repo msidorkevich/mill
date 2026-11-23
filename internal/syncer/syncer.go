@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
+	"github.com/msidorkevich/mill/internal/cleanup"
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/fanin"
 	"github.com/msidorkevich/mill/internal/gate"
@@ -46,6 +48,9 @@ type Options struct {
 	// them with conflict handling). Off, a moved fan-in task is restacked and a conflict
 	// blocks it.
 	LeaveFanIn bool
+	// Home is the user's home directory, used to find the worktree root when cleaning up
+	// landed tasks; "" means the current user's.
+	Home string
 }
 
 // Landed is a task found merged on the remote.
@@ -93,6 +98,21 @@ type GateRed struct {
 	Gate   gate.Result `json:"gate"`
 }
 
+// Cleaned is a task landed in this sync whose leftovers were removed (clean_on_land).
+type Cleaned struct {
+	TaskID       string `json:"task_id"`
+	Worktree     string `json:"worktree,omitempty"`      // the worktree removed
+	Branch       string `json:"branch,omitempty"`        // the local branch deleted
+	RemoteBranch string `json:"remote_branch,omitempty"` // the review branch deleted on the remote
+}
+
+// NotCleaned is a cleanup step for a task landed in this sync that was skipped or failed. It
+// never fails the sync; `mill clean` retries it.
+type NotCleaned struct {
+	TaskID string `json:"task_id"`
+	Reason string `json:"reason"`
+}
+
 // Result is what one sync did.
 type Result struct {
 	Remote      string        `json:"remote"`
@@ -107,6 +127,10 @@ type Result struct {
 	GoalsLanded    []string         `json:"goals_landed"`
 	// GateRed lists restacked tasks whose gate failed; only filled when ReportRedGate is set.
 	GateRed []GateRed `json:"gate_red,omitempty"`
+	// Cleaned lists tasks landed in this sync that were cleaned up (clean_on_land);
+	// NotCleaned lists the cleanup steps that were skipped or failed.
+	Cleaned    []Cleaned    `json:"cleaned"`
+	NotCleaned []NotCleaned `json:"not_cleaned"`
 }
 
 type syncer struct {
@@ -127,7 +151,7 @@ func (s *syncer) logf(format string, a ...any) {
 func Sync(ctx context.Context, o Options) (Result, error) {
 	res := Result{Remote: o.Cfg.Remote, BaseBranch: o.Cfg.BaseBranch,
 		Landed: []Landed{}, Restacked: []Restacked{}, Republished: []Republished{}, NeedsRepublish: []NeedsRepublish{}, Blocked: []Blocked{},
-		GoalsLanded: []string{}}
+		GoalsLanded: []string{}, Cleaned: []Cleaned{}, NotCleaned: []NotCleaned{}}
 	root := o.Paths.Root
 	if o.Cfg.Remote == "" {
 		return res, fmt.Errorf("no remote is set; set `remote` in %s", o.Paths.Config)
@@ -164,7 +188,75 @@ func Sync(ctx context.Context, o Options) (Result, error) {
 			return res, err
 		}
 	}
+	// Last, so that children of landed tasks were restacked off their branches first.
+	s.cleanLanded(ctx)
 	return res, nil
+}
+
+// cleanLanded removes what the tasks landed in this sync leave behind, as clean_on_land says.
+// A dirty worktree is kept; failures are reported in the result and never stop the sync.
+func (s *syncer) cleanLanded(ctx context.Context) {
+	mode := s.Cfg.CleanOnLand
+	if mode == "off" || len(s.res.Landed) == 0 {
+		return
+	}
+	o := cleanup.Options{Store: s.Store, Root: s.Paths.Root, Remote: s.Cfg.Remote, DeleteRemote: mode == "all", KeepDirty: true}
+	notCleaned := func(id, reason string) {
+		s.res.NotCleaned = append(s.res.NotCleaned, NotCleaned{TaskID: id, Reason: reason})
+		s.logf("%s: not cleaned up: %s", id, reason)
+	}
+	cleaned := false
+	for _, l := range s.res.Landed {
+		r, err := cleanup.Task(ctx, o, l.TaskID)
+		if err != nil {
+			notCleaned(l.TaskID, fmt.Sprintf("load its branch: %v; run `mill clean`", err))
+			continue
+		}
+		if r.Kept != "" {
+			notCleaned(l.TaskID, r.Kept)
+		}
+		for _, sk := range r.Skipped {
+			if !sk.Expected {
+				notCleaned(l.TaskID, sk.Why)
+			}
+		}
+		for _, f := range r.Failures {
+			notCleaned(l.TaskID, fmt.Sprintf("%s: %v; fix the cause and run `mill clean`", f.Step, f.Err))
+		}
+		if !r.Cleaned() {
+			continue
+		}
+		cleaned = true
+		s.res.Cleaned = append(s.res.Cleaned, Cleaned{TaskID: l.TaskID, Worktree: r.Worktree, Branch: r.Branch, RemoteBranch: r.RemoteBranch})
+		var parts []string
+		if r.Worktree != "" {
+			parts = append(parts, "worktree "+r.Worktree)
+		}
+		if r.Branch != "" {
+			parts = append(parts, "branch "+r.Branch)
+		}
+		if r.RemoteBranch != "" {
+			parts = append(parts, s.Cfg.Remote+"/"+r.RemoteBranch)
+		}
+		s.logf("%s: cleaned up %s", l.TaskID, strings.Join(parts, ", "))
+	}
+	if !cleaned {
+		return
+	}
+	home := s.Home
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			s.res.NotCleaned = append(s.res.NotCleaned, NotCleaned{Reason: fmt.Sprintf("find home directory to prune empty worktree directories: %v", err)})
+			s.logf("not cleaned up: find home directory: %v", err)
+			return
+		}
+		home = h
+	}
+	if _, err := cleanup.PruneEmptyDirs(nil, s.Cfg.Worktrees(s.Paths.Root, home), false); err != nil {
+		s.res.NotCleaned = append(s.res.NotCleaned, NotCleaned{Reason: err.Error()})
+		s.logf("not cleaned up: %v", err)
+	}
 }
 
 // detect marks every published task that reached the base branch as landed (GT6), and every
