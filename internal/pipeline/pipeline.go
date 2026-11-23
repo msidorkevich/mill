@@ -18,6 +18,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/fanin"
 	"github.com/msidorkevich/mill/internal/gate"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/host"
@@ -420,7 +421,7 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 			return br, err
 		}
 		for _, m := range merges {
-			err := gitx.Merge(ctx, wt, m.branch, fmt.Sprintf("mill: merge %s (dependency %s) into %s", m.branch, m.id, name))
+			err := gitx.Merge(ctx, wt, m.rev, m.message)
 			if err == nil {
 				continue
 			}
@@ -449,69 +450,31 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 	return br, p.Store.SaveBranch(ctx, br)
 }
 
-type mergeDep struct{ id, branch string }
+type mergeDep struct{ id, branch, rev, message string }
 
-// baseFor decides what a new task branch starts from (see the goal base rules) and which
-// dependency branches must be merged into it afterwards.
+// baseFor decides what a new task branch starts from (see the goal base rules, worked out by
+// fanin.Start) and what must be merged into it afterwards. A landed dependency's code is in
+// the base branch, so its own branch is never used.
 func (p *Pipeline) baseFor(ctx context.Context, t store.Task) (base, baseSHA string, merges []mergeDep, err error) {
-	deps, err := p.Store.TaskDeps(ctx, t.ID)
+	tg, err := fanin.Start(ctx, p.Store, p.Cfg, p.Paths.Root, t)
 	if err != nil {
 		return "", "", nil, err
 	}
-	branches := map[string]string{}
-	for _, d := range deps {
-		dt, err := p.Store.GetTask(ctx, d)
-		if err != nil {
-			return "", "", nil, err
-		}
-		if !store.Done(dt.Status) {
-			return "", "", nil, &blockedError{fmt.Sprintf("dependency %s is %s, not verified, published or landed; run it first", d, dt.Status)}
-		}
-		db, err := p.Store.GetBranch(ctx, d)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("dependency %s is %s but has no branch: %w", d, dt.Status, err)
-		}
-		branches[d] = db.Name
+	if tg.Wait != "" {
+		return "", "", nil, &blockedError{tg.Wait}
 	}
-	switch len(deps) {
-	case 0:
-		baseSHA, err = gitx.RevParse(ctx, p.Paths.Root, p.Cfg.BaseBranch)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("base branch %q: %w", p.Cfg.BaseBranch, err)
-		}
-		return p.Cfg.BaseBranch, baseSHA, nil, nil
-	default:
-		parent := deps[0]
-		if len(deps) > 1 {
-			goalID, local := store.SplitTaskID(t.ID)
-			g, err := p.Store.GetGoal(ctx, goalID)
-			if err != nil {
-				return "", "", nil, err
-			}
-			var pl plan.Plan
-			if err := json.Unmarshal(g.Plan, &pl); err != nil {
-				return "", "", nil, fmt.Errorf("goal %s has an unreadable plan: %w", goalID, err)
-			}
-			deepest := pl.DeepestParent(local)
-			if deepest == "" {
-				return "", "", nil, fmt.Errorf("goal %s plan has no task %s", goalID, local)
-			}
-			parent = store.TaskID(goalID, deepest)
-			if _, ok := branches[parent]; !ok {
-				return "", "", nil, fmt.Errorf("plan parent %s of %s is not among its stored dependencies", parent, t.ID)
-			}
-		}
-		baseSHA, err = gitx.RevParse(ctx, p.Paths.Root, branches[parent])
-		if err != nil {
-			return "", "", nil, fmt.Errorf("head of dependency branch %q: %w", branches[parent], err)
-		}
-		for _, d := range deps {
-			if d != parent {
-				merges = append(merges, mergeDep{d, branches[d]})
-			}
-		}
-		return branches[parent], baseSHA, merges, nil
+	if tg.Warning != "" {
+		p.logf("%s: warning: %s", t.ID, tg.Warning)
 	}
+	name := BranchName(t.ID)
+	for _, m := range tg.Merges() {
+		msg := fmt.Sprintf("mill: merge %s (dependency %s) into %s", m.Branch, m.ID, name)
+		if tg.Upstream != nil && m.Branch == tg.Upstream.Branch {
+			msg = fmt.Sprintf("mill: merge %s (landed dependencies) into %s", m.Branch, name)
+		}
+		merges = append(merges, mergeDep{id: m.ID, branch: m.Branch, rev: m.Head, message: msg})
+	}
+	return tg.Base, tg.BaseSHA, merges, nil
 }
 
 // agentRun is the outcome of one agent run.
