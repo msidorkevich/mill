@@ -19,11 +19,11 @@ import (
 
 const validPlan = `{"goal": "Add greeting", "assumptions": [], "tasks": [
   {"id": "a", "title": "A", "kind": "implement", "spec": "do a", "acceptance": ["a works"],
-   "checks": ["go test ./..."], "owns": ["a.go"], "depends_on": [], "size": "S"}]}`
+   "checks": ["go test ./..."], "owns": ["a.go"], "depends_on": [], "size": "S", "complexity": "medium", "complexity_reason": "ordinary logic"}]}`
 
 const invalidPlan = `{"goal": "", "assumptions": [], "tasks": [
   {"id": "a", "title": "A", "kind": "implement", "spec": "do a", "acceptance": ["a works"],
-   "checks": [], "owns": ["a.go"], "depends_on": ["zzz"], "size": "S"}]}`
+   "checks": [], "owns": ["a.go"], "depends_on": ["zzz"], "size": "S", "complexity": "medium", "complexity_reason": "ordinary logic"}]}`
 
 func gitRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
@@ -138,7 +138,7 @@ func TestPlanSchemaRequiresEveryField(t *testing.T) {
 	if items.AdditionalProperties == nil || *items.AdditionalProperties {
 		t.Error("task allows additional properties")
 	}
-	fields := []string{"id", "title", "kind", "spec", "acceptance", "checks", "owns", "depends_on", "size"}
+	fields := []string{"id", "title", "kind", "spec", "acceptance", "checks", "owns", "depends_on", "size", "complexity", "complexity_reason"}
 	for _, f := range fields {
 		if !slices.Contains(items.Required, f) {
 			t.Errorf("task field %q not required", f)
@@ -330,5 +330,40 @@ func TestGenerateRateLimitedNamesLimitAndResetTime(t *testing.T) {
 	}
 	if res.Calls != 1 || len(f.Calls()) != 1 {
 		t.Fatalf("calls = %d/%d, want 1 (no retry after a rate limit)", res.Calls, len(f.Calls()))
+	}
+}
+
+func TestComplexitySchemaRequiredWithEnum(t *testing.T) {
+	for _, want := range []string{`"complexity", "complexity_reason"]`, `"enum": ["low", "medium", "high"]`} {
+		if !strings.Contains(string(PlanSchema), want) {
+			t.Errorf("schema missing %s", want)
+		}
+	}
+	if strings.Contains(string(PlanSchema), `"model"`) {
+		t.Error("schema lets the planner set model")
+	}
+}
+
+func TestComplexityPromptExplainsSizeVersusComplexity(t *testing.T) {
+	p := Prompt("g", "s", nil)
+	for _, want := range []string{"size is the amount of code", "how hard the change is to get right",
+		"Concurrency, crash recovery, security and cross-cutting state are high", "Ordinary feature logic is medium",
+		"Docs, text-only changes and mechanical renames are low", "complexity_reason is one short line"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}
+
+func TestComplexityHugeIsRejectedByValidation(t *testing.T) {
+	bad := strings.Replace(validPlan, `"complexity": "medium"`, `"complexity": "huge"`, 1)
+	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(bad, 0.1), step(bad, 0.1)}})
+	if _, err := Generate(context.Background(), options(t, f)); err == nil {
+		t.Fatal("plan with complexity huge accepted")
+	}
+	f = runner.NewFake(runner.Script{runner.RolePlanner: {step(validPlan, 0.1)}})
+	res, err := Generate(context.Background(), options(t, f))
+	if err != nil || res.Plan.Tasks[0].Complexity != "medium" {
+		t.Fatalf("valid complexity: %v %+v", err, res)
 	}
 }

@@ -118,7 +118,7 @@ var PlanSchema = json.RawMessage(`{
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "title", "kind", "spec", "acceptance", "checks", "owns", "depends_on", "size"],
+        "required": ["id", "title", "kind", "spec", "acceptance", "checks", "owns", "depends_on", "size", "complexity", "complexity_reason"],
         "properties": {
           "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
           "title": {"type": "string", "minLength": 1},
@@ -128,7 +128,9 @@ var PlanSchema = json.RawMessage(`{
           "checks": {"type": "array", "items": {"type": "string"}},
           "owns": {"type": "array", "items": {"type": "string"}},
           "depends_on": {"type": "array", "items": {"type": "string"}},
-          "size": {"type": "string", "enum": ["S", "M"]}
+          "size": {"type": "string", "enum": ["S", "M"]},
+          "complexity": {"type": "string", "enum": ["low", "medium", "high"]},
+          "complexity_reason": {"type": "string", "minLength": 1}
         }
       }
     }
@@ -145,6 +147,14 @@ implement one at a time, each on its own branch, each reviewed independently.
 Rules for the plan:
 - 1 to 12 tasks. Each task is one reviewable change of size S (small) or M (medium); split
   anything larger.
+- size is the amount of code; complexity is how hard the change is to get right. Rate each
+  task's complexity as "high", "medium" or "low".
+  Concurrency, crash recovery, security and cross-cutting state are high.
+  Ordinary feature logic is medium.
+  Docs, text-only changes and mechanical renames are low.
+- complexity_reason is one short line saying why (e.g. "concurrency and crash recovery",
+  "text only").
+- Do not set a model for any task; the operator chooses it.
 - kind is "implement", "docs" or "test".
 - id is short kebab-case (lowercase letters, digits, dashes), unique in the plan.
 - spec says exactly what to build; acceptance lists criteria a reviewer can check one by one.
