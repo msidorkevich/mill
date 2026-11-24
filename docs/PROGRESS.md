@@ -731,7 +731,7 @@ More follow-ups found while landing M5:
 - [x] **Locks block unrelated work** (publish, sync, single tasks): short per-task claims landed
       in `g13` (PRs #44, #45, #49); `mill sync` now runs next to `mill run`.
 
-## One scheduler for all goals: in progress (goal `g13`)
+## One scheduler for all goals: done (goal `g13` landed 2026-11-24, $15.15)
 
 Planned by mill's planner ($0.70, 9 tasks), reviewed and edited before approval (a claim held by
 a reused pid must not count as live; the docs task neither edits PROGRESS nor reruns `make
@@ -779,7 +779,9 @@ together: they compile and their packages pass).
       task's commits one by one, and two of its five attempts edited a sibling's files that
       later attempts reverted. The net change merges cleanly. Fix: a restack applies the task's
       net change as one commit, as publishing already squashes.
-- [ ] **`mill sync` during a run mishandles a running child of a landed parent** (found by the
+- [x] **`mill sync` during a run mishandles a running child of a landed parent** (fixed by
+      task `sync-busy-child`, PR #64; it ran as the first single task joined to a running
+      `mill run`) (found by the
       `e2e-one-scheduler` agent, which left `TestSyncDuringRunReportsRunningChildBusy` skipped
       with the reason). Sync skips the busy child silently instead of listing it as busy, and
       clean_on_land removes the parent's worktree, branch and review branch while the child is
@@ -849,7 +851,7 @@ Not yet planned into a goal unless noted. Grouped by area; each names what was s
       to the same package use task-specific helper names; docs tasks run last and own only
       docs.
 
-## Next: models chosen by task size and complexity (operator decision 2026-11-24)
+## Models chosen by task size and complexity: done (goal `g14` landed 2026-11-24, $6.70)
 
 Planned as its own goal after `g13`, before fast gates. Today the planner sets only `size`, and
 `.mill/config.toml` maps size to one model (`S → sonnet`, `M → opus`) for every role, with no
@@ -872,3 +874,18 @@ escalation. Design:
 Order after `g13`: models by size and complexity, then fast gates (A, B, E, fast end-to-end
 tests, pipelined and cached sync gates), then visibility (claims in watch/list/TUI, task list
 order, skipped tests in review).
+
+`g14` landed as 10 tasks (PRs #58–#63, #65, #66, #68, #69); mill's own `.mill/config.toml` got
+the `[models]` and `[roles]` sections (PR #67). It was the first goal run by one `mill run`
+without arguments, with the single task `sync-busy-child` joined to the same run through
+`mill task run`. Three tasks needed a second attempt after a verifier finding. `mill stats
+models` works; tasks from before `g14` show complexity `medium` and model `-` because neither
+was recorded then.
+
+## Fast gates: planning (operator decision 2026-11-24)
+
+Measured before planning: `internal/cli` 250s (210 tests), `internal/keeper` 82s,
+`internal/pipeline` 74s, `internal/gitx` 44s; no `t.Parallel()` anywhere; `t.Setenv` 25 times in
+11 test files. Scope: A parallel tests, B no duplicate test runs, fast polling in tests, a gate
+limit (`max_parallel_gates`), reused gate results for identical trees and pipelined restacks.
+The first goal planned with complexity ratings.
