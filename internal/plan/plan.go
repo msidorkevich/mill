@@ -294,6 +294,54 @@ func (p Plan) Warnings() []string {
 	return out
 }
 
+// WarningsFor is Warnings plus a warning for every task check that is a whole-package
+// `go test` without -run while checkCmd already runs go test over everything.
+func (p Plan) WarningsFor(checkCmd string) []string {
+	return append(p.Warnings(), p.checkWarnings(checkCmd)...)
+}
+
+// coversAll reports whether checkCmd runs go test over ./... (`make check` is taken to).
+func coversAll(checkCmd string) bool {
+	c := strings.Join(strings.Fields(checkCmd), " ")
+	return strings.Contains(c, "go test ./...") || c == "make check" || strings.HasPrefix(c, "make check ")
+}
+
+// broadGoTest reports whether check is a go test of packages with no -run filter.
+func broadGoTest(check string) bool {
+	f := strings.Fields(check)
+	for i := 0; i+1 < len(f); i++ {
+		if f[i] != "go" || f[i+1] != "test" {
+			continue
+		}
+		for _, a := range f[i+2:] {
+			if a == "&&" || a == "||" || a == ";" || a == "|" {
+				break
+			}
+			if a == "-run" || strings.HasPrefix(a, "-run=") || strings.HasPrefix(a, "--run") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (p Plan) checkWarnings(checkCmd string) []string {
+	if !coversAll(checkCmd) {
+		return nil
+	}
+	var out []string
+	for _, t := range p.Tasks {
+		for _, c := range t.Checks {
+			if broadGoTest(c) {
+				out = append(out, fmt.Sprintf("task %q check %q runs go test without -run, but the gate already runs check_cmd (%s) over everything; narrow it, e.g. `go test -run 'TestName' ./pkg/`",
+					t.ID, c, strings.TrimSpace(checkCmd)))
+			}
+		}
+	}
+	return out
+}
+
 // MatchOwns reports whether path is matched by an owns pattern: slash-separated, `*` and `?`
 // match within one segment, `**` matches any number of segments including zero.
 func MatchOwns(pattern, p string) bool {

@@ -17,6 +17,7 @@ func task(id string, deps ...string) taskspec.Spec {
 func mk(ts ...taskspec.Spec) Plan { return Plan{Goal: "g", Tasks: ts} }
 
 func TestParseExampleValidatesCleanly(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../../docs/examples/plan-todos.json")
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +35,7 @@ func TestParseExampleValidatesCleanly(t *testing.T) {
 }
 
 func TestParseStrictAndDefaults(t *testing.T) {
+	t.Parallel()
 	for name, in := range map[string]string{
 		"unknown top":  `{"goal":"g","bogus":1,"tasks":[]}`,
 		"unknown task": `{"goal":"g","tasks":[{"id":"a","bogus":1}]}`,
@@ -54,6 +56,7 @@ func TestParseStrictAndDefaults(t *testing.T) {
 }
 
 func TestValidateReportsAllProblems(t *testing.T) {
+	t.Parallel()
 	bad := task("Bad ID")
 	bad.Title = ""
 	noChecks := task("nc")
@@ -83,6 +86,7 @@ func TestValidateReportsAllProblems(t *testing.T) {
 }
 
 func TestValidateTaskCounts(t *testing.T) {
+	t.Parallel()
 	if err := (Plan{Goal: "g"}).Validate(Options{}); err == nil || !strings.Contains(err.Error(), "no tasks") {
 		t.Fatalf("got %v", err)
 	}
@@ -103,6 +107,7 @@ func TestValidateTaskCounts(t *testing.T) {
 }
 
 func TestValidateShowsCycle(t *testing.T) {
+	t.Parallel()
 	p := mk(task("a", "b"), task("b", "a"))
 	err := p.Validate(Options{})
 	if err == nil || !strings.Contains(err.Error(), "a -> b -> a") {
@@ -114,6 +119,7 @@ func TestValidateShowsCycle(t *testing.T) {
 }
 
 func TestOrderDependenciesFirstTiesInPlanOrder(t *testing.T) {
+	t.Parallel()
 	p := mk(task("a", "c"), task("b"), task("c"), task("d", "a", "b"))
 	got, err := p.Order()
 	if err != nil {
@@ -130,6 +136,7 @@ func fanIn() Plan {
 }
 
 func TestDepth(t *testing.T) {
+	t.Parallel()
 	p := fanIn()
 	for id, want := range map[string]int{"leaf": 0, "solo": 0, "mid1": 1, "top": 2} {
 		if got := p.Depth(id); got != want {
@@ -139,6 +146,7 @@ func TestDepth(t *testing.T) {
 }
 
 func TestDeepestParentTieGoesToLastListed(t *testing.T) {
+	t.Parallel()
 	p := fanIn()
 	if got := p.DeepestParent("top"); got != "mid2" {
 		t.Errorf("got %q want mid2", got)
@@ -156,6 +164,7 @@ func TestDeepestParentTieGoesToLastListed(t *testing.T) {
 }
 
 func TestDependsOnIsTransitive(t *testing.T) {
+	t.Parallel()
 	p := mk(task("a"), task("b", "a"), task("c", "b"), task("d"))
 	cases := []struct {
 		a, b string
@@ -169,6 +178,7 @@ func TestDependsOnIsTransitive(t *testing.T) {
 }
 
 func TestWarningsOnlyForUnrelatedOverlap(t *testing.T) {
+	t.Parallel()
 	a, b, c := task("a"), task("b"), task("c", "a")
 	a.Owns = []string{"internal/store/**"}
 	b.Owns = []string{"internal/store/tasks.go"}
@@ -186,6 +196,7 @@ func TestWarningsOnlyForUnrelatedOverlap(t *testing.T) {
 }
 
 func TestGlobsOverlap(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		x, y string
 		want bool
@@ -213,6 +224,7 @@ func TestGlobsOverlap(t *testing.T) {
 }
 
 func TestMatchOwnsGlobSemantics(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		pat, path string
 		want      bool
@@ -242,6 +254,7 @@ func TestMatchOwnsGlobSemantics(t *testing.T) {
 }
 
 func TestOutsideOwnsKeepsInputOrder(t *testing.T) {
+	t.Parallel()
 	got := OutsideOwns([]string{"a/**", "x.go"}, []string{"z.go", "a/b.go", "x.go", "m/n.go"})
 	if !reflect.DeepEqual(got, []string{"z.go", "m/n.go"}) {
 		t.Fatalf("got %v", got)
@@ -252,6 +265,7 @@ func TestOutsideOwnsKeepsInputOrder(t *testing.T) {
 }
 
 func TestComplexityMissingInStoredPlanParsesAsMedium(t *testing.T) {
+	t.Parallel()
 	p, err := Parse([]byte(`{"goal":"g","tasks":[{"id":"a","title":"t","kind":"docs","spec":"s"}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +279,7 @@ func TestComplexityMissingInStoredPlanParsesAsMedium(t *testing.T) {
 }
 
 func TestComplexityInvalidValueNamesTask(t *testing.T) {
+	t.Parallel()
 	p, err := Parse([]byte(`{"goal":"g","tasks":[{"id":"big-one","title":"t","kind":"docs","spec":"s","complexity":"extreme"}]}`))
 	if err != nil {
 		t.Fatal(err)
@@ -276,11 +291,42 @@ func TestComplexityInvalidValueNamesTask(t *testing.T) {
 }
 
 func TestComplexityExampleCarriesComplexityOnEveryTask(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("../../docs/examples/plan-todos.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n := strings.Count(string(data), `"complexity":`); n != strings.Count(string(data), `"size":`) {
 		t.Fatalf("complexity on %d tasks, size on %d", n, strings.Count(string(data), `"size":`))
+	}
+}
+
+func TestCheckWarningsFlagBroadGoTestWhenCheckCmdCoversAll(t *testing.T) {
+	t.Parallel()
+	a := task("foo-task")
+	a.Checks = []string{"go test ./internal/foo/"}
+	for _, cc := range []string{"make check", "gofmt -l . && go test ./..."} {
+		p := mk(a)
+		w := p.WarningsFor(cc)
+		if len(w) != 1 || !strings.Contains(w[0], `"foo-task"`) || !strings.Contains(w[0], "go test ./internal/foo/") || !strings.Contains(w[0], "-run") {
+			t.Errorf("check_cmd %q: got %v", cc, w)
+		}
+		if err := p.Validate(Options{}); err != nil {
+			t.Errorf("warnings must not fail validation: %v", err)
+		}
+	}
+}
+
+func TestCheckWarningsIgnoreNarrowOrUncoveredChecks(t *testing.T) {
+	t.Parallel()
+	a := task("a")
+	a.Checks = []string{"go test -run TestX ./internal/foo/", "go test -run=TestX ./...", "true"}
+	if w := mk(a).WarningsFor("make check"); len(w) != 0 {
+		t.Errorf("narrow checks warned: %v", w)
+	}
+	b := task("b")
+	b.Checks = []string{"go test ./internal/foo/"}
+	if w := mk(b).WarningsFor("go vet ./..."); len(w) != 0 {
+		t.Errorf("warned although check_cmd has no go test: %v", w)
 	}
 }

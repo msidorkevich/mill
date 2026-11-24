@@ -159,7 +159,12 @@ Rules for the plan:
 - id is short kebab-case (lowercase letters, digits, dashes), unique in the plan.
 - spec says exactly what to build; acceptance lists criteria a reviewer can check one by one.
 - checks are shell commands run from the repository root that must pass when the task is done.
-  Every implement task has at least one check (use the project's check command when it fits).
+  Every implement task has at least one check.
+- Task checks must be narrow: go test with -run patterns, or a single package with -run. The
+  gate runs the project's check command on everything, so never repeat it (no "make check",
+  no "go test ./...", no whole-package go test without -run) as a task check.
+- Test tasks must use injected millisecond polling intervals (fast polling); never production
+  default intervals or sleeps to wait for state.
 - owns lists the files the task may change, as file globs (e.g. "internal/foo/**", "README.md").
 - depends_on lists only tasks whose code this task needs; leave it empty otherwise.
 - Tasks that do not depend on each other own disjoint files where possible, so they can run
