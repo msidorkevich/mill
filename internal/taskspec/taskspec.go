@@ -9,6 +9,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Spec is one task.
@@ -22,12 +24,18 @@ type Spec struct {
 	Owns       []string `json:"owns"`
 	DependsOn  []string `json:"depends_on"`
 	Size       string   `json:"size"`
+
+	Complexity       string `json:"complexity"`
+	ComplexityReason string `json:"complexity_reason,omitempty"`
+	Model            string `json:"model,omitempty"`
 }
 
 // Kinds and sizes a task may have. Size L is rejected: such a task must be split (PL3).
 var (
 	Kinds = []string{"implement", "docs", "test"}
 	Sizes = []string{"S", "M"}
+
+	Complexities = []string{"low", "medium", "high"}
 )
 
 var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -56,10 +64,13 @@ func Parse(data []byte) (Spec, error) {
 	return s, s.Validate()
 }
 
-// ApplyDefaults sets size S when empty and turns nil lists into empty lists.
+// ApplyDefaults sets size S and complexity medium when empty and turns nil lists into empty lists.
 func (s *Spec) ApplyDefaults() {
 	if s.Size == "" {
 		s.Size = "S"
+	}
+	if s.Complexity == "" {
+		s.Complexity = "medium"
 	}
 	if s.Acceptance == nil {
 		s.Acceptance = []string{}
@@ -123,6 +134,21 @@ func (s Spec) ValidateFields() error {
 		} else {
 			add("size must be one of %v, got %q", Sizes, s.Size)
 		}
+	}
+	if !contains(Complexities, s.Complexity) {
+		add("complexity must be one of %v, got %q", Complexities, s.Complexity)
+	}
+	if strings.ContainsAny(s.ComplexityReason, "\r\n") {
+		add("complexity_reason must be a single line")
+	}
+	if n := utf8.RuneCountInString(s.ComplexityReason); n > 120 {
+		add("complexity_reason is %d characters: keep it to 120 or fewer", n)
+	}
+	if strings.IndexFunc(s.Model, unicode.IsSpace) >= 0 {
+		add("model %q must not contain whitespace", s.Model)
+	}
+	if n := utf8.RuneCountInString(s.Model); n > 100 {
+		add("model is %d characters: keep it to 100 or fewer", n)
 	}
 	return errors.Join(errs...)
 }

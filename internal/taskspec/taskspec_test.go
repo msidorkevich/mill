@@ -71,3 +71,51 @@ func TestLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestComplexityDefaultsToMedium(t *testing.T) {
+	s, err := Parse([]byte(`{"id":"a","title":"t","kind":"docs","spec":"s"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Complexity != "medium" {
+		t.Fatalf("complexity = %q, want medium", s.Complexity)
+	}
+}
+
+func TestComplexityRejectsUnknownValue(t *testing.T) {
+	_, err := Parse([]byte(`{"id":"a","title":"t","kind":"docs","spec":"s","complexity":"extreme"}`))
+	if err == nil || !strings.Contains(err.Error(), "[low medium high]") || !strings.Contains(err.Error(), `"extreme"`) {
+		t.Fatalf("want error naming allowed values and got value, got %v", err)
+	}
+}
+
+func TestComplexityReasonRejectsMultilineAndOverlong(t *testing.T) {
+	for name, r := range map[string]string{"newline": "a\nb", "long": strings.Repeat("x", 121)} {
+		s := Spec{ID: "a", Title: "t", Kind: "docs", Spec: "s", Size: "S", Complexity: "low", ComplexityReason: r}
+		if err := s.ValidateFields(); err == nil || !strings.Contains(err.Error(), "complexity_reason") {
+			t.Errorf("%s: want complexity_reason error, got %v", name, err)
+		}
+	}
+	s := Spec{ID: "a", Title: "t", Kind: "docs", Spec: "s", Size: "S", Complexity: "low", ComplexityReason: strings.Repeat("x", 120)}
+	if err := s.ValidateFields(); err != nil {
+		t.Errorf("120 chars should pass: %v", err)
+	}
+}
+
+func TestModelOverrideRejectsWhitespaceAndAcceptsEmpty(t *testing.T) {
+	base := Spec{ID: "a", Title: "t", Kind: "docs", Spec: "s", Size: "S", Complexity: "low"}
+	for _, m := range []string{"a b", "a\tb", strings.Repeat("m", 101)} {
+		s := base
+		s.Model = m
+		if err := s.ValidateFields(); err == nil || !strings.Contains(err.Error(), "model") {
+			t.Errorf("model %q: want error, got %v", m, err)
+		}
+	}
+	for _, m := range []string{"", "claude-opus-5-5"} {
+		s := base
+		s.Model = m
+		if err := s.ValidateFields(); err != nil {
+			t.Errorf("model %q should pass: %v", m, err)
+		}
+	}
+}
