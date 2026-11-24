@@ -849,3 +849,85 @@ func TestCommitSummariesListsSubjectsAndTrailersOldestFirst(t *testing.T) {
 		t.Fatalf("empty range = %+v, %v", none, err)
 	}
 }
+
+func TestReplayOntoAppliesNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	ctx := context.Background()
+	dir := repo(t)
+	base := mustRun(t, ctx, dir, "rev-parse", "HEAD")
+	mustRun(t, ctx, dir, "checkout", "-q", "-b", "feat")
+	commitFile(t, dir, "feat.txt", "feat\n", "mill: x attempt 1\n\nMill-Task: x\nMill-Attempt: 1")
+	commitFile(t, dir, "clash.txt", "feat\n", "mill: x attempt 2\n\nMill-Task: x\nMill-Attempt: 2")
+	if err := os.Remove(filepath.Join(dir, "clash.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CommitAll(ctx, dir, "mill: x attempt 3\n\nMill-Task: x\nMill-Attempt: 3"); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, dir, "feat.txt", "feat 5\n", "mill: x attempt 5\n\nMill-Task: x\nMill-Attempt: 5")
+	mustRun(t, ctx, dir, "checkout", "-q", "main")
+	main := commitFile(t, dir, "clash.txt", "main\n", "main clash")
+	mustRun(t, ctx, dir, "checkout", "-q", "feat")
+
+	head, err := ReplayOnto(ctx, dir, "x", main, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent := mustRun(t, ctx, dir, "rev-parse", head+"^"); parent != main {
+		t.Fatalf("parent = %s, want %s", parent, main)
+	}
+	if files := mustRun(t, ctx, dir, "diff", "--name-status", main, head); files != "A\tfeat.txt" {
+		t.Fatalf("net change = %q", files)
+	}
+	if got := mustRun(t, ctx, dir, "show", head+":feat.txt"); got != "feat 5" {
+		t.Fatalf("feat.txt = %q", got)
+	}
+	if subject := mustRun(t, ctx, dir, "log", "-1", "--format=%s", head); subject != "mill: x attempts 1-3, 5 (squashed for restack)" {
+		t.Fatalf("subject = %q", subject)
+	}
+	// The squashed commit keeps the trailers, so a later restack names the same attempts.
+	if got := mustRun(t, ctx, dir, "log", "-1", "--format=%(trailers:key=Mill-Attempt,valueonly,separator=%x2C)", head); got != "1,2,3,5" {
+		t.Fatalf("attempt trailers = %q", got)
+	}
+}
+
+func TestReplayOntoConflictLeavesBranchAtOldHead(t *testing.T) {
+	ctx := context.Background()
+	dir, base, main, feat := divergedRepo(t, true)
+	_, err := ReplayOnto(ctx, dir, "x", main, base)
+	var ce *RebaseConflictError
+	if !errors.As(err, &ce) || len(ce.Files) != 1 || ce.Files[0] != "shared.txt" {
+		t.Fatalf("err = %v, want a conflict in shared.txt", err)
+	}
+	if head := mustRun(t, ctx, dir, "rev-parse", "HEAD"); head != feat {
+		t.Fatalf("HEAD = %s, want the old head %s", head, feat)
+	}
+	if branch := mustRun(t, ctx, dir, "rev-parse", "--abbrev-ref", "HEAD"); branch != "feat" {
+		t.Fatalf("checked out %q, want feat", branch)
+	}
+	if st := mustRun(t, ctx, dir, "status", "--porcelain"); st != "" {
+		t.Fatalf("worktree not clean: %q", st)
+	}
+}
+
+func TestSquashOwnWithoutAttemptTrailersNamesOwnCommits(t *testing.T) {
+	ctx := context.Background()
+	dir := repo(t)
+	base := mustRun(t, ctx, dir, "rev-parse", "HEAD")
+	commitFile(t, dir, "a.txt", "a\n", "plain")
+	old, sq, err := SquashOwn(ctx, dir, "x", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old == sq || mustRun(t, ctx, dir, "rev-parse", "HEAD") != sq || mustRun(t, ctx, dir, "rev-parse", sq+"^") != base {
+		t.Fatalf("old %s, squashed %s", old, sq)
+	}
+	if subject := mustRun(t, ctx, dir, "log", "-1", "--format=%s", sq); subject != "mill: x own commits (squashed for restack)" {
+		t.Fatalf("subject = %q", subject)
+	}
+	if err := Unsquash(ctx, dir, old, sq); err != nil {
+		t.Fatal(err)
+	}
+	if head := mustRun(t, ctx, dir, "rev-parse", "HEAD"); head != old {
+		t.Fatalf("HEAD = %s after Unsquash, want %s", head, old)
+	}
+}

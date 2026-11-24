@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -255,6 +257,118 @@ func RebaseOnto(ctx context.Context, dir, onto, upstream string) (string, error)
 		return "", rebaseErr
 	}
 	return "", &RebaseConflictError{Onto: onto, Files: strings.Split(files, "\n")}
+}
+
+// SquashOwn replaces the own commits of the branch checked out in dir (the commits after
+// upstream) with one commit on upstream that carries the branch head's tree: their net change.
+// Attempts that undo each other cancel out, so replaying the result conflicts only where the
+// net change does. The squash is plumbing (commit-tree, then the branch ref moves to the new
+// commit with the same tree), so the index and work tree are untouched. Its message names the
+// task and the attempts it combines, read from the commits' Mill-Attempt trailers, and repeats
+// those trailers so a later squash still finds them. It returns the old head, to move the
+// branch back with Unsquash, and the new one; both are the head when there is nothing to squash.
+func SquashOwn(ctx context.Context, dir, task, upstream string) (oldHead, newHead string, err error) {
+	head, err := RevParse(ctx, dir, "HEAD")
+	if err != nil {
+		return "", "", fmt.Errorf("read the head to squash: %w", err)
+	}
+	if head == upstream {
+		return head, head, nil
+	}
+	out, err := Run(ctx, dir, "log", "--no-merges", "--format=%(trailers:key=Mill-Attempt,valueonly)", upstream+".."+head)
+	if err != nil {
+		return "", "", fmt.Errorf("list the own commits after %s: %w", upstream, err)
+	}
+	var attempts []int
+	seen := map[int]bool{}
+	for _, f := range strings.Fields(out) {
+		n, err := strconv.Atoi(f)
+		if err != nil || n <= 0 || seen[n] {
+			continue
+		}
+		seen[n] = true
+		attempts = append(attempts, n)
+	}
+	sort.Ints(attempts)
+	tree, err := TreeOf(ctx, dir, head)
+	if err != nil {
+		return "", "", fmt.Errorf("read the tree of %s: %w", head, err)
+	}
+	sha, err := CommitTree(ctx, dir, tree, upstream, squashMessage(task, attempts))
+	if err != nil {
+		return "", "", fmt.Errorf("create the squashed commit of the own commits: %w", err)
+	}
+	if _, err := Run(ctx, dir, "update-ref", "-m", "mill: squash for restack", "HEAD", sha, head); err != nil {
+		return "", "", fmt.Errorf("move the branch to the squashed commit %s: %w", sha, err)
+	}
+	return head, sha, nil
+}
+
+// Unsquash moves the branch checked out in dir from the squashed commit newHead back to
+// oldHead (SquashOwn's results). Both carry the same tree, so the work tree is untouched.
+func Unsquash(ctx context.Context, dir, oldHead, newHead string) error {
+	if oldHead == newHead {
+		return nil
+	}
+	if _, err := Run(ctx, dir, "update-ref", "-m", "mill: undo the squash for restack", "HEAD", oldHead, newHead); err != nil {
+		return fmt.Errorf("move the branch back from the squashed commit %s to %s: %w; run `git reset --soft %s` in %s", newHead, oldHead, err, oldHead, dir)
+	}
+	return nil
+}
+
+// squashMessage is the message of a squashed restack commit, e.g.
+// "mill: g1/x attempts 1-3, 5 (squashed for restack)".
+func squashMessage(task string, attempts []int) string {
+	var b strings.Builder
+	switch len(attempts) {
+	case 0:
+		fmt.Fprintf(&b, "mill: %s own commits (squashed for restack)\n", task)
+	case 1:
+		fmt.Fprintf(&b, "mill: %s attempt %d (squashed for restack)\n", task, attempts[0])
+	default:
+		fmt.Fprintf(&b, "mill: %s attempts %s (squashed for restack)\n", task, attemptRanges(attempts))
+	}
+	fmt.Fprintf(&b, "\nMill-Task: %s\n", task)
+	for _, n := range attempts {
+		fmt.Fprintf(&b, "Mill-Attempt: %d\n", n)
+	}
+	return b.String()
+}
+
+// attemptRanges writes sorted, distinct attempt numbers as ranges: "1-3, 5".
+func attemptRanges(ns []int) string {
+	var parts []string
+	for i := 0; i < len(ns); {
+		j := i
+		for j+1 < len(ns) && ns[j+1] == ns[j]+1 {
+			j++
+		}
+		if j == i {
+			parts = append(parts, strconv.Itoa(ns[i]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", ns[i], ns[j]))
+		}
+		i = j + 1
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ReplayOnto replays the net change of the own commits (the commits after upstream) of the
+// branch checked out in dir onto `onto`: SquashOwn, then RebaseOnto. On any failure the branch
+// is back at its old head; a conflict is a *RebaseConflictError. It returns the new HEAD sha.
+func ReplayOnto(ctx context.Context, dir, task, onto, upstream string) (string, error) {
+	oldHead, squashed, err := SquashOwn(ctx, dir, task, upstream)
+	if err != nil {
+		return "", err
+	}
+	head, err := RebaseOnto(ctx, dir, onto, upstream)
+	if err != nil {
+		if uerr := Unsquash(ctx, dir, oldHead, squashed); uerr != nil {
+			return "", errors.Join(err, uerr)
+		}
+		return "", err
+	}
+	return head, nil
 }
 
 // runExit runs git in dir and returns trimmed stdout and git's exit code. err is set only

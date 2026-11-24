@@ -294,3 +294,38 @@ func TestFanInTaskWhoseDeepestParentLandedIsBasedOnRemoteBase(t *testing.T) {
 		t.Fatalf("second pass = %+v\n%s", res, f.out)
 	}
 }
+
+func TestFanInRestackReplaysNetChangeAndMergesUnlandedParents(t *testing.T) {
+	resolvedFan := "one\ntwo b c\nthree\nfour\nfive a\n"
+	f := setupFanIn(t, "true", runner.Script{
+		runner.RoleResolver: {resolverStep(map[string]string{"fan.txt": resolvedFan})},
+		runner.RoleVerifier: {verdictStep("pass")},
+	})
+	f.cHead = f.revertingAttempts(t, fanInID, f.cWT, "b2.txt")
+	f.moveParent(t, "g2/b", f.bWT, "b2.txt", "b2\n")
+	bNew := f.moveParent(t, "g2/b", f.bWT, "fan.txt", "one\ntwo b\nthree\nfour\nfive\n")
+
+	res := f.pass(t)
+	if len(res.Rebased) != 1 || res.Rebased[0].ResolvedBy != ResolvedByAgent || len(res.Blocked) != 0 {
+		t.Fatalf("result = %+v\n%s", res, f.out)
+	}
+	if n := f.roleCalls(runner.RoleResolver); n != 1 {
+		t.Fatalf("resolver calls = %d, want 1", n)
+	}
+	br, _ := f.o.Store.GetBranch(context.Background(), fanInID)
+	if got := git(t, f.root, "rev-list", "--parents", "-n1", br.StartSHA); got != br.StartSHA+" "+bNew+" "+f.aHead {
+		t.Fatalf("start parents = %q, want %s %s", got, bNew, f.aHead)
+	}
+	if got := git(t, f.root, "rev-list", "--count", br.StartSHA+".."+br.HeadSHA); got != "1" {
+		t.Fatalf("own commits = %s, want 1", got)
+	}
+	if files := git(t, f.root, "diff", "--name-only", br.StartSHA, br.HeadSHA); files != "c.txt\nfan.txt" {
+		t.Fatalf("own changes = %q", files)
+	}
+	if got := git(t, f.root, "show", br.HeadSHA+":b2.txt"); got != "b2" {
+		t.Fatalf("b2.txt = %q, want b's", got)
+	}
+	if subject := git(t, f.root, "log", "-1", "--format=%s", br.HeadSHA); subject != "mill: g2/c attempts 2-3 (squashed for restack)" {
+		t.Fatalf("replayed commit subject = %q", subject)
+	}
+}

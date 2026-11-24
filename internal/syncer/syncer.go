@@ -618,7 +618,8 @@ func (s *syncer) preflight(ctx context.Context, t store.Task, br store.Branch, o
 	return true, nil
 }
 
-// rebase replays the task's own commits onto ontoSHA, re-gates and re-publishes it.
+// rebase replays the net change of the task's own commits onto ontoSHA, re-gates and
+// re-publishes it.
 func (s *syncer) rebase(ctx context.Context, t store.Task, br store.Branch, onto, ontoSHA string, landed bool) error {
 	if ok, err := s.preflight(ctx, t, br, onto); err != nil || !ok {
 		return err
@@ -627,7 +628,7 @@ func (s *syncer) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	if oldStart == "" {
 		oldStart = br.BaseSHA
 	}
-	newHead, err := gitx.RebaseOnto(ctx, br.Worktree, ontoSHA, oldStart)
+	newHead, err := gitx.ReplayOnto(ctx, br.Worktree, t.ID, ontoSHA, oldStart)
 	var ce *gitx.RebaseConflictError
 	if errors.As(err, &ce) {
 		return s.block(ctx, t.ID, fmt.Sprintf("sync: restacking onto %s (%s) conflicts in %s; the branch is unchanged",

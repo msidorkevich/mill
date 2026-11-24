@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -479,4 +480,82 @@ func TestPassLeavesBusyTaskUnchangedAndReportsIt(t *testing.T) {
 	if claims, err := e.o.Store.ClaimedTasks(ctx); err != nil || len(claims) != 0 {
 		t.Errorf("claims left = %+v, %v", claims, err)
 	}
+}
+
+// revertingAttempts commits attempts 2 and 3 on the branch checked out in wt: attempt 2 writes
+// name, attempt 3 deletes it again. It records the new head of task and returns it.
+func (e *env) revertingAttempts(t *testing.T, task, wt, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	commit := func(n int) {
+		git(t, wt, "add", "-A")
+		git(t, wt, "commit", "-q", "-m", fmt.Sprintf("mill: %s attempt %d", task, n), "-m", fmt.Sprintf("Mill-Task: %s\nMill-Attempt: %d", task, n))
+	}
+	if err := os.WriteFile(filepath.Join(wt, name), []byte("from "+task+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commit(2)
+	if err := os.Remove(filepath.Join(wt, name)); err != nil {
+		t.Fatal(err)
+	}
+	commit(3)
+	head := git(t, wt, "rev-parse", "HEAD")
+	br, err := e.o.Store.GetBranch(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	br.HeadSHA, br.GateSHA = head, head
+	if err := e.o.Store.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+	return head
+}
+
+func TestRebaseReplaysNetChangeSoRevertedAttemptsDoNotConflict(t *testing.T) {
+	// Only shared.txt really conflicts; the resolver has a single step for it.
+	e := setup(t, "grep -q 'main task' shared.txt", runner.Script{
+		runner.RoleResolver: {resolverStep(map[string]string{"shared.txt": resolved})},
+		runner.RoleVerifier: {verdictStep("pass")},
+	})
+	e.head = e.revertingAttempts(t, taskID, e.wt, "other.txt")
+	e.moveMain(t, "other.txt", "main other\n")
+	tip := e.moveMain(t, "shared.txt", mainSide)
+
+	res := e.pass(t)
+	if len(res.Rebased) != 1 || res.Rebased[0].ResolvedBy != ResolvedByAgent || len(res.Blocked) != 0 {
+		t.Fatalf("result = %+v\n%s", res, e.out)
+	}
+	if n := e.roleCalls(runner.RoleResolver); n != 1 {
+		t.Fatalf("resolver calls = %d, want 1", n)
+	}
+	head := git(t, e.wt, "rev-parse", "HEAD")
+	if parent := git(t, e.wt, "rev-parse", "HEAD^"); parent != tip {
+		t.Fatalf("replayed commit's parent = %s, want %s", parent, tip)
+	}
+	if files := git(t, e.wt, "diff", "--name-only", tip, head); files != "shared.txt" {
+		t.Fatalf("net change = %q, want shared.txt only", files)
+	}
+	if got := git(t, e.wt, "show", "HEAD:other.txt"); got != "main other" {
+		t.Fatalf("other.txt = %q, want main's", got)
+	}
+	if subject := git(t, e.wt, "log", "-1", "--format=%s"); subject != "mill: g1/a attempts 2-3 (squashed for restack)" {
+		t.Fatalf("replayed commit subject = %q", subject)
+	}
+}
+
+func TestRebaseBlocksWhenNetChangeConflictsAndResolverFails(t *testing.T) {
+	e := setup(t, "true", runner.Script{
+		runner.RoleResolver: {resolverStep(nil)}, // leaves the conflict markers
+	})
+	e.head = e.revertingAttempts(t, taskID, e.wt, "other.txt")
+	e.moveMain(t, "shared.txt", mainSide)
+
+	res := e.pass(t)
+	if len(res.Rebased) != 0 || len(res.Blocked) != 1 {
+		t.Fatalf("result = %+v\n%s", res, e.out)
+	}
+	if tk, _ := e.o.Store.GetTask(context.Background(), taskID); tk.Status != store.TaskBlocked || !strings.Contains(tk.Reason, "shared.txt") {
+		t.Fatalf("task = %s %q", tk.Status, tk.Reason)
+	}
+	e.assertUnchanged(t)
 }
