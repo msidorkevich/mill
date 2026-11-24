@@ -21,16 +21,6 @@ attempt_timeout = "30m"   # per agent run
 [host]
 kind = "auto"             # "auto" (herdr if available, else exec), "exec" or "herdr"
 
-# Model per task size and complexity (the planner rates complexity; a task's own `model`
-# overrides this). [sizes] below is only the fallback when [models] is absent.
-[models]
-S = { low = "haiku", medium = "sonnet", high = "opus" }
-M = { low = "sonnet", medium = "opus", high = "opus" }
-
-[roles]
-planner = "opus"          # model that plans goals
-verifier_min = "sonnet"   # verifiers run on the implementer's model or this, whichever tier is higher
-
 [sizes.S]
 model = "sonnet"
 [sizes.M]

@@ -39,13 +39,20 @@ task file outside the checkout:
   "acceptance": ["Reverse(\"abc\") returns \"cba\"", "A table-driven test covers it"],
   "checks": ["go test ./strutil/"],
   "owns": ["strutil/reverse.go", "strutil/reverse_test.go"],
-  "size": "S"
+  "size": "S",
+  "complexity": "medium",
+  "complexity_reason": "one new function, no existing callers to change"
 }
 ```
 
+`complexity` (`low`, `medium` or `high`; default `medium`) says how hard the task is. Together with
+`size` it picks the model (see [Models](#models)). `complexity_reason` is one line of at most 120
+characters saying why; `mill plan show` and `mill task show` display it. An optional `model`
+(no whitespace, at most 100 characters) overrides the mapping for this task's first attempt.
+
 ```sh
 mill task run --file ../add-reverse.json            # implement → gate → verify → retry
-mill task show add-reverse                          # status, attempts, spend, findings (--json)
+mill task show add-reverse                          # status, complexity, model, attempts (with model and reason per attempt), spend, findings (--json)
 mill task list                                      # every task, oldest first (--status S, --json)
 mill task run --file ../add-reverse.json --retry    # after editing the spec or raising a budget
 mill task edit <id> [--file spec.json]              # change a pending, blocked or failed task's spec
@@ -53,7 +60,7 @@ mill task rebase <id>                                # move a pending, blocked o
 ```
 
 `mill task edit` opens the task's current spec (id, title, kind, spec, acceptance, checks, owns,
-depends_on, size) in `$EDITOR`, or reads `--file`. Running and verified tasks are refused. The id
+depends_on, size, complexity, complexity_reason, model) in `$EDITOR`, or reads `--file`. Running and verified tasks are refused. The id
 and `depends_on` cannot change. An invalid edit prints the problems and keeps the file.
 
 `mill task rebase <id>` fixes a task that gate triage blocked because a check also fails on its
@@ -78,12 +85,13 @@ command to review its diff. mill pushes only `review/<task>` branches, on `mill 
 A goal is a request broken into tasks with dependencies. Let the planner agent write the plan
 from a goal text, or write it by hand (see `docs/examples/plan-todos.json`: a `goal`, optional
 `assumptions`, and `tasks` that each have `id`, `title`, `kind`, `spec`, `acceptance`,
-`checks`, `owns`, `depends_on` and `size`):
+`checks`, `owns`, `depends_on` and `size`, plus `complexity`, `complexity_reason` and an optional
+`model` override, as in a task file):
 
 ```sh
 mill plan "add a --json flag to list"   # the planner writes a plan; creates draft goal g1, prints the planning cost
 mill plan --file plan.json      # validate, create draft goal g1; prints every problem and creates nothing if invalid
-mill plan show g1               # tasks in dependency order; checks are untrusted until approved (--json)
+mill plan show g1               # tasks in dependency order with complexity, model and estimated cost; checks are untrusted until approved (--json)
 mill plan edit g1               # edit in $EDITOR (default vi); or: mill plan edit g1 --file plan.json
 mill plan approve g1            # create the goal's tasks; the plan can no longer be edited
 mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, COST, TITLE (--json)
@@ -204,11 +212,56 @@ run `mill plan edit g1 --file <path>`.
 
 `mill plan "<goal>"` gives the planner agent a short survey of the repository (tracked files,
 the head of README.md, build files, `check_cmd`) and read-only tools (Read, Glob, Grep). It uses
-the model and per-attempt budget of size M from `.mill/config.toml`, the same agent
+the `[roles]` `planner` model and the per-attempt budget of size M from `.mill/config.toml`, the same agent
 environment as `mill run`, cannot touch `.mill/`, and logs under `.mill/runs/plans/<timestamp>/`.
 An invalid plan goes back to the planner once with its problems. If the second plan is invalid
 too, mill prints the problems, saves the plan to `.mill/runs/plans/<timestamp>/plan.json`,
 creates no goal and exits 1: fix the file and run `mill plan --file <that path>`.
+
+### Models
+
+Each task runs its implementer on a model chosen from its `size` and `complexity`. The default
+mapping (`[models]` in `.mill/config.toml`):
+
+| size | low | medium | high |
+|---|---|---|---|
+| S | haiku | sonnet | opus |
+| M | sonnet | opus | opus |
+
+```toml
+model_tiers = ["haiku", "sonnet", "opus"]   # cheapest to strongest
+
+[models]
+S = { low = "haiku", medium = "sonnet", high = "opus" }
+M = { low = "sonnet", medium = "opus", high = "opus" }
+
+[roles]
+planner = "opus"
+verifier_min = "sonnet"
+```
+
+- **Override.** A task's own `model` field wins over the mapping.
+- **`[sizes]` fallback.** A config with no `[models]` section but with legacy
+  `[sizes.S] model = "..."` blocks maps every complexity of that size to the size's model. A file
+  with `[models]` uses only its entries. A size and complexity with no model stops the task and
+  names the entry to add.
+- **`model_tiers`.** A model belongs to the first tier whose name it contains
+  (`claude-opus-5-5` is `opus`). Escalation and the verifier floor move along this list.
+- **Escalation on retry.** Every earlier implementer or fixer attempt that ended with findings moves
+  the next attempt up one tier, capped at the top tier. The attempt's reason in `mill task show`
+  reads `escalated after attempt N failed`. A model outside every tier is not escalated.
+- **Verifier floor.** The verifier runs on the implementer's model or `verifier_min`, whichever
+  tier is higher, so it never runs below the implementer.
+- **Resolver.** The resolver agent that `mill keep` runs on merge conflicts uses the task's model
+  from the mapping (or its override), without escalation.
+- **Planner.** `mill plan "<goal>"` uses `roles.planner`.
+
+`mill plan show` prints, for each task, a `complexity` line with its reason and a `model` line
+with the chosen model, where it came from and an estimated cost range, then a total estimated
+cost. The estimate is unknown when a model has no price (add `[prices.<model>]`). `mill task show`
+prints the task's complexity and model and gives each attempt a `model` and a `reason` column.
+`mill stats models` reports first-pass rate, average attempts and average cost by size,
+complexity and first-attempt model (`--json` for scripts), to help tune the mapping.
 
 ### Goal workflow: from plan to verified branches
 
