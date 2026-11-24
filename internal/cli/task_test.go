@@ -1,20 +1,24 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/runlock"
+	"github.com/msidorkevich/mill/internal/scheduler"
 	"github.com/msidorkevich/mill/internal/store"
 	"github.com/msidorkevich/mill/internal/taskspec"
 )
@@ -293,21 +297,284 @@ func TestTaskShowAcceptsGoalTaskID(t *testing.T) {
 	}
 }
 
-func TestTaskRunRefusedWhileRunLockHeld(t *testing.T) {
+// syncBuffer is a bytes.Buffer safe to write from one goroutine while another reads it.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+type asyncRun struct {
+	stdout, stderr *syncBuffer
+	done           chan int
+}
+
+// startTaskRun runs `mill task run` with args in a goroutine, polling the store every few
+// milliseconds while it waits for a scheduler.
+func startTaskRun(t *testing.T, ctx context.Context, root string, args ...string) *asyncRun {
+	t.Helper()
+	old := taskRunPollInterval
+	taskRunPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { taskRunPollInterval = old })
+	r := &asyncRun{stdout: &syncBuffer{}, stderr: &syncBuffer{}, done: make(chan int, 1)}
+	go func() {
+		r.done <- Run(ctx, Env{Stdout: r.stdout, Stderr: r.stderr, Dir: root}, append([]string{"task", "run"}, args...))
+	}()
+	return r
+}
+
+// waitFor polls cond until it holds, failing the test after a deadline.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func (r *asyncRun) wait(t *testing.T) int {
+	t.Helper()
+	select {
+	case code := <-r.done:
+		return code
+	case <-time.After(30 * time.Second):
+		t.Fatalf("task run did not finish\nstdout: %s\nstderr: %s", r.stdout, r.stderr)
+		return 0
+	}
+}
+
+func openTestStore(t *testing.T, root string) *store.Store {
+	t.Helper()
+	s, err := store.Open(context.Background(), project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+func TestTaskRunWaitsForSchedulerHoldingRunLock(t *testing.T) {
 	root, tf := taskRepo(t, passScript, 3)
+	ctx := context.Background()
+	paths := project.PathsAt(root)
+	l, err := runlock.Acquire(paths.RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	s := openTestStore(t, root)
+
+	r := startTaskRun(t, ctx, root, "--file", tf)
+	waitFor(t, "the task to be queued", func() bool { return strings.Contains(r.stdout.String(), "queued hello") })
+	if !strings.Contains(r.stdout.String(), "the running scheduler (pid "+strconv.Itoa(os.Getpid())+") will run it") {
+		t.Fatalf("queued line: %s", r.stdout)
+	}
+
+	// The scheduler holding the lock picks the task up and runs it.
+	cfg, err := config.Load(paths.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schedOut syncBuffer
+	p, err := newPipeline(Env{Stdout: &schedOut, Stderr: &schedOut, Dir: root}, "run", paths, cfg, "", s, &schedOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sch := &scheduler.Scheduler{Store: s, MaxParallel: 1, RunTask: p.Run, Out: &schedOut}
+	schedDone := make(chan error, 1)
+	go func() {
+		_, err := sch.Run(ctx, scheduler.RunOptions{PollInterval: 5 * time.Millisecond})
+		schedDone <- err
+	}()
+
+	code := r.wait(t)
+	if err := <-schedDone; err != nil {
+		t.Fatalf("scheduler: %v", err)
+	}
+	out := r.stdout.String()
+	if code != ExitOK || !strings.Contains(out, "hello: verified at ") || !strings.Contains(out, "Review: git -C") {
+		t.Fatalf("task run: code %d\nstdout: %s\nstderr: %s", code, out, r.stderr)
+	}
+	if strings.Contains(out, "implementer") {
+		t.Fatalf("task run ran the task itself:\n%s", out)
+	}
+	atts, err := s.Attempts(ctx, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(atts) != 2 || atts[0].Role != "implementer" || atts[1].Role != "verifier" {
+		t.Fatalf("attempts = %+v, want one implementer and one verifier attempt", atts)
+	}
+}
+
+func TestTaskRunWaitingForSchedulerReportsBlockedTask(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	ctx := context.Background()
 	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := run(t, root, nil, "task", "run", "--file", tf)
-	if r.code != ExitError || !strings.Contains(r.stderr, "another mill run is active") || !strings.Contains(r.stderr, strconv.Itoa(os.Getpid())) {
-		t.Fatalf("run while locked: %+v", r)
+	defer l.Release()
+	s := openTestStore(t, root)
+
+	r := startTaskRun(t, ctx, root, "--file", tf)
+	waitFor(t, "the task to be queued", func() bool { return strings.Contains(r.stdout.String(), "queued hello") })
+	if err := s.SetTaskStatus(ctx, "hello", store.TaskBlocked, "", "gate kept failing"); err != nil {
+		t.Fatal(err)
 	}
+	code := r.wait(t)
+	if code != ExitNotVerified || !strings.Contains(r.stdout.String(), "hello: blocked: gate kept failing") {
+		t.Fatalf("task run: code %d\nstdout: %s\nstderr: %s", code, r.stdout, r.stderr)
+	}
+}
+
+func TestTaskRunRunsTaskItselfWhenSchedulerStops(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	ctx := context.Background()
+	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := startTaskRun(t, ctx, root, "--file", tf)
+	waitFor(t, "the task to be queued", func() bool { return strings.Contains(r.stdout.String(), "queued hello") })
 	if err := l.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
-		t.Fatalf("run after release: %+v", r)
+	code := r.wait(t)
+	out := r.stdout.String()
+	if code != ExitOK || !strings.Contains(out, "running it here") || !strings.Contains(out, "hello a1 implementer ok") ||
+		!strings.Contains(out, "hello: verified") || !strings.Contains(out, "Review: git -C") {
+		t.Fatalf("task run: code %d\nstdout: %s\nstderr: %s", code, out, r.stderr)
+	}
+}
+
+func TestTaskRunWaitingLeavesOtherRunningAttemptsAndStaysQueuedOnInterrupt(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	bg := context.Background()
+	s := openTestStore(t, root)
+	other := taskspec.Spec{ID: "other", Title: "Other", Kind: "implement", Spec: "s", Acceptance: []string{"a"}}
+	if err := s.CreateTask(bg, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(bg, "other", store.TaskRunning, store.PhaseImplement, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartAttempt(bg, "other", 1, "implementer"); err != nil {
+		t.Fatal(err)
+	}
+	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	r := startTaskRun(t, ctx, root, "--file", tf)
+	waitFor(t, "the task to be queued", func() bool { return strings.Contains(r.stdout.String(), "queued hello") })
+	cancel()
+	code := r.wait(t)
+	if code != ExitError || !strings.Contains(r.stderr.String(), "hello stays queued") {
+		t.Fatalf("interrupted task run: code %d\nstdout: %s\nstderr: %s", code, r.stdout, r.stderr)
+	}
+	if strings.Contains(r.stdout.String(), "recovered") {
+		t.Fatalf("task run recovered state under a live scheduler:\n%s", r.stdout)
+	}
+	o, err := s.GetTask(bg, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := s.RunningAttempts(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Status != store.TaskRunning || len(running) != 1 || running[0].TaskID != "other" {
+		t.Fatalf("other task = %s, running attempts = %+v; want both left running", o.Status, running)
+	}
+	h, err := s.GetTask(bg, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Status != store.TaskPending {
+		t.Fatalf("hello = %s, want pending", h.Status)
+	}
+}
+
+func TestTaskRunRetryRefusedWhileSchedulerRunsTask(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	ctx := context.Background()
+	s := openTestStore(t, root)
+	spec, err := taskspec.Load(tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "hello", store.TaskRunning, store.PhaseImplement, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartAttempt(ctx, "hello", 2, "implementer"); err != nil {
+		t.Fatal(err)
+	}
+	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	r := run(t, root, nil, "task", "run", "--file", tf, "--retry")
+	if r.code != ExitError || !strings.Contains(r.stderr, "running attempt 2 (implementer)") ||
+		!strings.Contains(r.stderr, strconv.Itoa(os.Getpid())) {
+		t.Fatalf("retry of running task: %+v", r)
+	}
+	if h, err := s.GetTask(ctx, "hello"); err != nil || h.Status != store.TaskRunning {
+		t.Fatalf("hello = %+v, %v; want still running", h, err)
+	}
+}
+
+func TestTaskRunRetryUnderSchedulerRequeuesBlockedTask(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 3)
+	ctx := context.Background()
+	s := openTestStore(t, root)
+	spec, err := taskspec.Load(tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "hello", store.TaskBlocked, "", "stuck"); err != nil {
+		t.Fatal(err)
+	}
+	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	r := startTaskRun(t, cctx, root, "--file", tf, "--retry")
+	waitFor(t, "the task to be queued", func() bool { return strings.Contains(r.stdout.String(), "queued hello") })
+	if h, err := s.GetTask(ctx, "hello"); err != nil || h.Status != store.TaskPending {
+		t.Fatalf("hello = %+v, %v; want pending", h, err)
+	}
+	cancel()
+	if code := r.wait(t); code != ExitError {
+		t.Fatalf("interrupted: code %d", code)
 	}
 }
 

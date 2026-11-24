@@ -24,6 +24,7 @@ import (
 	"github.com/msidorkevich/mill/internal/prompt"
 	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/scheduler"
 	"github.com/msidorkevich/mill/internal/store"
 	"github.com/msidorkevich/mill/internal/taskspec"
 )
@@ -112,8 +113,21 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 	}
 	defer s.Close()
 
+	// A live scheduler owns the repository: queue the task for it and wait for the result.
+	pid, held, err := runlock.Held(paths.RunLock)
+	if err != nil {
+		return fail(err)
+	}
+	if held {
+		return joinScheduler(ctx, env, paths, cfg, *hostFlag, s, spec, *retry, pid)
+	}
+
 	release, err := lockAndRecover(ctx, env, "task run", paths, s, cfg.Prices)
 	if err != nil {
+		// A scheduler may have started between the probe and taking the lock.
+		if pid, held, herr := runlock.Held(paths.RunLock); herr == nil && held {
+			return joinScheduler(ctx, env, paths, cfg, *hostFlag, s, spec, *retry, pid)
+		}
 		return fail(err)
 	}
 	defer release()
@@ -142,11 +156,17 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		}
 	}
 
-	p, err := newPipeline(env, "task run", paths, cfg, *hostFlag, s, env.Stdout)
+	return runTaskHere(ctx, env, paths, cfg, *hostFlag, s, spec.ID)
+}
+
+// runTaskHere runs the task in this process; the caller holds the run lock.
+func runTaskHere(ctx context.Context, env Env, paths project.Paths, cfg config.Config, hostKind string, s *store.Store, id string) int {
+	p, err := newPipeline(env, "task run", paths, cfg, hostKind, s, env.Stdout)
 	if err != nil {
-		return fail(err)
+		fmt.Fprintf(env.Stderr, "mill task run: %v\n", err)
+		return ExitError
 	}
-	out, err := p.Run(ctx, spec.ID)
+	out, err := p.Run(ctx, id)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "mill task run: %v\n", err)
 		return ExitError
@@ -154,13 +174,153 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 	if out.Status != store.TaskVerified {
 		return ExitNotVerified
 	}
-	if br, err := s.GetBranch(ctx, spec.ID); err == nil {
+	printReviewHint(ctx, env, s, id)
+	return ExitOK
+}
+
+func printReviewHint(ctx context.Context, env Env, s *store.Store, id string) {
+	if br, err := s.GetBranch(ctx, id); err == nil {
 		from := br.StartSHA
 		if from == "" {
 			from = br.BaseSHA
 		}
 		fmt.Fprintf(env.Stdout, "\nReview: git -C %s diff %s..%s\n", br.Worktree, short(from), br.Name)
 	}
+}
+
+// taskRunPollInterval is how often task run reads the store while a running scheduler works
+// on its task.
+var taskRunPollInterval = time.Second
+
+// joinScheduler queues the task for the scheduler (pid) that holds the run lock and waits for
+// its result. It never repairs interrupted state while the scheduler is live; when the
+// scheduler stops before finishing the task, task run takes the lock and runs the task itself.
+func joinScheduler(ctx context.Context, env Env, paths project.Paths, cfg config.Config, hostKind string, s *store.Store, spec taskspec.Spec, retry bool, pid int) int {
+	fail := func(err error) int {
+		fmt.Fprintf(env.Stderr, "mill task run: %v\n", err)
+		return ExitError
+	}
+	existing, err := s.GetTask(ctx, spec.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		if retry {
+			return fail(fmt.Errorf("task %s does not exist yet; run it without --retry", spec.ID))
+		}
+		if err := s.CreateTask(ctx, spec); err != nil {
+			return fail(err)
+		}
+	case err != nil:
+		return fail(err)
+	case !retry:
+		return fail(fmt.Errorf("task %s already exists (status %s); use --retry to run it again", spec.ID, existing.Status))
+	case store.Done(existing.Status):
+		return fail(fmt.Errorf("task %s is already %s; it cannot be run again", spec.ID, existing.Status))
+	case existing.Status == store.TaskRunning:
+		doing, err := runningDoing(ctx, s, existing)
+		if err != nil {
+			return fail(err)
+		}
+		return fail(fmt.Errorf("task %s is %s under the running scheduler (pid %d); wait for it to finish (follow it with `mill watch`), then retry", spec.ID, doing, pid))
+	default:
+		if err := s.UpdateTaskSpec(ctx, spec); err != nil {
+			return fail(err)
+		}
+		if existing.Status != store.TaskPending {
+			if err := s.SetTaskStatus(ctx, spec.ID, store.TaskPending, "", scheduler.ReasonRetry); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	fmt.Fprintf(env.Stdout, "queued %s; the running scheduler (pid %d) will run it\n", spec.ID, pid)
+
+	for {
+		if ctx.Err() != nil {
+			break
+		}
+		t, err := s.GetTask(ctx, spec.ID)
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			return fail(err)
+		}
+		if finalStatus(t.Status) {
+			return printJoinedOutcome(ctx, env, s, t)
+		}
+		_, held, err := runlock.Held(paths.RunLock)
+		if err != nil {
+			return fail(err)
+		}
+		if !held {
+			// The scheduler stopped without finishing the task: run it here.
+			release, err := lockAndRecover(ctx, env, "task run", paths, s, cfg.Prices)
+			if err != nil {
+				if _, h, herr := runlock.Held(paths.RunLock); herr == nil && h {
+					continue // another scheduler took the lock first; it runs the task
+				}
+				return fail(err)
+			}
+			defer release()
+			t, err := s.GetTask(ctx, spec.ID)
+			if err != nil {
+				return fail(err)
+			}
+			if finalStatus(t.Status) {
+				return printJoinedOutcome(ctx, env, s, t)
+			}
+			fmt.Fprintf(env.Stdout, "the scheduler stopped before running %s; running it here\n", spec.ID)
+			return runTaskHere(ctx, env, paths, cfg, hostKind, s, spec.ID)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(taskRunPollInterval):
+		}
+	}
+	fmt.Fprintf(env.Stderr, "mill task run: stopped waiting; %s stays queued and the running scheduler (pid %d) will still run it (see `mill task show %s`)\n", spec.ID, pid, spec.ID)
+	return ExitError
+}
+
+// finalStatus reports whether a task has ended: verified (or later), blocked or failed.
+func finalStatus(status string) bool {
+	return store.Done(status) || status == store.TaskBlocked || status == store.TaskFailed
+}
+
+// runningDoing names what a running task is doing: its running attempt, or its phase.
+func runningDoing(ctx context.Context, s *store.Store, t store.Task) (string, error) {
+	attempts, err := s.Attempts(ctx, t.ID)
+	if err != nil {
+		return "", err
+	}
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if a := attempts[i]; a.Status == store.AttemptRunning {
+			return fmt.Sprintf("running attempt %d (%s)", a.N, a.Role), nil
+		}
+	}
+	if t.Phase != "" {
+		return "running (" + t.Phase + ")", nil
+	}
+	return "running", nil
+}
+
+// printJoinedOutcome prints the result of a task another process ran, like the pipeline's
+// outcome line, and returns task run's exit code for it.
+func printJoinedOutcome(ctx context.Context, env Env, s *store.Store, t store.Task) int {
+	u, err := s.TaskUsage(ctx, t.ID)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "mill task run: %v\n", err)
+		return ExitError
+	}
+	total := fmt.Sprintf("%s tok, $%.2f", fmtInt(u.Tokens(budget.CountBillable)), u.CostUSD)
+	if !store.Done(t.Status) {
+		fmt.Fprintf(env.Stdout, "%s: %s: %s (task total %s)\n", t.ID, t.Status, t.Reason, total)
+		return ExitNotVerified
+	}
+	head := ""
+	if br, err := s.GetBranch(ctx, t.ID); err == nil {
+		head = " at " + short(br.HeadSHA)
+	}
+	fmt.Fprintf(env.Stdout, "%s: %s%s (task total %s)\n", t.ID, t.Status, head, total)
+	printReviewHint(ctx, env, s, t.ID)
 	return ExitOK
 }
 
