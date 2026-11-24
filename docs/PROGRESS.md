@@ -740,7 +740,12 @@ store instead of taking the repository lock; one scheduler runs every approved g
 single task, and picks up new work while running; only the scheduler runs crash recovery.
 
 First run: 7 of 9 verified ($9.22); the end-to-end task was blocked before it started because
-two of its dependencies collided (see below). Published so far: `store-task-claims`,
+two of its dependencies collided (see below). After the fixes all 9 tasks are verified or
+landed; landed so far: `store-task-claims`, `short-locks-sync-keep-clean`,
+`scheduler-all-goals`, `runlock-holder-probe`, `short-locks-review-rebase` (PRs #44–#47, #49).
+`run-command-one-scheduler` is blocked by a restack (see "Restacks replay every attempt") and
+the rest of the stack (`task-run-joins-scheduler`, `e2e-one-scheduler`, `docs-one-scheduler`)
+publishes after it. Published so far: `store-task-claims`,
 `short-locks-sync-keep-clean`, `scheduler-all-goals`, `runlock-holder-probe` (checked merged
 together: they compile and their packages pass).
 
@@ -769,3 +774,43 @@ together: they compile and their packages pass).
 - [ ] **Publish before restarting a run.** I restarted `g13` before publishing its ready tasks,
       so the run's lock blocked publishing again. Goes away with this goal; until then, publish
       first.
+- [ ] **Restacks replay every attempt** (task `restack-net-change`, running). `mill sync`
+      blocked `run-command-one-scheduler` while restacking it onto the base: it replays the
+      task's commits one by one, and two of its five attempts edited a sibling's files that
+      later attempts reverted. The net change merges cleanly. Fix: a restack applies the task's
+      net change as one commit, as publishing already squashes.
+- [ ] **`mill sync` during a run mishandles a running child of a landed parent** (found by the
+      `e2e-one-scheduler` agent, which left `TestSyncDuringRunReportsRunningChildBusy` skipped
+      with the reason). Sync skips the busy child silently instead of listing it as busy, and
+      clean_on_land removes the parent's worktree, branch and review branch while the child is
+      still based on it. Fix: task `sync-busy-child` (after `e2e-one-scheduler` lands and after
+      `restack-net-change`).
+- [ ] **End-to-end tests must be fast.** The scheduler end-to-end tests start real `mill run`
+      loops that poll; with default intervals every gate pays for that waiting. Tests must
+      inject polling intervals of milliseconds, the way tests already inject clocks, and the
+      planner prompt should say so for test tasks. Part of the fast-gates goal.
+- [ ] **I listed merged PRs as open** three times (#33, #37, #49). Before sending a PR link I
+      check the GitHub API for its state, not only that the branch exists.
+
+## Next: models chosen by task size and complexity (operator decision 2026-11-24)
+
+Planned as its own goal after `g13`, before fast gates. Today the planner sets only `size`, and
+`.mill/config.toml` maps size to one model (`S → sonnet`, `M → opus`) for every role, with no
+escalation. Design:
+
+- **Complexity next to size.** The planner rates each task `low | medium | high` with a
+  one-line reason ("concurrency and crash recovery", "text only"); size stays the amount of
+  code.
+- **The mapping lives in config, not in the planner.** `(size, complexity) → model`, default:
+  S/low → haiku; S/medium and M/low → sonnet; M/medium and anything high → opus. `mill plan
+  show` prints each task's model and estimated cost; the operator can override a task's model
+  before approving.
+- **Per-role models.** The verifier uses at least the implementer's tier and never less than
+  sonnet; the resolver uses the task's model; the planner stays on opus.
+- **Escalation.** A retry after a failed attempt moves one tier up, within the task's budget;
+  the step is recorded so `mill task show` explains the cost.
+- **Measurement.** Every verdict records the model that produced it, so the mapping can be
+  tuned from first-attempt pass rates.
+
+Order after `g13`: models by size and complexity, then fast gates (A, B, E and fast end-to-end
+tests).
