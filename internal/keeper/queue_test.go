@@ -13,6 +13,7 @@ import (
 )
 
 func TestPassWithoutApprovalsHasEmptyQueue(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{})
 	res := e.pass(t)
 	raw, err := json.Marshal(res)
@@ -25,6 +26,7 @@ func TestPassWithoutApprovalsHasEmptyQueue(t *testing.T) {
 }
 
 func TestPassPublishesApprovedTaskFromQueue(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{})
 	ctx := context.Background()
 	if err := e.o.Store.ApproveTask(ctx, taskID, 1); err != nil {
@@ -43,6 +45,7 @@ func TestPassPublishesApprovedTaskFromQueue(t *testing.T) {
 }
 
 func TestPassClearsApprovalOfOlderAttempt(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{})
 	ctx := context.Background()
 	s := e.o.Store

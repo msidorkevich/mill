@@ -157,6 +157,7 @@ func (f *fanIn) assertFanInUnchanged(t *testing.T) {
 }
 
 func TestFanInTaskWhoseParentsMovedWithoutConflictIsLeftAlone(t *testing.T) {
+	t.Parallel()
 	f := setupFanIn(t, "true", runner.Script{})
 	f.moveParent(t, "g2/b", f.bWT, "b2.txt", "b2\n")
 	res := f.pass(t)
@@ -167,6 +168,7 @@ func TestFanInTaskWhoseParentsMovedWithoutConflictIsLeftAlone(t *testing.T) {
 }
 
 func TestFanInTaskIsRestackedOntoDeepestParentsNewHead(t *testing.T) {
+	t.Parallel()
 	// b's new commit changes the line c changes, so c's own commit conflicts on replay.
 	resolvedFan := "one\ntwo b c\nthree\nfour\nfive a\n"
 	f := setupFanIn(t, "test -f c.txt && test -f b.txt && grep -q 'two b c' fan.txt && grep -q 'five a' fan.txt", runner.Script{
@@ -216,6 +218,7 @@ func remergeConflict(t *testing.T, script runner.Script) *fanIn {
 }
 
 func TestFanInRemergeConflictIsResolvedByResolver(t *testing.T) {
+	t.Parallel()
 	f := remergeConflict(t, runner.Script{
 		runner.RoleResolver: {resolverStep(map[string]string{"fan.txt": "one\ntwo\nthree\nfour\nfive a b\n"})},
 		runner.RoleVerifier: {verdictStep("pass")},
@@ -238,6 +241,7 @@ func TestFanInRemergeConflictIsResolvedByResolver(t *testing.T) {
 }
 
 func TestFanInRemergeConflictWithFailedResolverBlocksAndRestoresBranch(t *testing.T) {
+	t.Parallel()
 	f := remergeConflict(t, runner.Script{runner.RoleResolver: {{Error: "agent crashed"}}})
 	res := f.pass(t)
 	if len(res.Blocked) != 1 || res.Blocked[0].TaskID != fanInID || len(res.Rebased) != 0 {
@@ -254,6 +258,7 @@ func TestFanInRemergeConflictWithFailedResolverBlocksAndRestoresBranch(t *testin
 }
 
 func TestFanInTaskWhoseDeepestParentLandedIsBasedOnRemoteBase(t *testing.T) {
+	t.Parallel()
 	f := setupFanIn(t, "test -f c.txt && test -f b.txt && grep -q 'five a' fan.txt", runner.Script{})
 	ctx := context.Background()
 	// b lands on the remote base branch.
@@ -296,6 +301,7 @@ func TestFanInTaskWhoseDeepestParentLandedIsBasedOnRemoteBase(t *testing.T) {
 }
 
 func TestFanInRestackReplaysNetChangeAndMergesUnlandedParents(t *testing.T) {
+	t.Parallel()
 	resolvedFan := "one\ntwo b c\nthree\nfour\nfive a\n"
 	f := setupFanIn(t, "true", runner.Script{
 		runner.RoleResolver: {resolverStep(map[string]string{"fan.txt": resolvedFan})},

@@ -54,6 +54,7 @@ func wantList(t *testing.T, what string, got []string, want ...string) {
 }
 
 func TestRoleModelSmallLowTaskRunsHaikuImplementerAndSonnetVerifier(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `grep -q hello hello.txt`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -75,6 +76,7 @@ func TestRoleModelSmallLowTaskRunsHaikuImplementerAndSonnetVerifier(t *testing.T
 }
 
 func TestRoleModelOverrideRunsImplementerWithReasonOverride(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `grep -q hello hello.txt`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -89,6 +91,7 @@ func TestRoleModelOverrideRunsImplementerWithReasonOverride(t *testing.T) {
 }
 
 func TestEscalatesOneTierAfterFailedVerification(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "helo\n"}), impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("fail", "typo: helo"), verdict("pass")},
@@ -105,6 +108,7 @@ func TestEscalatesOneTierAfterFailedVerification(t *testing.T) {
 }
 
 func TestEscalationStopsAtOpus(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `false`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}), impl(map[string]string{"a": "2"}),
 			impl(map[string]string{"a": "3"}), impl(map[string]string{"a": "4"})},
@@ -121,6 +125,7 @@ func TestEscalationStopsAtOpus(t *testing.T) {
 }
 
 func TestEscalationContinuesAcrossRuns(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `false`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}), impl(map[string]string{"a": "2"})},
 	}, func(c *config.Config) { c.MaxAttempts = 1 })
@@ -135,6 +140,7 @@ func TestEscalationContinuesAcrossRuns(t *testing.T) {
 }
 
 func TestRoleModelResolverRunsOnTaskBaseModel(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "helo\n"}), impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("fail", "typo: helo"), verdict("pass")},
@@ -155,6 +161,7 @@ func TestRoleModelResolverRunsOnTaskBaseModel(t *testing.T) {
 }
 
 func TestRoleModelMissingMappingBlocksInImplement(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{}, func(c *config.Config) {
 		c.Models = map[string]map[string]string{"S": {"medium": "sonnet"}}
 	})
@@ -173,6 +180,7 @@ func TestRoleModelMissingMappingBlocksInImplement(t *testing.T) {
 }
 
 func TestEscalatedAttemptsExhaustTaskBudgetAndBlock(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "false", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}, budget.Usage{CostUSD: 0.4}),
 			impl(map[string]string{"a": "2"}, budget.Usage{CostUSD: 0.4})},

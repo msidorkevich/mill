@@ -163,6 +163,7 @@ func resultOf(r RunResult, goalID string) Result {
 }
 
 func TestRunStartsTasksAcrossGoalsTogether(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a"}, task{id: "b", deps: []string{"a"}})
 	g2 := addGoal(t, s, task{id: "c"})
@@ -194,6 +195,7 @@ func TestRunStartsTasksAcrossGoalsTogether(t *testing.T) {
 }
 
 func TestMaxParallelCapsTasksAcrossGoals(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a"}, task{id: "b"})
 	g2 := addGoal(t, s, task{id: "c"}, task{id: "d"})
@@ -217,6 +219,7 @@ func TestMaxParallelCapsTasksAcrossGoals(t *testing.T) {
 }
 
 func TestOwnsOverlapAcrossGoalsNeverRunTogether(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a", owns: []string{"pkg/**"}})
 	g2 := addGoal(t, s, task{id: "b", owns: []string{"pkg/b.go"}}, task{id: "c", owns: []string{"other/**"}})
@@ -250,6 +253,7 @@ func TestOwnsOverlapAcrossGoalsNeverRunTogether(t *testing.T) {
 }
 
 func TestPollStartsGoalApprovedAndSingleTaskAddedMidRun(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a"})
 	a := store.TaskID(g1, "a")
@@ -296,6 +300,7 @@ func TestPollStartsGoalApprovedAndSingleTaskAddedMidRun(t *testing.T) {
 }
 
 func TestOneGoalBlockingAcrossGoalsDoesNotStopTheOther(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a"}, task{id: "b", deps: []string{"a"}})
 	g2 := addGoal(t, s, task{id: "c"}, task{id: "d", deps: []string{"c"}})
@@ -334,6 +339,7 @@ func TestOneGoalBlockingAcrossGoalsDoesNotStopTheOther(t *testing.T) {
 }
 
 func TestClaimedTaskStartsAfterClaimReleased(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
 	g := addGoal(t, s, task{id: "a"})
@@ -380,6 +386,7 @@ func TestClaimedTaskStartsAfterClaimReleased(t *testing.T) {
 }
 
 func TestGoalFilterStartsOnlyThatGoal(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a"})
 	g2 := addGoal(t, s, task{id: "b"}, task{id: "c", deps: []string{"b"}})
@@ -399,6 +406,7 @@ func TestGoalFilterStartsOnlyThatGoal(t *testing.T) {
 }
 
 func TestTaskFilterRunsOneSingleTask(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	addGoal(t, s, task{id: "a"})
 	addSingle(t, s, task{id: "s1"})
@@ -416,6 +424,7 @@ func TestTaskFilterRunsOneSingleTask(t *testing.T) {
 }
 
 func TestRetryBlockedAcrossGoalsRequeuesEveryGoal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a"})
@@ -440,6 +449,7 @@ func TestRetryBlockedAcrossGoalsRequeuesEveryGoal(t *testing.T) {
 }
 
 func TestCancelAcrossGoalsLeavesEachGoalInterrupted(t *testing.T) {
+	t.Parallel()
 	s := openStore(t)
 	g1 := addGoal(t, s, task{id: "a"})
 	g2 := addGoal(t, s, task{id: "b"})

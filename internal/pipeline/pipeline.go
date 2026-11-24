@@ -49,6 +49,9 @@ type Pipeline struct {
 	AgentEnvAllow []string
 	// Now is the clock for durations in progress lines; defaults to time.Now.
 	Now func() time.Time
+	// LiveUsageInterval is the minimum time between live usage writes for one attempt;
+	// zero means DefaultLiveUsageInterval.
+	LiveUsageInterval time.Duration
 
 	// A Pipeline may run several tasks from different goroutines. gitMu serializes the git
 	// operations that touch the shared repository; outMu keeps progress lines whole.
@@ -647,8 +650,16 @@ func FormatResetTime(t, now time.Time) string {
 	return t.Format("Jan 2 15:04")
 }
 
-// liveUsageInterval is the minimum time between live usage writes for one attempt.
-var liveUsageInterval = 2 * time.Second
+// DefaultLiveUsageInterval is the minimum time between live usage writes for one attempt
+// when Pipeline.LiveUsageInterval is zero.
+const DefaultLiveUsageInterval = 2 * time.Second
+
+func (p *Pipeline) liveUsageInterval() time.Duration {
+	if p.LiveUsageInterval > 0 {
+		return p.LiveUsageInterval
+	}
+	return DefaultLiveUsageInterval
+}
 
 // liveUsage writes a running attempt's usage total to the store, at most once per interval,
 // from its own goroutine so the agent's usage callback never waits on the database.
@@ -662,6 +673,7 @@ type liveUsage struct {
 func (p *Pipeline) startLiveUsage(ctx context.Context, id int64, taskID, model string) *liveUsage {
 	l := &liveUsage{latest: make(chan budget.Usage, 1), quit: make(chan struct{}), done: make(chan struct{})}
 	wctx := context.WithoutCancel(ctx)
+	interval := p.liveUsageInterval()
 	go func() {
 		defer close(l.done)
 		warned := false
@@ -683,7 +695,7 @@ func (p *Pipeline) startLiveUsage(ctx context.Context, id int64, taskID, model s
 				select {
 				case <-l.quit:
 					return
-				case <-time.After(liveUsageInterval):
+				case <-time.After(interval):
 				}
 			}
 		}

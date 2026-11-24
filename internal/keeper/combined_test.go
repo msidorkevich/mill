@@ -139,6 +139,7 @@ func (e *combinedEnv) events(t *testing.T, kind string) []store.Event {
 }
 
 func TestCombinedFindsSemanticConflictPair(t *testing.T) {
+	t.Parallel()
 	// Each branch alone is green; a and c together are red.
 	e := combinedSetup(t, "! { test -f a.txt && test -f c.txt; }", []string{"a", "b", "c", "d"}, nil)
 	ctx := context.Background()
@@ -186,6 +187,7 @@ func TestCombinedFindsSemanticConflictPair(t *testing.T) {
 }
 
 func TestCombinedFindsSemanticConflictBetweenTwoBranches(t *testing.T) {
+	t.Parallel()
 	// Each branch is green with the gate alone; merged together they are red.
 	e := combinedSetup(t, "! { test -f a.txt && test -f b.txt; }", []string{"a", "b"}, nil)
 	ctx := context.Background()
@@ -223,6 +225,7 @@ func TestCombinedFindsSemanticConflictBetweenTwoBranches(t *testing.T) {
 }
 
 func TestCombinedTreatsMergeConflictAsRed(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "true", []string{"a", "b"}, nil)
 	ctx := context.Background()
 	// Both branches also edit shared.txt differently.
@@ -248,6 +251,7 @@ func TestCombinedTreatsMergeConflictAsRed(t *testing.T) {
 }
 
 func TestCombinedPassesCompatibleBranches(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "test -f shared.txt", []string{"a", "b", "c"}, nil)
 	res, err := Combined(context.Background(), e.o)
 	if err != nil {
@@ -263,6 +267,7 @@ func TestCombinedPassesCompatibleBranches(t *testing.T) {
 }
 
 func TestCombinedReportsCulpritRedWithBaseAlone(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "! test -f b.txt", []string{"a", "b"}, nil)
 	res, err := Combined(context.Background(), e.o)
 	if err != nil {
@@ -278,6 +283,7 @@ func TestCombinedReportsCulpritRedWithBaseAlone(t *testing.T) {
 }
 
 func TestCombinedDoesNotRunWithFewerThanTwoReadyBranches(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "false", []string{"a", "b"}, nil)
 	ctx := context.Background()
 	// b's gate did not run at its head, so it is not ready.
@@ -311,6 +317,7 @@ func (h failingHost) Start(ctx context.Context, spec host.ProcSpec) (host.Handle
 }
 
 func TestCombinedFailsWhenGateCannotRun(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "true", []string{"a", "b"}, nil)
 	e.o.Host = failingHost{}
 	res, err := Combined(context.Background(), e.o)
@@ -324,6 +331,7 @@ func TestCombinedFailsWhenGateCannotRun(t *testing.T) {
 }
 
 func TestCombinedFailsWithoutChecks(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "", []string{"a", "b"}, nil)
 	res, err := Combined(context.Background(), e.o)
 	if err == nil || res.Passed {
@@ -333,6 +341,7 @@ func TestCombinedFailsWithoutChecks(t *testing.T) {
 }
 
 func TestCombinedRemovesWorktreeOnCancellation(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "true", []string{"a", "b"}, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -362,6 +371,7 @@ func countingGate(t *testing.T, tail string) (string, func() int) {
 }
 
 func TestCombinedSkipsGateWhenNothingChanged(t *testing.T) {
+	t.Parallel()
 	cmd, runs := countingGate(t, "true")
 	e := combinedSetup(t, cmd, []string{"a", "b"}, nil)
 	ctx := context.Background()
@@ -388,6 +398,7 @@ func TestCombinedSkipsGateWhenNothingChanged(t *testing.T) {
 }
 
 func TestCombinedRecordsCheckedEvent(t *testing.T) {
+	t.Parallel()
 	e := combinedSetup(t, "true", []string{"a", "b"}, nil)
 	ctx := context.Background()
 	if _, err := Combined(ctx, e.o); err != nil {
@@ -414,6 +425,7 @@ func TestCombinedRecordsCheckedEvent(t *testing.T) {
 }
 
 func TestCombinedRunsAgainWhenReadySetOrBaseChanges(t *testing.T) {
+	t.Parallel()
 	cmd, runs := countingGate(t, "true")
 	e := combinedSetup(t, cmd, []string{"a", "b", "c"}, nil)
 	ctx := context.Background()
@@ -473,6 +485,7 @@ func TestCombinedRunsAgainWhenReadySetOrBaseChanges(t *testing.T) {
 }
 
 func TestCombinedCachedRedKeepsCulpritPartnerAndFlags(t *testing.T) {
+	t.Parallel()
 	cmd, runs := countingGate(t, "! { test -f a.txt && test -f b.txt; }")
 	e := combinedSetup(t, cmd, []string{"a", "b"}, nil)
 	ctx := context.Background()
@@ -503,6 +516,7 @@ func TestCombinedCachedRedKeepsCulpritPartnerAndFlags(t *testing.T) {
 }
 
 func TestCombinedForceRunsDespiteUnchangedFingerprint(t *testing.T) {
+	t.Parallel()
 	cmd, runs := countingGate(t, "true")
 	e := combinedSetup(t, cmd, []string{"a", "b"}, nil)
 	ctx := context.Background()

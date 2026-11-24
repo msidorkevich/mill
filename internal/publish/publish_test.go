@@ -84,6 +84,7 @@ func fixture(t *testing.T) (Options, string, store.Branch) {
 }
 
 func TestPublishPushesSquashedCommitOnBase(t *testing.T) {
+	t.Parallel()
 	o, bare, br := fixture(t)
 	mainBefore := git(t, bare, "rev-parse", "refs/heads/main")
 	res, err := Publish(context.Background(), o)
@@ -115,6 +116,7 @@ func TestPublishPushesSquashedCommitOnBase(t *testing.T) {
 }
 
 func TestPublishRefusalsAreRefusedErrors(t *testing.T) {
+	t.Parallel()
 	o, bare, br := fixture(t)
 	ctx := context.Background()
 
@@ -146,6 +148,7 @@ func TestPublishRefusalsAreRefusedErrors(t *testing.T) {
 }
 
 func TestParentRefusalRecognisesOnlyTheDependencyRule(t *testing.T) {
+	t.Parallel()
 	parentErr := fmt.Errorf("wrapped: %w", &RefusedError{Rule: ruleParent, Parent: "g/a", Msg: "publish g/a first"})
 	if p, ok := ParentRefusal(parentErr); !ok || p != "g/a" {
 		t.Errorf("ParentRefusal(parent rule) = %q, %v", p, ok)
@@ -158,6 +161,7 @@ func TestParentRefusalRecognisesOnlyTheDependencyRule(t *testing.T) {
 }
 
 func TestPublishMessageChecksAcceptanceAndTrimsLongSummary(t *testing.T) {
+	t.Parallel()
 	const pointer = "Full verdict: mill review show t1\n"
 	// The 600-character limit applies to the summary alone, not the "pass: " prefix.
 	cases := []struct {
@@ -193,6 +197,7 @@ func TestPublishMessageChecksAcceptanceAndTrimsLongSummary(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			o, bare, _ := fixture(t)
 			ctx := context.Background()
 			if _, err := o.Store.AppendEvent(ctx, "task-verdict", "", "t1", map[string]any{"verdict": prompt.VerifierOutput{Verdict: "pass", Summary: c.summary}}); err != nil {
@@ -238,6 +243,7 @@ func extraPathBuilder(name string) func(ctx context.Context, dir, start, head, p
 }
 
 func TestPublishRefusesCommitChangingPathsOutsideOwnChange(t *testing.T) {
+	// Serial: replaces the process-wide tree builder (SetTreeBuilder).
 	o, bare, _ := fixture(t)
 	ctx := context.Background()
 	t.Cleanup(SetTreeBuilder(extraPathBuilder("extra.txt")))
@@ -261,6 +267,7 @@ func TestPublishRefusesCommitChangingPathsOutsideOwnChange(t *testing.T) {
 }
 
 func TestPublishAppliesOwnChangeOntoParentTheBranchLacks(t *testing.T) {
+	t.Parallel()
 	o, bare, br := fixture(t)
 	ctx := context.Background()
 	root := o.Paths.Root

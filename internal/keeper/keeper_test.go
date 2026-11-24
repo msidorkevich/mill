@@ -264,6 +264,7 @@ func (e *env) assertUnchanged(t *testing.T) {
 }
 
 func TestBranchWhoseBaseMovedWithoutConflictIsLeftAlone(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{})
 	e.moveMain(t, "other.txt", "other\n")
 	res := e.pass(t)
@@ -282,6 +283,7 @@ func TestBranchWhoseBaseMovedWithoutConflictIsLeftAlone(t *testing.T) {
 }
 
 func TestConflictWithRecordedResolutionIsRebasedByRerere(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q 'main task' shared.txt", runner.Script{})
 	tip := e.moveMain(t, "shared.txt", mainSide)
 	e.recordResolution(t, tip)
@@ -312,6 +314,7 @@ func TestConflictWithRecordedResolutionIsRebasedByRerere(t *testing.T) {
 }
 
 func TestConflictWithoutResolutionIsFixedByResolverAgent(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q 'main task' shared.txt", runner.Script{
 		runner.RoleResolver: {resolverStep(map[string]string{"shared.txt": resolved})},
 		runner.RoleVerifier: {verdictStep("pass")},
@@ -357,6 +360,7 @@ func TestConflictWithoutResolutionIsFixedByResolverAgent(t *testing.T) {
 }
 
 func TestFailedResolutionBlocksTaskAndRestoresBranch(t *testing.T) {
+	t.Parallel()
 	cases := map[string]runner.Step{
 		"resolver fails":       {Error: "agent crashed"},
 		"markers are left":     resolverStep(nil),
@@ -364,6 +368,7 @@ func TestFailedResolutionBlocksTaskAndRestoresBranch(t *testing.T) {
 	}
 	for name, step := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			e := setup(t, "true", runner.Script{runner.RoleResolver: {step}})
 			e.moveMain(t, "shared.txt", mainSide)
 			res := e.pass(t)
@@ -384,6 +389,7 @@ func TestFailedResolutionBlocksTaskAndRestoresBranch(t *testing.T) {
 }
 
 func TestVerifierFailAfterResolutionBlocksTaskAndRestoresBranch(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {resolverStep(map[string]string{"shared.txt": resolved})},
 		runner.RoleVerifier: {verdictStep("fail")},
@@ -397,6 +403,7 @@ func TestVerifierFailAfterResolutionBlocksTaskAndRestoresBranch(t *testing.T) {
 }
 
 func TestRedGateAfterRestackRunsFixer(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q fixed shared.txt", runner.Script{
 		runner.RoleImplementer: {implStep(map[string]string{"shared.txt": resolved + "fixed\n"})},
 		runner.RoleVerifier:    {verdictStep("pass")},
@@ -429,6 +436,7 @@ func TestRedGateAfterRestackRunsFixer(t *testing.T) {
 }
 
 func TestRebasedPublishedTaskIsRepublished(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{})
 	ctx := context.Background()
 	pr, err := publish.Publish(ctx, publish.Options{Store: e.o.Store, Cfg: e.o.Cfg, Paths: e.o.Paths, Host: e.o.Host, TaskID: taskID})
@@ -459,6 +467,7 @@ func TestRebasedPublishedTaskIsRepublished(t *testing.T) {
 }
 
 func TestPassLeavesBusyTaskUnchangedAndReportsIt(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{})
 	ctx := context.Background()
 	aid, err := e.o.Store.StartAttempt(ctx, taskID, 2, "reviewer")
@@ -519,6 +528,7 @@ func (e *env) revertingAttempts(t *testing.T, task, wt, name string) string {
 }
 
 func TestRebaseReplaysNetChangeSoRevertedAttemptsDoNotConflict(t *testing.T) {
+	t.Parallel()
 	// Only shared.txt really conflicts; the resolver has a single step for it.
 	e := setup(t, "grep -q 'main task' shared.txt", runner.Script{
 		runner.RoleResolver: {resolverStep(map[string]string{"shared.txt": resolved})},
@@ -551,6 +561,7 @@ func TestRebaseReplaysNetChangeSoRevertedAttemptsDoNotConflict(t *testing.T) {
 }
 
 func TestRebaseBlocksWhenNetChangeConflictsAndResolverFails(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {resolverStep(nil)}, // leaves the conflict markers
 	})

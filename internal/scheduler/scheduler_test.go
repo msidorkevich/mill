@@ -150,6 +150,19 @@ func (f *fake) index(ev string) int {
 	return slices.Index(f.events, ev)
 }
 
+// pollSleep is an injected Sleep that waits one millisecond whatever it is asked for, so a
+// test never waits on DefaultPollInterval.
+func pollSleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 type syncBuf struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -202,10 +215,11 @@ func status(t *testing.T, s *store.Store, id string) store.Task {
 }
 
 func TestDependenciesRunBeforeDependents(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t, task{id: "c", deps: []string{"a", "b"}}, task{id: "b", deps: []string{"a"}}, task{id: "a"})
 	f := newFake(s)
 	out := &syncBuf{}
-	sch := &Scheduler{Store: s, MaxParallel: 3, RunTask: f.run, Out: out}
+	sch := &Scheduler{Store: s, MaxParallel: 3, RunTask: f.run, Out: out, Sleep: pollSleep}
 	res, err := sch.RunGoal(context.Background(), g, Options{})
 	if err != nil || res.Status != store.GoalDone || res.Reason != "" {
 		t.Fatalf("RunGoal = %+v, %v", res, err)
@@ -225,10 +239,11 @@ func TestDependenciesRunBeforeDependents(t *testing.T) {
 }
 
 func TestRunsIndependentTasksConcurrentlyUpToMaxParallel(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"}, task{id: "c"}, task{id: "d"})
 	ids := []string{store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c"), store.TaskID(g, "d")}
 	f := newFake(s, ids...)
-	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Sleep: pollSleep}
 	ch := runAsync(context.Background(), sch, g, Options{})
 
 	// Two tasks are running at the same time before either is released.
@@ -253,13 +268,14 @@ func TestRunsIndependentTasksConcurrentlyUpToMaxParallel(t *testing.T) {
 }
 
 func TestOverlappingOwnsNeverRunTogether(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t,
 		task{id: "a", owns: []string{"pkg/**"}},
 		task{id: "b", owns: []string{"docs/x.md", "pkg/b.go"}},
 		task{id: "c", owns: []string{"other/**"}})
 	a, b, c := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c")
 	f := newFake(s, a, b, c)
-	sch := &Scheduler{Store: s, MaxParallel: 3, RunTask: f.run}
+	sch := &Scheduler{Store: s, MaxParallel: 3, RunTask: f.run, Sleep: pollSleep}
 	ch := runAsync(context.Background(), sch, g, Options{})
 
 	first := []string{f.waitStart(t), f.waitStart(t)}
@@ -287,6 +303,7 @@ func TestOverlappingOwnsNeverRunTogether(t *testing.T) {
 }
 
 func TestBlockedDependencyLeavesDependentsPendingAndGoalBlocked(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b", deps: []string{"a"}}, task{id: "c", deps: []string{"b"}},
 		task{id: "d"}, task{id: "e"})
 	a, b, c, d, e := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c"), store.TaskID(g, "d"), store.TaskID(g, "e")
@@ -302,7 +319,7 @@ func TestBlockedDependencyLeavesDependentsPendingAndGoalBlocked(t *testing.T) {
 		return store.TaskVerified, "", nil
 	}
 	out := &syncBuf{}
-	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Out: out}
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Out: out, Sleep: pollSleep}
 	res, err := sch.RunGoal(context.Background(), g, Options{})
 	if err != nil || res.Status != store.GoalBlocked {
 		t.Fatalf("RunGoal = %+v, %v", res, err)
@@ -333,6 +350,7 @@ func TestBlockedDependencyLeavesDependentsPendingAndGoalBlocked(t *testing.T) {
 }
 
 func TestDraftAndDoneGoalsAreRefused(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"})
 	draft, err := s.CreateGoal(ctx, "draft", nil)
@@ -340,7 +358,7 @@ func TestDraftAndDoneGoalsAreRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFake(s)
-	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run}
+	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run, Sleep: pollSleep}
 	if _, err := sch.RunGoal(ctx, draft.ID, Options{}); err == nil || !strings.Contains(err.Error(), "draft") ||
 		!strings.Contains(err.Error(), "mill plan approve "+draft.ID) {
 		t.Fatalf("draft: %v", err)
@@ -363,12 +381,13 @@ func TestDraftAndDoneGoalsAreRefused(t *testing.T) {
 }
 
 func TestCancelStopsStartsWaitsAndRequeuesInterruptedTasks(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"}, task{id: "c"}, task{id: "d", deps: []string{"a"}})
 	a, b, c, d := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c"), store.TaskID(g, "d")
 	f := newFake(s, a, b, c)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Sleep: pollSleep}
 	ch := runAsync(ctx, sch, g, Options{})
 	f.waitStart(t)
 	f.waitStart(t)
@@ -396,6 +415,7 @@ func TestCancelStopsStartsWaitsAndRequeuesInterruptedTasks(t *testing.T) {
 }
 
 func TestRetryBlockedRequeuesBlockedAndFailedTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"}, task{id: "c", deps: []string{"a", "b"}})
 	a, b, c := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c")
@@ -409,7 +429,7 @@ func TestRetryBlockedRequeuesBlockedAndFailedTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFake(s)
-	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Sleep: pollSleep}
 
 	// Without the option nothing can start and the goal stays blocked.
 	res, err := sch.RunGoal(ctx, g, Options{})
@@ -440,6 +460,7 @@ func TestRetryBlockedRequeuesBlockedAndFailedTasks(t *testing.T) {
 }
 
 func TestTaskLeftPendingIsStartedOnceAndReportedStuck(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"}, task{id: "c", deps: []string{"a"}})
 	a, b, c := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c")
 	f := newFake(s)
@@ -454,7 +475,7 @@ func TestTaskLeftPendingIsStartedOnceAndReportedStuck(t *testing.T) {
 		}
 		return f.run(ctx, id)
 	}
-	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: run}
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: run, Sleep: pollSleep}
 	ch := runAsync(context.Background(), sch, g, Options{})
 	r := wait(t, ch)
 	if r.err != nil || r.res.Status != store.GoalBlocked {
@@ -478,6 +499,7 @@ func TestTaskLeftPendingIsStartedOnceAndReportedStuck(t *testing.T) {
 }
 
 func TestPublishedDependencyUnblocksDependent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b", deps: []string{"a"}})
 	a, b := store.TaskID(g, "a"), store.TaskID(g, "b")
@@ -485,7 +507,7 @@ func TestPublishedDependencyUnblocksDependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFake(s)
-	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}).RunGoal(ctx, g, Options{})
+	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Sleep: pollSleep}).RunGoal(ctx, g, Options{})
 	if err != nil || res.Status != store.GoalDone {
 		t.Fatalf("RunGoal = %+v, %v", res, err)
 	}
@@ -498,6 +520,7 @@ func TestPublishedDependencyUnblocksDependent(t *testing.T) {
 }
 
 func TestGoalOfPublishedAndLandedTasksIsDone(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
 	if err := s.SetTaskStatus(ctx, store.TaskID(g, "a"), store.TaskPublished, "", ""); err != nil {
@@ -507,7 +530,7 @@ func TestGoalOfPublishedAndLandedTasksIsDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFake(s)
-	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}).RunGoal(ctx, g, Options{})
+	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Sleep: pollSleep}).RunGoal(ctx, g, Options{})
 	if err != nil || res.Status != store.GoalDone || res.Reason != "" {
 		t.Fatalf("RunGoal = %+v, %v", res, err)
 	}
@@ -518,6 +541,7 @@ func TestGoalOfPublishedAndLandedTasksIsDone(t *testing.T) {
 
 // A blocked goal's reason does not list published or landed tasks as stopped or needed.
 func TestBlockedReasonTreatsPublishedAndLandedAsFinished(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"}, task{id: "l"}, task{id: "x"}, task{id: "b", deps: []string{"a", "l", "x"}})
 	a, l, x, b := store.TaskID(g, "a"), store.TaskID(g, "l"), store.TaskID(g, "x"), store.TaskID(g, "b")
@@ -529,7 +553,7 @@ func TestBlockedReasonTreatsPublishedAndLandedAsFinished(t *testing.T) {
 	}
 	f := newFake(s)
 	f.decide = func(string) (string, string, error) { return store.TaskBlocked, "nope", nil }
-	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run}).RunGoal(ctx, g, Options{})
+	res, err := (&Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Sleep: pollSleep}).RunGoal(ctx, g, Options{})
 	if err != nil || res.Status != store.GoalBlocked {
 		t.Fatalf("RunGoal = %+v, %v", res, err)
 	}
@@ -539,13 +563,14 @@ func TestBlockedReasonTreatsPublishedAndLandedAsFinished(t *testing.T) {
 }
 
 func TestRateLimitStopsNewStartsLetsRunningFinishAndBlocksGoal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"}, task{id: "c"})
 	a, b, c := store.TaskID(g, "a"), store.TaskID(g, "b"), store.TaskID(g, "c")
 	f := newFake(s, b)
 	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.Local)
 	f.limits[a] = time.Date(2026, 11, 22, 12, 50, 0, 0, time.Local)
-	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Now: func() time.Time { return now }}
+	sch := &Scheduler{Store: s, MaxParallel: 2, RunTask: f.run, Now: func() time.Time { return now }, Sleep: pollSleep}
 	ch := runAsync(ctx, sch, g, Options{})
 	f.waitStart(t)
 	f.waitStart(t)
@@ -587,6 +612,7 @@ func TestRateLimitStopsNewStartsLetsRunningFinishAndBlocksGoal(t *testing.T) {
 }
 
 func TestWaitOnLimitSleepsUntilResetThenFinishesGoal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
 	a, b := store.TaskID(g, "a"), store.TaskID(g, "b")
@@ -626,6 +652,7 @@ func TestWaitOnLimitSleepsUntilResetThenFinishesGoal(t *testing.T) {
 }
 
 func TestWaitOnLimitWaitsFifteenMinutesWhenResetUnknown(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t, task{id: "a"})
 	f := newFake(s)
 	f.limits[store.TaskID(g, "a")] = time.Time{}
@@ -642,6 +669,7 @@ func TestWaitOnLimitWaitsFifteenMinutesWhenResetUnknown(t *testing.T) {
 }
 
 func TestCancelDuringLimitWaitLeavesGoalInterrupted(t *testing.T) {
+	t.Parallel()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
 	a, b := store.TaskID(g, "a"), store.TaskID(g, "b")
 	f := newFake(s)
@@ -673,6 +701,7 @@ func TestCancelDuringLimitWaitLeavesGoalInterrupted(t *testing.T) {
 }
 
 func TestDoneGoalWithUnfinishedTaskRunsAsApproved(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, g := newGoal(t, task{id: "a"}, task{id: "b"})
 	a, b := g+"/a", g+"/b"
@@ -683,7 +712,7 @@ func TestDoneGoalWithUnfinishedTaskRunsAsApproved(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFake(s)
-	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run}
+	sch := &Scheduler{Store: s, MaxParallel: 1, RunTask: f.run, Sleep: pollSleep}
 	res, err := sch.RunGoal(ctx, g, Options{})
 	if err != nil || res.Status != store.GoalDone {
 		t.Fatalf("RunGoal = %+v, %v", res, err)

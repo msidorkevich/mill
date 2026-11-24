@@ -75,6 +75,7 @@ func publishedStack(t *testing.T) (Options, string) {
 }
 
 func TestSyncRepublishAfterRestackPublishesOnlyOwnChange(t *testing.T) {
+	t.Parallel()
 	o, bare := publishedStack(t)
 	ctx := context.Background()
 	res, err := Sync(ctx, o)
@@ -95,6 +96,7 @@ func TestSyncRepublishAfterRestackPublishesOnlyOwnChange(t *testing.T) {
 }
 
 func TestSyncRepublishOutsideOwnChangeIsRefusedAndPushesNothing(t *testing.T) {
+	// Serial: replaces publish's process-wide tree builder (publish.SetTreeBuilder).
 	o, bare := publishedStack(t)
 	ctx := context.Background()
 	before := git(t, bare, "rev-parse", "refs/heads/review/g1/b")

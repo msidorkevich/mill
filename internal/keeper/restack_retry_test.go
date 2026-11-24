@@ -11,6 +11,7 @@ import (
 )
 
 func TestKeeperRestackConflictRecordsRestackBlock(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {resolverStep(nil)}, // leaves the conflict markers
 	})
@@ -30,6 +31,7 @@ func TestKeeperRestackConflictRecordsRestackBlock(t *testing.T) {
 }
 
 func TestRestackBlockedApprovedTaskIsRetriedRestoredAndPublishedFromQueue(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{})
 	ctx := context.Background()
 	s := e.o.Store
@@ -76,6 +78,7 @@ func TestRestackBlockedApprovedTaskIsRetriedRestoredAndPublishedFromQueue(t *tes
 }
 
 func TestBlockAfterResolutionFailsVerifierIsNotRetriedBySync(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {resolverStep(map[string]string{"shared.txt": resolved})},
 		runner.RoleVerifier: {verdictStep("fail")},

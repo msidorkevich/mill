@@ -80,6 +80,7 @@ func stackedOnPublished(t *testing.T) *env {
 // restacked onto it in the pass, and the queued child, whose branch predates that change, is
 // published in the same pass.
 func TestQueuedChildOfParentRestackedInSamePassPublishesOnlyOwnChange(t *testing.T) {
+	t.Parallel()
 	e := stackedOnPublished(t)
 	ctx := context.Background()
 	s := e.o.Store
@@ -133,6 +134,7 @@ func TestQueuedChildOfParentRestackedInSamePassPublishesOnlyOwnChange(t *testing
 }
 
 func TestQueuePublishOutsideOwnChangeIsRefusedAndPushesNothing(t *testing.T) {
+	// Serial: replaces publish's process-wide tree builder (publish.SetTreeBuilder).
 	e := setup(t, "true", runner.Script{})
 	ctx := context.Background()
 	if err := e.o.Store.ApproveTask(ctx, taskID, 1); err != nil {
@@ -150,6 +152,7 @@ func TestQueuePublishOutsideOwnChangeIsRefusedAndPushesNothing(t *testing.T) {
 }
 
 func TestRepublishAfterRestackOutsideOwnChangeIsRefusedAndPushesNothing(t *testing.T) {
+	// Serial: replaces publish's process-wide tree builder (publish.SetTreeBuilder).
 	e := setup(t, "true", runner.Script{})
 	ctx := context.Background()
 	pr, err := publish.Publish(ctx, publish.Options{Store: e.o.Store, Cfg: e.o.Cfg, Paths: e.o.Paths, Host: e.o.Host, TaskID: taskID})

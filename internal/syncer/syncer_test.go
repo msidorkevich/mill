@@ -83,6 +83,7 @@ func fixture(t *testing.T, ids ...string) (Options, string) {
 }
 
 func TestSyncMarksVerifiedBranchMergedDirectlyAsLanded(t *testing.T) {
+	t.Parallel()
 	o, bare := fixture(t, "merged", "pending")
 	ctx := context.Background()
 
@@ -142,6 +143,7 @@ func TestSyncMarksVerifiedBranchMergedDirectlyAsLanded(t *testing.T) {
 }
 
 func TestSyncDoesNotLandVerifiedTaskWithoutOwnCommits(t *testing.T) {
+	t.Parallel()
 	o, _ := fixture(t, "empty")
 	ctx := context.Background()
 	br, _ := o.Store.GetBranch(ctx, "empty")
@@ -204,6 +206,7 @@ func stackedGoal(t *testing.T, reportRedGate bool) Options {
 }
 
 func TestSyncBlocksTaskWithRedGateAfterRestackByDefault(t *testing.T) {
+	t.Parallel()
 	o := stackedGoal(t, false)
 	res, err := Sync(context.Background(), o)
 	if err != nil {
@@ -218,6 +221,7 @@ func TestSyncBlocksTaskWithRedGateAfterRestackByDefault(t *testing.T) {
 }
 
 func TestSyncReportsRedGateAfterRestackWithoutBlocking(t *testing.T) {
+	t.Parallel()
 	o := stackedGoal(t, true)
 	ctx := context.Background()
 	res, err := Sync(ctx, o)
@@ -238,6 +242,7 @@ func TestSyncReportsRedGateAfterRestackWithoutBlocking(t *testing.T) {
 }
 
 func TestSyncLeavesBusyMergedTaskUnchangedAndLandsTheOthers(t *testing.T) {
+	t.Parallel()
 	o, bare := fixture(t, "busy", "free")
 	ctx := context.Background()
 	aid, err := o.Store.StartAttempt(ctx, "busy", 2, "reviewer")
@@ -277,6 +282,7 @@ func TestSyncLeavesBusyMergedTaskUnchangedAndLandsTheOthers(t *testing.T) {
 }
 
 func TestSyncClaimsAreReleasedAfterLanding(t *testing.T) {
+	t.Parallel()
 	o, bare := fixture(t, "x")
 	ctx := context.Background()
 	git(t, o.Paths.Root, "push", "-q", bare, "mill/t/x:main")
@@ -352,6 +358,7 @@ func revertingGoal(t *testing.T, revert bool) (Options, string) {
 }
 
 func TestSyncRestackReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	t.Parallel()
 	o, aNew := revertingGoal(t, true)
 	ctx := context.Background()
 	res, err := Sync(ctx, o)
@@ -381,6 +388,7 @@ func TestSyncRestackReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) 
 }
 
 func TestSyncRestackBlocksWhenNetChangeConflicts(t *testing.T) {
+	t.Parallel()
 	o, _ := revertingGoal(t, false)
 	ctx := context.Background()
 	before, _ := o.Store.GetBranch(ctx, "g1/b")
@@ -404,6 +412,7 @@ func TestSyncRestackBlocksWhenNetChangeConflicts(t *testing.T) {
 }
 
 func TestSyncRetriesRestackBlockedTaskAndRestoresItOnceAttemptUndoesConflict(t *testing.T) {
+	t.Parallel()
 	o, aNew := revertingGoal(t, false)
 	ctx := context.Background()
 	if res, err := Sync(ctx, o); err != nil || len(res.Blocked) != 1 {
@@ -450,6 +459,7 @@ func TestSyncRetriesRestackBlockedTaskAndRestoresItOnceAttemptUndoesConflict(t *
 }
 
 func TestSyncRetriesRestackBlockedTaskOnlyWhileStillConflicting(t *testing.T) {
+	t.Parallel()
 	o, _ := revertingGoal(t, false)
 	ctx := context.Background()
 	if _, err := Sync(ctx, o); err != nil {
@@ -511,6 +521,7 @@ func stackedForClean(t *testing.T, childStatus string) (Options, string, string)
 }
 
 func TestSyncReportsRunningChildOfLandedParentBusyAndKeepsParentBranch(t *testing.T) {
+	t.Parallel()
 	o, bare, aWT := stackedForClean(t, store.TaskRunning)
 	ctx := context.Background()
 	landStackedParent(t, o, bare)
@@ -541,6 +552,7 @@ func TestSyncReportsRunningChildOfLandedParentBusyAndKeepsParentBranch(t *testin
 }
 
 func TestSyncCleansLandedParentOnLaterSyncOnceChildIsRestacked(t *testing.T) {
+	t.Parallel()
 	o, bare, aWT := stackedForClean(t, store.TaskRunning)
 	ctx := context.Background()
 	landStackedParent(t, o, bare)
@@ -570,6 +582,7 @@ func TestSyncCleansLandedParentOnLaterSyncOnceChildIsRestacked(t *testing.T) {
 }
 
 func TestSyncCleansKeptLandedParentOnceChildLandsToo(t *testing.T) {
+	t.Parallel()
 	o, bare, aWT := stackedForClean(t, store.TaskRunning)
 	ctx := context.Background()
 	landStackedParent(t, o, bare)
@@ -603,6 +616,7 @@ func TestSyncCleansKeptLandedParentOnceChildLandsToo(t *testing.T) {
 }
 
 func TestSyncCleanKeepsLandedParentWhileChildStillBasedOnItsBranch(t *testing.T) {
+	t.Parallel()
 	o, bare, _ := stackedForClean(t, store.TaskBlocked) // blocked, not by a restack: not restacked
 	ctx := context.Background()
 	landStackedParent(t, o, bare)

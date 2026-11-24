@@ -13,6 +13,7 @@ import (
 )
 
 func TestDefaultTOMLMatchesDefault(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse(DefaultTOML)
 	if err != nil {
 		t.Fatalf("DefaultTOML does not parse: %v", err)
@@ -23,6 +24,7 @@ func TestDefaultTOMLMatchesDefault(t *testing.T) {
 }
 
 func TestEmptyFileGivesDefaults(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse("")
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +35,7 @@ func TestEmptyFileGivesDefaults(t *testing.T) {
 }
 
 func TestOverrides(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse(`
 check_cmd = "go test ./..."
 max_parallel = 4
@@ -71,6 +74,7 @@ attempt = { usd = 0.5 }
 }
 
 func TestAttemptBudgetDefaults(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	if got := cfg.AttemptBudget("S"); got != (budget.Limits{USD: 1, Tokens: 200_000}) {
 		t.Fatalf("S = %+v", got)
@@ -84,6 +88,7 @@ func TestAttemptBudgetDefaults(t *testing.T) {
 }
 
 func TestUnknownKeysRejected(t *testing.T) {
+	t.Parallel()
 	_, err := Parse("check_cmmd = \"typo\"\n[budget.attempt]\ntokenz = 5\n")
 	if err == nil {
 		t.Fatal("unknown keys accepted")
@@ -96,6 +101,7 @@ func TestUnknownKeysRejected(t *testing.T) {
 }
 
 func TestValidationErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name, toml, want string
 	}{
@@ -115,6 +121,7 @@ func TestValidationErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := Parse(tt.toml)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want mention of %q", err, tt.want)
@@ -124,6 +131,7 @@ func TestValidationErrors(t *testing.T) {
 }
 
 func TestValidationReportsAllErrors(t *testing.T) {
+	t.Parallel()
 	_, err := Parse("max_parallel = 0\nmax_attempts = 0\n")
 	if err == nil || !strings.Contains(err.Error(), "max_parallel") || !strings.Contains(err.Error(), "max_attempts") {
 		t.Fatalf("want both errors, got %v", err)
@@ -131,6 +139,7 @@ func TestValidationReportsAllErrors(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(p, []byte(`check_cmd = "make check"`), 0o644); err != nil {
@@ -146,6 +155,7 @@ func TestLoad(t *testing.T) {
 }
 
 func TestWorktreeTimeoutAndEnvSettings(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse(`
 worktree_root = "~/wt"
 gate_timeout = "90s"
@@ -170,6 +180,7 @@ attempt_timeout = "1h"
 }
 
 func TestWorktreesDefaultAndUnique(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	a := cfg.Worktrees("/src/a/repo", "/home/u")
 	b := cfg.Worktrees("/src/b/repo", "/home/u")
@@ -185,6 +196,7 @@ func TestWorktreesDefaultAndUnique(t *testing.T) {
 }
 
 func TestTimeoutAndEnvValidation(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ name, toml, want string }{
 		{"bad duration", `gate_timeout = "soon"`, "parse config"},
 		{"zero gate timeout", `gate_timeout = "0s"`, "gate_timeout"},
@@ -194,6 +206,7 @@ func TestTimeoutAndEnvValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			if _, err := Parse(tt.toml); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want %q", err, tt.want)
 			}
@@ -202,6 +215,7 @@ func TestTimeoutAndEnvValidation(t *testing.T) {
 }
 
 func TestPricesOverridesParseAndValidate(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse(`
 [prices.opus]
 input = 1.5
@@ -229,6 +243,7 @@ cache_read = 0.5
 }
 
 func TestOwnsPolicyDefaultsToWarnAndIsValidated(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse("")
 	if err != nil || cfg.OwnsPolicy != "warn" {
 		t.Fatalf("default = %q, %v", cfg.OwnsPolicy, err)
@@ -245,6 +260,7 @@ func TestOwnsPolicyDefaultsToWarnAndIsValidated(t *testing.T) {
 }
 
 func TestGateTriageSettingsDefaultOnAndAreBooleans(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse("")
 	if err != nil || !cfg.GateRerun || !cfg.GateCheckBase {
 		t.Fatalf("defaults: rerun=%v check_base=%v, %v", cfg.GateRerun, cfg.GateCheckBase, err)
@@ -261,6 +277,7 @@ func TestGateTriageSettingsDefaultOnAndAreBooleans(t *testing.T) {
 }
 
 func TestCleanOnLandDefaultsToAllAndIsValidated(t *testing.T) {
+	t.Parallel()
 	if got := Default().CleanOnLand; got != "all" {
 		t.Errorf("default clean_on_land = %q, want all", got)
 	}
@@ -276,6 +293,7 @@ func TestCleanOnLandDefaultsToAllAndIsValidated(t *testing.T) {
 }
 
 func TestModelsDefaultMapping(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	want := map[[2]string]string{
 		{"S", "low"}: "haiku", {"S", "medium"}: "sonnet", {"S", "high"}: "opus",
@@ -293,6 +311,7 @@ func TestModelsDefaultMapping(t *testing.T) {
 }
 
 func TestModelsMissingEntryNamesKeyToAdd(t *testing.T) {
+	t.Parallel()
 	got, why := Default().TaskModel("L", "high", "")
 	if got != "" || !strings.Contains(why, "models") || !strings.Contains(why, "L") || !strings.Contains(why, "high") {
 		t.Fatalf("TaskModel(L, high) = %q, %q", got, why)
@@ -300,6 +319,7 @@ func TestModelsMissingEntryNamesKeyToAdd(t *testing.T) {
 }
 
 func TestModelsOverrideWins(t *testing.T) {
+	t.Parallel()
 	got, why := Default().TaskModel("S", "low", "claude-opus-5-5")
 	if got != "claude-opus-5-5" || why != "override" {
 		t.Fatalf("got %q, %q", got, why)
@@ -307,6 +327,7 @@ func TestModelsOverrideWins(t *testing.T) {
 }
 
 func TestSizesFallbackMapsEveryComplexity(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse("[sizes.S]\nmodel = \"x\"\n")
 	if err != nil {
 		t.Fatal(err)
@@ -323,6 +344,7 @@ func TestSizesFallbackMapsEveryComplexity(t *testing.T) {
 }
 
 func TestModelsSectionIgnoresSizes(t *testing.T) {
+	t.Parallel()
 	cfg, err := Parse("[sizes.S]\nmodel = \"x\"\n[models.S]\nlow = \"y\"\n")
 	if err != nil {
 		t.Fatal(err)
@@ -336,6 +358,7 @@ func TestModelsSectionIgnoresSizes(t *testing.T) {
 }
 
 func TestModelsValidation(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ name, toml, want string }{
 		{"unknown complexity", "[models.S]\nextreme = \"opus\"", "models.S.extreme"},
 		{"empty model", "[models.S]\nlow = \"\"", "models.S.low"},
@@ -345,6 +368,7 @@ func TestModelsValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := Parse(tt.toml)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want mention of %q", err, tt.want)
@@ -354,6 +378,7 @@ func TestModelsValidation(t *testing.T) {
 }
 
 func TestRolesConfigDefaultsAndValidation(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	if cfg.Roles.Planner != "opus" || cfg.Roles.VerifierMin != "sonnet" {
 		t.Fatalf("roles = %+v", cfg.Roles)
@@ -374,6 +399,7 @@ func TestRolesConfigDefaultsAndValidation(t *testing.T) {
 }
 
 func TestTierFindsFirstContainedName(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	for model, want := range map[string]int{"haiku": 0, "sonnet": 1, "claude-opus-5-5": 2, "gpt-x": -1} {
 		if got := cfg.Tier(model); got != want {
@@ -383,6 +409,7 @@ func TestTierFindsFirstContainedName(t *testing.T) {
 }
 
 func TestEscalateMovesUpTiersCappedAtTop(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	tests := []struct {
 		model string
@@ -403,6 +430,7 @@ func TestEscalateMovesUpTiersCappedAtTop(t *testing.T) {
 }
 
 func TestVerifierModelIsHigherOfImplAndMinimum(t *testing.T) {
+	t.Parallel()
 	cfg := Default()
 	for impl, want := range map[string]string{"haiku": "sonnet", "sonnet": "sonnet", "opus": "opus", "gpt-x": "gpt-x"} {
 		if got := cfg.VerifierModel(impl); got != want {
@@ -412,6 +440,7 @@ func TestVerifierModelIsHigherOfImplAndMinimum(t *testing.T) {
 }
 
 func TestDefaultTOMLHasModelsAndRoles(t *testing.T) {
+	t.Parallel()
 	for _, s := range []string{"[models]", "[roles]", "model_tiers"} {
 		if !strings.Contains(DefaultTOML, s) {
 			t.Errorf("DefaultTOML lacks %s", s)

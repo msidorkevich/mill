@@ -135,6 +135,7 @@ func prompts(f *runner.Fake, role runner.Role) []string {
 }
 
 func TestHappyPath(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `grep -q hello hello.txt`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"}, budget.Usage{InputTokens: 100, CostUSD: 0.1})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -195,6 +196,7 @@ func TestHappyPath(t *testing.T) {
 }
 
 func TestGateFailThenRetryPasses(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `grep -q hello hello.txt`, runner.Script{
 		runner.RoleImplementer: {
 			impl(map[string]string{"hello.txt": "goodbye\n"}),
@@ -220,6 +222,7 @@ func TestGateFailThenRetryPasses(t *testing.T) {
 }
 
 func TestVerifierFailThenPass(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "helo\n"}), impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("fail", "typo: helo"), verdict("pass")},
@@ -235,6 +238,7 @@ func TestVerifierFailThenPass(t *testing.T) {
 }
 
 func TestMaxAttemptsBlocks(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `false`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}), impl(map[string]string{"a": "2"})},
 	}, func(c *config.Config) { c.MaxAttempts = 2 })
@@ -254,6 +258,7 @@ func TestMaxAttemptsBlocks(t *testing.T) {
 }
 
 func TestEmptyGateFails(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
 	}, func(c *config.Config) { c.MaxAttempts = 1 })
@@ -269,6 +274,7 @@ func TestEmptyGateFails(t *testing.T) {
 }
 
 func TestTaskChecksRunInGate(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}), impl(map[string]string{"b": "1"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -281,6 +287,7 @@ func TestTaskChecksRunInGate(t *testing.T) {
 }
 
 func TestNoChangesIsAFailedAttempt(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {impl(nil), impl(map[string]string{"a": "1"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -296,6 +303,7 @@ func TestNoChangesIsAFailedAttempt(t *testing.T) {
 }
 
 func TestImplementerErrorIsAFindingAndChangesAreKept(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "test -f a && test -f b", runner.Script{
 		runner.RoleImplementer: {
 			{Error: "model overloaded", Files: nil},
@@ -314,6 +322,7 @@ func TestImplementerErrorIsAFindingAndChangesAreKept(t *testing.T) {
 }
 
 func TestAttemptTokenLimitBlocks(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"},
 			budget.Usage{InputTokens: 600}, budget.Usage{InputTokens: 600}, budget.Usage{InputTokens: 600})},
@@ -336,6 +345,7 @@ func TestAttemptTokenLimitBlocks(t *testing.T) {
 }
 
 func TestRunnerBudgetStatusBlocks(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{runner.RoleImplementer: {impl(nil)}}, nil)
 	e.p.Runner = budgetRunner{}
 	e.task(t, "usd")
@@ -353,6 +363,7 @@ func (budgetRunner) Run(context.Context, runner.Request) (runner.Result, error) 
 }
 
 func TestTaskBudgetBlocksBeforeAttempt(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "false", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}, budget.Usage{CostUSD: 0.4})},
 	}, func(c *config.Config) {
@@ -372,6 +383,7 @@ func TestTaskBudgetBlocksBeforeAttempt(t *testing.T) {
 }
 
 func TestRetryContinuesOnSameBranchWithFindings(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q hello hello.txt", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "nope\n"}), impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -406,6 +418,7 @@ func TestRetryContinuesOnSameBranchWithFindings(t *testing.T) {
 }
 
 func TestExistingUnknownBranchIsRefused(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{}, nil)
 	if _, err := gitx.Run(context.Background(), e.root, "branch", "mill/t/clash"); err != nil {
 		t.Fatal(err)
@@ -418,6 +431,7 @@ func TestExistingUnknownBranchIsRefused(t *testing.T) {
 }
 
 func TestInterruptBlocks(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}, budget.Usage{InputTokens: 1}, budget.Usage{InputTokens: 1})},
 	}, nil)
@@ -465,6 +479,7 @@ func (e *env) goal(t *testing.T, deps ...[]string) {
 func goalImpl(file, body string) runner.Step { return impl(map[string]string{file: body}) }
 
 func TestGoalTaskPathsAndDependencyBase(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -497,6 +512,7 @@ func TestGoalTaskPathsAndDependencyBase(t *testing.T) {
 }
 
 func TestFanInMergesOtherDependenciesAndDiffsFromStart(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("a.txt", "a-content\n"), goalImpl("b.txt", "b-content\n"), goalImpl("c.txt", "c-content\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass"), verdict("pass")},
@@ -532,6 +548,7 @@ func TestFanInMergesOtherDependenciesAndDiffsFromStart(t *testing.T) {
 }
 
 func TestConflictingDependenciesBlockTask(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("same.txt", "from a\n"), goalImpl("same.txt", "from b\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -556,6 +573,7 @@ func TestConflictingDependenciesBlockTask(t *testing.T) {
 }
 
 func TestUnverifiedDependencyBlocksTask(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{}, nil)
 	e.goal(t, nil, []string{"a"})
 	out := e.run(t, "g1/b")
@@ -568,6 +586,7 @@ func TestUnverifiedDependencyBlocksTask(t *testing.T) {
 }
 
 func TestGoalBudgetBlocksGoalTask(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{}, func(c *config.Config) {
 		c.Budget.Goal = budget.Limits{Tokens: 1000}
 	})
@@ -590,6 +609,7 @@ func TestGoalBudgetBlocksGoalTask(t *testing.T) {
 }
 
 func TestRetryWithoutStartSHAUsesBaseSHA(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("x.txt", "x\n")},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -615,6 +635,7 @@ func TestRetryWithoutStartSHAUsesBaseSHA(t *testing.T) {
 }
 
 func TestRequestsCarryTaskID(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -633,6 +654,7 @@ func TestRequestsCarryTaskID(t *testing.T) {
 }
 
 func TestParallelGoalTasksShareOnePipeline(t *testing.T) {
+	t.Parallel()
 	step := func(file string) []runner.Step {
 		return []runner.Step{{DelayMS: 50, Files: map[string]string{file: "x\n"},
 			Output: json.RawMessage(`{"summary":"s","files_changed":[],"notes":""}`)}}
@@ -670,6 +692,7 @@ func TestParallelGoalTasksShareOnePipeline(t *testing.T) {
 }
 
 func TestReattachCommitsInterruptedWork(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
 		runner.RoleVerifier:    {verdict("fail", "nope")},
@@ -724,6 +747,7 @@ func (r *startingRunner) Run(ctx context.Context, req runner.Request) (runner.Re
 }
 
 func TestAgentAttemptRecordsProcessWhileRunning(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a.txt": "x\n"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -752,6 +776,7 @@ func (r estimatingRunner) Run(ctx context.Context, req runner.Request) (runner.R
 }
 
 func TestEstimatedCostIsShownWithTildeAndStored(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}, budget.Usage{InputTokens: 100})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -793,6 +818,7 @@ func (e *env) ownsEvents(t *testing.T, id string) int {
 }
 
 func TestOwnsWarnRecordsEventAndShowsVerifier(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello", "stray.txt": "x"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -811,6 +837,7 @@ func TestOwnsWarnRecordsEventAndShowsVerifier(t *testing.T) {
 }
 
 func TestOwnsEnforceFindingSkipsGate(t *testing.T) {
+	t.Parallel()
 	marker := filepath.Join(t.TempDir(), "gate-ran")
 	e := setup(t, `touch `+marker, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello", "stray.txt": "x"})},
@@ -833,6 +860,7 @@ func TestOwnsEnforceFindingSkipsGate(t *testing.T) {
 }
 
 func TestOwnsOffAndEmptyOwnsRecordNothing(t *testing.T) {
+	t.Parallel()
 	files := map[string]string{"hello.txt": "hello", "stray.txt": "x"}
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(files)},
@@ -856,6 +884,7 @@ func TestOwnsOffAndEmptyOwnsRecordNothing(t *testing.T) {
 
 // gate_sha is the head the gate passed at, not a head that failed it.
 func TestGatePassRecordsGateSHA(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `grep -q hello hello.txt`, runner.Script{
 		runner.RoleImplementer: {
 			impl(map[string]string{"hello.txt": "goodbye\n"}),
@@ -876,6 +905,7 @@ func TestGatePassRecordsGateSHA(t *testing.T) {
 
 // The gate result is recorded even when the verifier then rejects the attempt.
 func TestGatePassRecordsGateSHAWhenVerifierFails(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
 		runner.RoleVerifier:    {verdict("fail", "wrong")},
@@ -891,6 +921,7 @@ func TestGatePassRecordsGateSHAWhenVerifierFails(t *testing.T) {
 }
 
 func TestPublishedDependencyIsABase(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -914,6 +945,7 @@ func TestPublishedDependencyIsABase(t *testing.T) {
 }
 
 func TestOperatorFindingsStartTheNextAttemptPrompt(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q hello hello.txt", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"}), impl(map[string]string{"hello.txt": "hello world\n"})},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -967,6 +999,7 @@ func (l *liveRunner) Run(ctx context.Context, req runner.Request) (runner.Result
 }
 
 func TestRunningAttemptShowsLiveUsageThenFinalUsage(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{}, func(c *config.Config) {
 		c.Prices = map[string]price.Rates{c.Model("S"): {Input: 1, Output: 2}}
 	})
@@ -1037,10 +1070,10 @@ func (r *trickleRunner) Run(ctx context.Context, req runner.Request) (runner.Res
 }
 
 func TestLiveUsageWritesAreThrottledAndNewestTotalLands(t *testing.T) {
-	old := liveUsageInterval
-	liveUsageInterval = 250 * time.Millisecond
-	t.Cleanup(func() { liveUsageInterval = old })
+	t.Parallel()
 	e := setup(t, "true", runner.Script{}, nil)
+	interval := 250 * time.Millisecond
+	e.p.LiveUsageInterval = interval
 	e.task(t, "trickle")
 	tr := &trickleRunner{steps: 100, last: 1000, sent: make(chan struct{}), release: make(chan struct{})}
 	e.p.Runner = tr
@@ -1078,12 +1111,24 @@ func TestLiveUsageWritesAreThrottledAndNewestTotalLands(t *testing.T) {
 	// Distinct values observed cannot exceed the writes made; writes are one per interval
 	// (plus the first), so over the observed span the count is bounded.
 	span := lastSeen.Sub(first)
-	max := int(span/liveUsageInterval) + 2
+	max := int(span/interval) + 2
 	if len(seen) > max {
-		t.Fatalf("saw %d distinct live totals over %s with a %s interval (max %d): %v", len(seen), span, liveUsageInterval, max, seen)
+		t.Fatalf("saw %d distinct live totals over %s with a %s interval (max %d): %v", len(seen), span, interval, max, seen)
 	}
 	if len(seen) < 2 {
 		t.Fatalf("expected several live writes, saw %v", seen)
+	}
+}
+
+func TestLiveUsageIntervalDefaultsToTwoSeconds(t *testing.T) {
+	t.Parallel()
+	p := &Pipeline{}
+	if got := p.liveUsageInterval(); got != 2*time.Second || DefaultLiveUsageInterval != 2*time.Second {
+		t.Fatalf("default live usage interval = %s (DefaultLiveUsageInterval %s), want 2s", got, DefaultLiveUsageInterval)
+	}
+	p.LiveUsageInterval = 250 * time.Millisecond
+	if got := p.liveUsageInterval(); got != 250*time.Millisecond {
+		t.Fatalf("live usage interval = %s, want the configured 250ms", got)
 	}
 }
 
@@ -1103,6 +1148,8 @@ func liveWriterGoroutines() int {
 }
 
 func TestLiveUsageWriterStopsWhenRunnerPanics(t *testing.T) {
+	// Serial: counts live usage writer goroutines across the whole process, which
+	// parallel tests would add to.
 	e := setup(t, "true", runner.Script{}, nil)
 	e.task(t, "boom")
 	e.p.Runner = panicRunner{}
@@ -1124,6 +1171,7 @@ func TestLiveUsageWriterStopsWhenRunnerPanics(t *testing.T) {
 }
 
 func TestLiveUsageStopIsIdempotent(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{}, nil)
 	l := e.p.startLiveUsage(context.Background(), 1, "x", "m")
 	l.stop()
@@ -1136,6 +1184,7 @@ func TestLiveUsageStopIsIdempotent(t *testing.T) {
 }
 
 func TestRateLimitedImplementerBlocksWithoutFurtherAttempts(t *testing.T) {
+	t.Parallel()
 	resets := time.Date(2026, 11, 22, 12, 50, 0, 0, time.Local)
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {
@@ -1169,6 +1218,7 @@ func TestRateLimitedImplementerBlocksWithoutFurtherAttempts(t *testing.T) {
 }
 
 func TestRateLimitedVerifierBlocksWithUnknownReset(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}), impl(map[string]string{"a": "2"})},
 		runner.RoleVerifier:    {{RateLimit: &runner.RateLimit{}}, verdict("pass")},
@@ -1189,6 +1239,7 @@ func TestRateLimitedVerifierBlocksWithUnknownReset(t *testing.T) {
 }
 
 func TestFormatResetTimeShowsDateWhenNotToday(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.Local)
 	if got := FormatResetTime(now.Add(2*time.Hour), now); got != "12:00" {
 		t.Fatalf("same day = %q", got)
@@ -1278,6 +1329,7 @@ func hasFiles(t *testing.T, dir string, files ...string) {
 }
 
 func TestLandedDependencyBaseIsRemoteBaseTip(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -1296,6 +1348,7 @@ func TestLandedDependencyBaseIsRemoteBaseTip(t *testing.T) {
 }
 
 func TestFanInWithLandedDependencyStartsFromUnlandedAndMergesBaseTip(t *testing.T) {
+	t.Parallel()
 	cases := map[string]struct {
 		deps    [][]string
 		run     []string
@@ -1313,6 +1366,7 @@ func TestFanInWithLandedDependencyStartsFromUnlandedAndMergesBaseTip(t *testing.
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			var impls, verdicts []runner.Step
 			for i := 0; i <= len(tc.run); i++ {
 				f := string(rune('a'+i)) + ".txt"
@@ -1344,6 +1398,7 @@ func TestFanInWithLandedDependencyStartsFromUnlandedAndMergesBaseTip(t *testing.
 }
 
 func TestFanInWithAllDependenciesLandedStartsFromBaseTip(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n"), goalImpl("c.txt", "c\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass"), verdict("pass")},
@@ -1362,6 +1417,7 @@ func TestFanInWithAllDependenciesLandedStartsFromBaseTip(t *testing.T) {
 }
 
 func TestLandedDependencyUsesExistingRemoteTrackingTipWhenFetchFails(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -1387,6 +1443,7 @@ func TestLandedDependencyUsesExistingRemoteTrackingTipWhenFetchFails(t *testing.
 }
 
 func TestNewBranchFailsWhenFetchFailsAndNoRemoteTrackingBranch(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{}, nil)
 	ctx := context.Background()
 	gone := filepath.Join(t.TempDir(), "unreachable.git")
@@ -1401,6 +1458,7 @@ func TestNewBranchFailsWhenFetchFailsAndNoRemoteTrackingBranch(t *testing.T) {
 }
 
 func TestConcurrentNewBranchesFetchWithoutLockErrors(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{}, nil)
 	e.withRemote(t)
 	e.goal(t, nil, nil, nil, nil, nil, nil, nil, nil)
@@ -1452,6 +1510,7 @@ func TestConcurrentNewBranchesFetchWithoutLockErrors(t *testing.T) {
 }
 
 func TestFailedPrepareRemovesBranchAndWorktreeItCreated(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("a.txt", "a\n"), goalImpl("b.txt", "b\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
@@ -1506,6 +1565,7 @@ func TestFailedPrepareRemovesBranchAndWorktreeItCreated(t *testing.T) {
 }
 
 func TestFailedCleanupNamesLeftoverBranchAndWorktree(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{}, nil)
 	ctx := context.Background()
 	wt := filepath.Join(t.TempDir(), "wt")
@@ -1523,6 +1583,7 @@ func TestFailedCleanupNamesLeftoverBranchAndWorktree(t *testing.T) {
 }
 
 func TestPrepareRefusesUnrecordedBranchAndKeepsIt(t *testing.T) {
+	t.Parallel()
 	e := setup(t, `true`, runner.Script{}, nil)
 	e.task(t, "solo")
 	ctx := context.Background()
