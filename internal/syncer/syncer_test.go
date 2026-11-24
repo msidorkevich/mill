@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/plan"
@@ -399,5 +400,90 @@ func TestSyncRestackBlocksWhenNetChangeConflicts(t *testing.T) {
 	}
 	if st := git(t, after.Worktree, "status", "--porcelain"); st != "" {
 		t.Fatalf("worktree not clean: %q", st)
+	}
+}
+
+func TestSyncRetriesRestackBlockedTaskAndRestoresItOnceAttemptUndoesConflict(t *testing.T) {
+	o, aNew := revertingGoal(t, false)
+	ctx := context.Background()
+	if res, err := Sync(ctx, o); err != nil || len(res.Blocked) != 1 {
+		t.Fatalf("first sync = %+v, %v", res, err)
+	}
+	if tk, _ := o.Store.GetTask(ctx, "g1/b"); tk.Status != store.TaskBlocked || tk.RestackBlockedFrom != store.TaskVerified {
+		t.Fatalf("task = %s from %q", tk.Status, tk.RestackBlockedFrom)
+	}
+
+	// Busy: the retry leaves it alone and reports it.
+	aid, err := o.Store.StartAttempt(ctx, "g1/b", 9, "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Sync(ctx, o)
+	if err != nil || len(res.Busy) != 1 || res.Busy[0].TaskID != "g1/b" || len(res.Blocked)+len(res.Restacked) != 0 {
+		t.Fatalf("busy sync = %+v, %v", res, err)
+	}
+	if err := o.Store.FinishAttempt(ctx, aid, "ok", budget.Usage{}, false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later attempt undoes the conflicting change.
+	br, _ := o.Store.GetBranch(ctx, "g1/b")
+	br.HeadSHA = attemptCommit(t, br.Worktree, "g1/b", "a2.txt", "", 3)
+	if err := o.Store.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+	res, err = Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Restacked) != 1 || len(res.Blocked) != 0 || len(res.Restored) != 1 || res.Restored[0] != (Restored{TaskID: "g1/b", Status: store.TaskVerified}) {
+		t.Fatalf("result = %+v", res)
+	}
+	tk, _ := o.Store.GetTask(ctx, "g1/b")
+	if tk.Status != store.TaskVerified || tk.Reason != "" || tk.RestackBlockedFrom != "" {
+		t.Fatalf("task = %s %q from %q", tk.Status, tk.Reason, tk.RestackBlockedFrom)
+	}
+	br, _ = o.Store.GetBranch(ctx, "g1/b")
+	if br.StartSHA != aNew || br.GateSHA != br.HeadSHA {
+		t.Fatalf("branch = %+v, want started at %s and gated", br, aNew)
+	}
+}
+
+func TestSyncRetriesRestackBlockedTaskOnlyWhileStillConflicting(t *testing.T) {
+	o, _ := revertingGoal(t, false)
+	ctx := context.Background()
+	if _, err := Sync(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	// The dependency moves again, still writing a2.txt: the retry blocks with the new reason.
+	a, _ := o.Store.GetBranch(ctx, "g1/a")
+	a.HeadSHA = writeCommit(t, a.Worktree, "a3.txt", "even more work on a")
+	if err := o.Store.SaveBranch(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Sync(ctx, o)
+	if err != nil || len(res.Blocked) != 1 || len(res.Restacked) != 0 {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	tk, _ := o.Store.GetTask(ctx, "g1/b")
+	if tk.Status != store.TaskBlocked || tk.RestackBlockedFrom != store.TaskVerified || !strings.Contains(tk.Reason, short(a.HeadSHA)) {
+		t.Fatalf("task = %s from %q: %q", tk.Status, tk.RestackBlockedFrom, tk.Reason)
+	}
+
+	// Blocked for another reason: sync leaves it alone, even though the restack would now work.
+	if err := o.Store.SetTaskStatus(ctx, "g1/b", store.TaskBlocked, "", "operator rejected"); err != nil {
+		t.Fatal(err)
+	}
+	br, _ := o.Store.GetBranch(ctx, "g1/b")
+	br.HeadSHA = attemptCommit(t, br.Worktree, "g1/b", "a2.txt", "", 3)
+	if err := o.Store.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+	res, err = Sync(ctx, o)
+	if err != nil || len(res.Blocked)+len(res.Restacked)+len(res.Restored) != 0 {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	if tk, _ := o.Store.GetTask(ctx, "g1/b"); tk.Status != store.TaskBlocked || tk.Reason != "operator rejected" {
+		t.Fatalf("task = %s %q", tk.Status, tk.Reason)
 	}
 }

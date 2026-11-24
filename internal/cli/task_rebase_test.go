@@ -443,3 +443,39 @@ func TestTaskRebaseFanInReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing
 		t.Errorf("replayed commit subject = %q", subject)
 	}
 }
+
+func TestTaskRebaseRestoresStatusOfRestackBlockedTask(t *testing.T) {
+	root, _ := chainPublished(t, false)
+	ctx := context.Background()
+	s := openStore(t, root)
+	// a moves with its own b.txt, so restacking b onto it conflicts.
+	commitInWorktree(t, s, "g2/a", "b.txt", "a's b\n")
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || !strings.Contains(r.stdout, "conflicts in b.txt") {
+		t.Fatalf("sync: %+v", r)
+	}
+	if tk, _ := s.GetTask(ctx, "g2/b"); tk.Status != store.TaskBlocked || tk.RestackBlockedFrom != store.TaskVerified {
+		t.Fatalf("g2/b = %s from %q", tk.Status, tk.RestackBlockedFrom)
+	}
+
+	// a drops its b.txt again; the operator rebases b by hand.
+	a, _ := s.GetBranch(ctx, "g2/a")
+	gitC(t, a.Worktree, "rm", "-q", "b.txt")
+	gitC(t, a.Worktree, "commit", "-q", "-m", "drop b.txt")
+	a.HeadSHA = gitC(t, a.Worktree, "rev-parse", "HEAD")
+	a.GateSHA = a.HeadSHA
+	if err := s.SaveBranch(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "task", "rebase", "g2/b")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "g2/b is verified again") || strings.Contains(r.stdout, "--retry-blocked") {
+		t.Fatalf("rebase: %+v", r)
+	}
+	tk, _ := s.GetTask(ctx, "g2/b")
+	if tk.Status != store.TaskVerified || tk.Reason != "" || tk.RestackBlockedFrom != "" {
+		t.Fatalf("g2/b = %s %q from %q", tk.Status, tk.Reason, tk.RestackBlockedFrom)
+	}
+	br, _ := s.GetBranch(ctx, "g2/b")
+	if br.BaseSHA != a.HeadSHA || br.GateSHA != br.HeadSHA {
+		t.Errorf("branch = %+v, a head %s", br, a.HeadSHA)
+	}
+}

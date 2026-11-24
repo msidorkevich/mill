@@ -652,3 +652,110 @@ func TestSyncLeavesBusyTaskUnchangedAndExitsOne(t *testing.T) {
 	w.assertUntouched(t)
 	assertNoClaims(t, root)
 }
+
+func TestSyncRetriesRestackBlockedPublishedTaskAndRepublishesItOnceConflictIsGone(t *testing.T) {
+	root, bare := chainPublished(t, true)
+	ctx := context.Background()
+	s := openStore(t, root)
+	pubBefore := remoteRefs(t, bare)["refs/heads/review/g2/b"]
+
+	f := forge(t, bare)
+	forgeCommit(t, f, "b.txt", "someone else's b\n", "main: b.txt")
+	gitC(t, f, "fetch", "-q", "origin")
+	gitC(t, f, "merge", "-q", "--no-ff", "-m", "Merge review/g2/a", "origin/review/g2/a")
+	gitC(t, f, "push", "-q", "origin", "main")
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || !strings.Contains(r.stdout, "conflicts in b.txt") {
+		t.Fatalf("first sync: %+v", r)
+	}
+	if tk, _ := s.GetTask(ctx, "g2/b"); tk.Status != store.TaskBlocked || tk.RestackBlockedFrom != store.TaskPublished {
+		t.Fatalf("g2/b = %s, blocked from %q", tk.Status, tk.RestackBlockedFrom)
+	}
+
+	// Still conflicting: the next sync retries and keeps it blocked with the current reason.
+	forgeCommit(t, f, "b.txt", "someone else's b, again\n", "main: b.txt again")
+	gitC(t, f, "push", "-q", "origin", "main")
+	tip := gitC(t, f, "rev-parse", "HEAD")
+	r := run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Blocked:") {
+		t.Fatalf("second sync: %+v", r)
+	}
+	tk, _ := s.GetTask(ctx, "g2/b")
+	if tk.Status != store.TaskBlocked || tk.RestackBlockedFrom != store.TaskPublished || !strings.Contains(tk.Reason, tip[:8]) {
+		t.Fatalf("g2/b = %s from %q, reason %q (want the new tip %s)", tk.Status, tk.RestackBlockedFrom, tk.Reason, tip[:8])
+	}
+
+	// The cause goes away: main drops its b.txt.
+	gitC(t, f, "rm", "-q", "b.txt")
+	gitC(t, f, "commit", "-q", "-m", "main: drop b.txt")
+	gitC(t, f, "push", "-q", "origin", "main")
+	attempts, _ := s.MaxAttemptN(ctx, "g2/b")
+	r = run(t, root, nil, "sync")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "g2/b: restack succeeded; published again") || !strings.Contains(r.stdout, "Republished") {
+		t.Fatalf("third sync: %+v", r)
+	}
+	tk, _ = s.GetTask(ctx, "g2/b")
+	if tk.Status != store.TaskPublished || tk.Reason != "" || tk.RestackBlockedFrom != "" {
+		t.Fatalf("g2/b = %s %q from %q", tk.Status, tk.Reason, tk.RestackBlockedFrom)
+	}
+	if n, _ := s.MaxAttemptN(ctx, "g2/b"); n != attempts {
+		t.Errorf("attempts = %d, want %d: no agent may run", n, attempts)
+	}
+	br, _ := s.GetBranch(ctx, "g2/b")
+	if br.GateSHA != br.HeadSHA || br.Base != "main" {
+		t.Errorf("branch = %+v", br)
+	}
+	if got := remoteRefs(t, bare)["refs/heads/review/g2/b"]; got == pubBefore || got != br.PublishedSHA {
+		t.Errorf("review/g2/b = %s (was %s), recorded %s", got, pubBefore, br.PublishedSHA)
+	}
+}
+
+func TestSyncLeavesTaskBlockedForOtherReasonUntouched(t *testing.T) {
+	root, _ := chainPublished(t, false)
+	ctx := context.Background()
+	s := openStore(t, root)
+	before, _ := s.GetBranch(ctx, "g2/b")
+	commitInWorktree(t, s, "g2/a", "more.txt", "m\n")
+	if err := s.SetTaskStatus(ctx, "g2/b", store.TaskBlocked, "", "usage limit reached"); err != nil {
+		t.Fatal(err)
+	}
+
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || strings.Contains(r.stdout, "g2/b") {
+		t.Fatalf("sync: %+v", r)
+	}
+	tk, _ := s.GetTask(ctx, "g2/b")
+	if tk.Status != store.TaskBlocked || tk.Reason != "usage limit reached" || tk.RestackBlockedFrom != "" {
+		t.Errorf("g2/b = %s %q from %q", tk.Status, tk.Reason, tk.RestackBlockedFrom)
+	}
+	if after, _ := s.GetBranch(ctx, "g2/b"); after.HeadSHA != before.HeadSHA || after.BaseSHA != before.BaseSHA {
+		t.Errorf("branch changed: %+v -> %+v", before, after)
+	}
+}
+
+func TestSyncRetriesTaskBlockedByOlderRestackConflictAndRestoresIt(t *testing.T) {
+	root, _ := chainPublished(t, false)
+	ctx := context.Background()
+	s := openStore(t, root)
+	before, _ := s.GetBranch(ctx, "g2/b")
+	commitInWorktree(t, s, "g2/a", "more.txt", "m\n")
+	// Blocked the way sync did before it recorded the former status: no restack_from.
+	if err := s.SetTaskStatus(ctx, "g2/b", store.TaskBlocked, "",
+		"sync: restacking fan-in task onto origin/main (1234abcd) conflicts at replaying 5678 in b.txt; the branch is unchanged. Restack it by hand in x, then run `mill run --retry-blocked`"); err != nil {
+		t.Fatal(err)
+	}
+	attempts, _ := s.MaxAttemptN(ctx, "g2/b")
+
+	if r := run(t, root, nil, "sync"); r.code != ExitOK || !strings.Contains(r.stdout, "g2/b: restack succeeded; verified again") {
+		t.Fatalf("sync: %+v", r)
+	}
+	tk, _ := s.GetTask(ctx, "g2/b")
+	if tk.Status != store.TaskVerified || tk.Reason != "" || tk.RestackBlockedFrom != "" {
+		t.Fatalf("g2/b = %s %q from %q", tk.Status, tk.Reason, tk.RestackBlockedFrom)
+	}
+	if n, _ := s.MaxAttemptN(ctx, "g2/b"); n != attempts {
+		t.Errorf("attempts = %d, want %d: no agent may run", n, attempts)
+	}
+	after, _ := s.GetBranch(ctx, "g2/b")
+	if after.BaseSHA == before.BaseSHA || after.GateSHA != after.HeadSHA {
+		t.Errorf("branch not restacked and gated: %+v -> %+v", before, after)
+	}
+}
