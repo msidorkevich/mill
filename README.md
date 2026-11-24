@@ -102,6 +102,7 @@ mill review approve g1/a        # publish: one squashed commit force-pushed (wit
 mill review approve --goal g1   # approve every verified task, parents first; children of unpublished parents are queued
 mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
 mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
+mill stats models               # first-pass rate, avg attempts and avg $ by size, complexity and first-attempt model (--json)
 ```
 
 `mill goal graph g1` draws one row per task in dependency order, with ASCII lines from each
