@@ -373,11 +373,7 @@ func TestApproveDuringRunLeavesOtherGoalRunning(t *testing.T) {
 }
 
 func TestSyncDuringRunReportsRunningChildBusy(t *testing.T) {
-	// Product bug: the syncer's restackGoal skips tasks whose status is running, so it never
-	// claims the running child, never lists it under Busy and exits 0. Worse, the same sync
-	// cleans up the landed parent (worktree, branch mill/g2/p, origin/review/g2/p) while the
-	// running child is still based on it.
-	t.Skip("bug: mill sync skips a running child of a landed parent silently instead of reporting it busy, and cleans up the parent's branch under it")
+	// Sync must list the running g2/q as busy and keep the landed parent's branch under it.
 	root, bare, g, s, r := approveRepo(t)
 
 	// The running g2/q's parent lands: sync would restack g2/q, which the run is working on.

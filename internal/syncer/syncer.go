@@ -275,7 +275,21 @@ func Restore(ctx context.Context, o Options, id, onto string) (Result, error) {
 // A dirty worktree is kept; failures are reported in the result and never stop the sync.
 func (s *syncer) cleanLanded(ctx context.Context) {
 	mode := s.Cfg.CleanOnLand
-	if mode == "off" || len(s.res.Landed) == 0 {
+	if mode == "off" {
+		return
+	}
+	var candidates []string
+	for _, l := range s.res.Landed {
+		candidates = append(candidates, l.TaskID)
+	}
+	holders, extra, err := s.landedDependents(ctx, candidates)
+	if err != nil {
+		s.res.NotCleaned = append(s.res.NotCleaned, NotCleaned{Reason: fmt.Sprintf("find dependents of landed tasks: %v; run `mill sync` again", err)})
+		s.logf("not cleaned up: find dependents of landed tasks: %v", err)
+		return
+	}
+	candidates = append(candidates, extra...)
+	if len(candidates) == 0 {
 		return
 	}
 	o := cleanup.Options{Store: s.Store, Root: s.Paths.Root, Remote: s.Cfg.Remote, DeleteRemote: mode == "all", KeepDirty: true, Claimer: s.Claimer}
@@ -284,7 +298,12 @@ func (s *syncer) cleanLanded(ctx context.Context) {
 		s.logf("%s: not cleaned up: %s", id, reason)
 	}
 	cleaned := false
-	for _, l := range s.res.Landed {
+	for _, id := range candidates {
+		if hs := holders[id]; len(hs) > 0 {
+			notCleaned(id, "kept for running dependents: "+strings.Join(hs, ", "))
+			continue
+		}
+		l := Landed{TaskID: id}
 		r, err := cleanup.Task(ctx, o, l.TaskID)
 		if err != nil {
 			notCleaned(l.TaskID, fmt.Sprintf("load its branch: %v; run `mill clean`", err))
@@ -339,6 +358,86 @@ func (s *syncer) cleanLanded(ctx context.Context) {
 		s.res.NotCleaned = append(s.res.NotCleaned, NotCleaned{Reason: err.Error()})
 		s.logf("not cleaned up: %v", err)
 	}
+}
+
+// landedDependents finds, for the landed tasks in landedNow and for earlier landed tasks whose
+// branch still exists, the tasks that keep the branch alive: a dependent that is busy or
+// still has the branch as its recorded base. It returns those tasks by landed task, and the
+// earlier landed tasks (not in landedNow) that still have a branch to clean up.
+func (s *syncer) landedDependents(ctx context.Context, landedNow []string) (map[string][]string, []string, error) {
+	now := map[string]bool{}
+	for _, id := range landedNow {
+		now[id] = true
+	}
+	busy := map[string]bool{}
+	for _, b := range s.res.Busy {
+		busy[b.TaskID] = true
+	}
+	goals, err := s.Store.ListGoals(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	holders := map[string][]string{}
+	var extra []string
+	seen := map[string]bool{}
+	for _, g := range goals {
+		tasks, err := s.Store.GoalTasks(ctx, g.ID)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, t := range tasks {
+			if t.Status == store.TaskLanded {
+				// An earlier landed task kept for its dependents is cleaned once none holds it.
+				if now[t.ID] || seen[t.ID] {
+					continue
+				}
+				lb, err := s.Store.GetBranch(ctx, t.ID)
+				if errors.Is(err, store.ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					return nil, nil, fmt.Errorf("landed task %s: load its branch: %w", t.ID, err)
+				}
+				if gitx.BranchExists(ctx, s.Paths.Root, lb.Name) {
+					seen[t.ID] = true
+					extra = append(extra, t.ID)
+				}
+				continue
+			}
+			deps, err := s.Store.TaskDeps(ctx, t.ID)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, d := range deps {
+				dt, err := s.Store.GetTask(ctx, d)
+				if err != nil {
+					return nil, nil, err
+				}
+				if dt.Status != store.TaskLanded {
+					continue
+				}
+				db, err := s.Store.GetBranch(ctx, d)
+				if err != nil {
+					return nil, nil, fmt.Errorf("landed task %s has no branch: %w", d, err)
+				}
+				tb, err := s.Store.GetBranch(ctx, t.ID)
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					return nil, nil, fmt.Errorf("task %s: load its branch: %w", t.ID, err)
+				}
+				if t.Status == store.TaskRunning || busy[t.ID] || (err == nil && tb.Base == db.Name) {
+					if !now[d] && !gitx.BranchExists(ctx, s.Paths.Root, db.Name) {
+						continue
+					}
+					holders[d] = append(holders[d], t.ID)
+				}
+				if !now[d] && !seen[d] && gitx.BranchExists(ctx, s.Paths.Root, db.Name) {
+					seen[d] = true
+					extra = append(extra, d)
+				}
+			}
+		}
+	}
+	return holders, extra, nil
 }
 
 // detect marks every published task that reached the base branch as landed (GT6), and every
@@ -509,6 +608,12 @@ func (s *syncer) restackGoal(ctx context.Context, g store.Goal) error {
 			return err
 		}
 		// A task blocked by a restack conflict is retried: the cause may be gone.
+		if t.Status == store.TaskRunning {
+			if err := s.noteBusyRestack(ctx, t); err != nil {
+				return err
+			}
+			continue
+		}
 		if t.Status != store.TaskVerified && t.Status != store.TaskPublished && !restackBlocked(t) {
 			continue
 		}
@@ -517,6 +622,31 @@ func (s *syncer) restackGoal(ctx context.Context, g store.Goal) error {
 		}
 	}
 	return nil
+}
+
+// noteBusyRestack lists running task t in Result.Busy when it sits on the branch of a landed
+// dependency, so a restack is due that a running task cannot take. It never changes t.
+func (s *syncer) noteBusyRestack(ctx context.Context, t store.Task) error {
+	deps, err := s.Store.TaskDeps(ctx, t.ID)
+	if err != nil || len(deps) != 1 {
+		return err
+	}
+	dt, err := s.Store.GetTask(ctx, deps[0])
+	if err != nil || dt.Status != store.TaskLanded {
+		return err
+	}
+	br, err := s.Store.GetBranch(ctx, t.ID)
+	if err != nil {
+		return fmt.Errorf("task %s is %s but its branch cannot be loaded: %w", t.ID, t.Status, err)
+	}
+	db, err := s.Store.GetBranch(ctx, dt.ID)
+	if err != nil {
+		return fmt.Errorf("dependency %s of %s has no branch: %w", dt.ID, t.ID, err)
+	}
+	if br.Base != db.Name {
+		return nil // already moved off the dependency's branch
+	}
+	return s.withClaim(ctx, t.ID, t.Status, func() error { return nil })
 }
 
 // restackBlocked reports whether t is blocked because a restack of its branch conflicted.
