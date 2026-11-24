@@ -882,10 +882,52 @@ without arguments, with the single task `sync-busy-child` joined to the same run
 models` works; tasks from before `g14` show complexity `medium` and model `-` because neither
 was recorded then.
 
-## Fast gates: planning (operator decision 2026-11-24)
+## Fast gates: in progress (goal `g15`, operator decision 2026-11-24)
 
 Measured before planning: `internal/cli` 250s (210 tests), `internal/keeper` 82s,
 `internal/pipeline` 74s, `internal/gitx` 44s; no `t.Parallel()` anywhere; `t.Setenv` 25 times in
 11 test files. Scope: A parallel tests, B no duplicate test runs, fast polling in tests, a gate
 limit (`max_parallel_gates`), reused gate results for identical trees and pipelined restacks.
 The first goal planned with complexity ratings.
+
+Planned by mill's planner ($0.74, 11 tasks), the first plan with complexity ratings: the four
+test tasks and the env-injection task on opus (M/medium), the gate-slot chain on opus (M/high),
+`narrow-task-checks` on sonnet, the README on haiku. Landed so far (PRs #73–#78):
+`cli-env-injection`, `narrow-task-checks`, `cli-parallel-group-a`,
+`parallel-tests-infra-packages`, `parallel-tests-core-packages`, `gate-slots-store`; 611 tests
+now call `t.Parallel()` (0 before). `cli-parallel-group-b` timed out once (its implementer
+waited for its own 15-minute `-race -count=3` run and hit the 30-minute attempt limit with the
+work done); it was restarted with the instruction to leave that check to the gate.
+
+A `mill sync` during the run behaved as `sync-busy-child` intended: it landed the six merges,
+listed `cli-parallel-group-b` as busy, and kept `cli-env-injection`'s branch for it.
+
+### First measurement: the suite got slower
+
+`go test -count=1 ./...` on master after the six merges, with an agent running next to it
+(load 17–20 on 8 cores), so not a fair comparison:
+
+| Package | Before (serial) | After (parallel) |
+|---|---|---|
+| `internal/cli` | 250s | 432s |
+| `internal/keeper` | 82s | 144s |
+| `internal/pipeline` | 74s | 124s |
+| whole suite | ~5 min | ~7.5 min |
+
+Likely cause besides the load: oversubscription. `go test` runs up to 8 packages at once
+(`-p`) and each runs up to 8 tests at once (`-parallel`), so up to 64 tests at the same time,
+almost all creating git repositories and starting git processes. On 8 cores that thrashes
+process startup and file-system work instead of speeding up. The goal's target (`internal/cli`
+under 90s) is not met yet.
+
+- [ ] **Measure fairly** on an idle machine: the whole suite with default flags, then with
+      `-p 4`, `-parallel 4`, `-p 2 -parallel 4` and similar combinations, each twice; compare
+      with the serial baseline (`-parallel 1`).
+- [ ] **Set the best combination** in the `Makefile` (`GOTESTFLAGS`, so `check_cmd` uses it) in
+      a small PR, with the measured numbers in its description.
+- [ ] **If no setting beats the serial run,** say so here; the rest of `g15` (gate limit, reused
+      gate results, pipelined restacks) then carries the speed-up by saving whole gate runs,
+      and test speed needs another approach (fewer git processes per test, shared fixture
+      repositories).
+- [ ] Review the remaining `g15` tasks with this in mind: `max_parallel_gates = 1` matters more
+      than expected, because parallel test runs compete for the same cores.
