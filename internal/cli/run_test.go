@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/taskspec"
 )
 
 // fanInPlan has two independent tasks and one that depends on both.
@@ -173,9 +175,15 @@ func TestRunGoalRefusedWhileRunLockHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Release()
-	r := run(t, root, nil, "run", "g1")
-	if r.code != ExitError || !strings.Contains(r.stderr, "another mill run is active") {
-		t.Fatalf("run while locked: %+v", r)
+	want := fmt.Sprintf("mill run: a scheduler is already running for this repository (pid %d); it picks up newly approved goals and queued tasks, follow it with `mill watch`", os.Getpid())
+	for _, args := range [][]string{{"run", "g1"}, {"run"}} {
+		r := run(t, root, nil, args...)
+		if r.code != ExitError || !strings.Contains(r.stderr, want) {
+			t.Fatalf("%v while locked: %+v", args, r)
+		}
+		if strings.Contains(r.stdout, "started") {
+			t.Errorf("%v started work while locked:\n%s", args, r.stdout)
+		}
 	}
 }
 
@@ -185,8 +193,8 @@ func TestRunGoalRefusesDraftAndUsageErrors(t *testing.T) {
 	if r := run(t, root, nil, "run", "g1"); r.code != ExitError || !strings.Contains(r.stderr, "mill plan approve g1") {
 		t.Fatalf("draft: %+v", r)
 	}
-	if r := run(t, root, nil, "run"); r.code != ExitUsage || !strings.Contains(r.stderr, "mill run <goal>") {
-		t.Fatalf("no goal: %+v", r)
+	if r := run(t, root, nil, "run", "g1", "g2"); r.code != ExitUsage || !strings.Contains(r.stderr, "mill run [<goal>]") {
+		t.Fatalf("two goals: %+v", r)
 	}
 	if r := run(t, root, nil, "run", "g1", "--bogus"); r.code != ExitUsage {
 		t.Fatalf("bad flag: %+v", r)
@@ -233,5 +241,177 @@ func TestRunGoalRateLimitBlocksThenWaitOnLimitFinishes(t *testing.T) {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("output missing %q:\n%s", want, r.stdout)
 		}
+	}
+}
+
+// twoGoalRepo is goalRepo with the fan-in plan approved a second time, as g2.
+func twoGoalRepo(t *testing.T) string {
+	t.Helper()
+	script := `{"tasks": {
+  "g1/a": ` + taskSteps(`{"a.txt": "a\n"}`) + `,
+  "g1/b": ` + taskSteps(`{"b.txt": "b\n"}`) + `,
+  "g1/c": ` + taskSteps(`{"c.txt": "c\n"}`) + `,
+  "g2/a": ` + taskSteps(`{"a.txt": "a\n"}`) + `,
+  "g2/b": ` + taskSteps(`{"b.txt": "b\n"}`) + `,
+  "g2/c": ` + taskSteps(`{"c.txt": "c\n"}`) + `
+}}`
+	root := goalRepo(t, script, "")
+	if r := run(t, root, nil, "plan", "--file", writePlan(t, fanInPlan)); r.code != ExitOK {
+		t.Fatalf("plan g2: %+v", r)
+	}
+	if r := run(t, root, nil, "plan", "approve", "g2"); r.code != ExitOK {
+		t.Fatalf("approve g2: %+v", r)
+	}
+	return root
+}
+
+func taskStatuses(t *testing.T, root string, ids ...string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	got := map[string]string{}
+	for _, id := range ids {
+		tk, err := s.GetTask(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[id] = tk.Status
+	}
+	return got
+}
+
+func TestRunWithoutGoalRunsEveryApprovedGoal(t *testing.T) {
+	root := twoGoalRepo(t)
+	r := run(t, root, nil, "run")
+	if r.code != ExitOK {
+		t.Fatalf("run: %+v", r)
+	}
+	for _, want := range []string{"goal g1: done", "goal g2: done",
+		"Done: all tasks are verified, on branches mill/g1/*.", "Done: all tasks are verified, on branches mill/g2/*."} {
+		if !strings.Contains(r.stdout, want) {
+			t.Errorf("output missing %q:\n%s", want, r.stdout)
+		}
+	}
+	if n := strings.Count(r.stdout, "ID  STATUS"); n != 2 {
+		t.Errorf("want 2 goal views, got %d:\n%s", n, r.stdout)
+	}
+	for id, st := range taskStatuses(t, root, "g1/a", "g1/b", "g1/c", "g2/a", "g2/b", "g2/c") {
+		if st != store.TaskVerified {
+			t.Errorf("%s = %s; want verified", id, st)
+		}
+	}
+}
+
+func TestRunGoalLeavesOtherGoalsPending(t *testing.T) {
+	root := twoGoalRepo(t)
+	r := run(t, root, nil, "run", "g1")
+	if r.code != ExitOK {
+		t.Fatalf("run g1: %+v", r)
+	}
+	if strings.Contains(r.stdout, "g2/") || strings.Contains(r.stdout, "mill/g2/*") {
+		t.Errorf("run g1 touched g2:\n%s", r.stdout)
+	}
+	want := map[string]string{"g1/a": store.TaskVerified, "g1/b": store.TaskVerified, "g1/c": store.TaskVerified,
+		"g2/a": store.TaskPending, "g2/b": store.TaskPending, "g2/c": store.TaskPending}
+	for id, st := range taskStatuses(t, root, "g1/a", "g1/b", "g1/c", "g2/a", "g2/b", "g2/c") {
+		if st != want[id] {
+			t.Errorf("%s = %s; want %s", id, st, want[id])
+		}
+	}
+}
+
+func TestRunWithNothingReadyPrintsNothingToRun(t *testing.T) {
+	root := planRepo(t)
+	run(t, root, nil, "plan", "--file", writePlan(t, validPlan)) // a draft goal is not ready
+	r := run(t, root, nil, "run")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "Nothing to run: no approved goal or queued task is ready.") {
+		t.Fatalf("run: %+v", r)
+	}
+}
+
+func TestRunRecoversInterruptedTasksWhenItBecomesScheduler(t *testing.T) {
+	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "g1/a", store.TaskRunning, store.PhaseImplement, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := run(t, root, nil, "run"); r.code != ExitError || strings.Contains(r.stdout, "recovered") {
+		t.Fatalf("run while locked recovered or did not fail: %+v", r)
+	}
+	if err := l.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	r := run(t, root, nil, "run")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "recovered 1 interrupted task(s)") {
+		t.Fatalf("run: %+v", r)
+	}
+	if !strings.Contains(r.stdout, "goal g1: done") {
+		t.Errorf("output missing goal g1: done:\n%s", r.stdout)
+	}
+}
+
+func TestReadOnlyCommandsLeaveInterruptedTasksForRun(t *testing.T) {
+	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "g1/a", store.TaskRunning, store.PhaseImplement, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Read-only commands never become the scheduler, so they never recover the interrupted
+	// task.
+	for _, args := range [][]string{{"goal", "show", "g1"}, {"goal", "list"}, {"task", "list"}} {
+		r := run(t, root, nil, args...)
+		if strings.Contains(r.stdout, "recovered") || strings.Contains(r.stderr, "recovered") {
+			t.Errorf("mill %s printed recovery output: %+v", strings.Join(args, " "), r)
+		}
+	}
+	if st := taskStatuses(t, root, "g1/a")["g1/a"]; st != store.TaskRunning {
+		t.Fatalf("g1/a = %s after read-only commands; want %s", st, store.TaskRunning)
+	}
+
+	r := run(t, root, nil, "run")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "recovered 1 interrupted task(s)") {
+		t.Fatalf("run: %+v", r)
+	}
+}
+
+func TestRunReportsQueuedSingleTaskStatus(t *testing.T) {
+	root, tf := taskRepo(t, passScript, 1)
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := taskspec.Load(tf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateTask(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	r := run(t, root, nil, "run")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "task hello: verified") {
+		t.Fatalf("run: %+v", r)
 	}
 }
