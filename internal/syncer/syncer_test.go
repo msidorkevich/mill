@@ -3,8 +3,10 @@ package syncer
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,5 +285,119 @@ func TestSyncClaimsAreReleasedAfterLanding(t *testing.T) {
 	}
 	if claims, err := o.Store.ClaimedTasks(ctx); err != nil || len(claims) != 0 {
 		t.Errorf("claims left = %+v, %v", claims, err)
+	}
+}
+
+// attemptCommit commits name with body in dir as attempt n of task, with mill's trailers. An
+// empty body deletes name.
+func attemptCommit(t *testing.T, dir, task, name, body string, n int) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if body == "" {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	} else if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-q", "-m", fmt.Sprintf("mill: %s attempt %d", task, n), "-m", fmt.Sprintf("Mill-Task: %s\nMill-Attempt: %d", task, n))
+	return git(t, dir, "rev-parse", "HEAD")
+}
+
+// revertingGoal is a goal with task a and task b depending on it. b's attempt 1 adds b.txt,
+// attempt 2 adds a2.txt (b's version) and, when revert is set, attempt 3 deletes it again.
+// a then moves by a commit adding a2.txt with other content, so sync restacks b onto it.
+func revertingGoal(t *testing.T, revert bool) (Options, string) {
+	t.Helper()
+	o, _ := fixture(t)
+	ctx := context.Background()
+	root := o.Paths.Root
+	base := git(t, root, "rev-parse", "HEAD")
+	pl := plan.Plan{Goal: "stack", Tasks: []taskspec.Spec{
+		{ID: "a", Title: "Task a", Kind: "implement", Spec: "write", Acceptance: []string{"ok"}, Owns: []string{}, Size: "S"},
+		{ID: "b", Title: "Task b", Kind: "implement", Spec: "write", Acceptance: []string{"ok"}, Owns: []string{}, Size: "S", DependsOn: []string{"a"}},
+	}}
+	raw, _ := json.Marshal(pl)
+	g, err := o.Store.CreateGoal(ctx, "stack", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Store.ApproveGoal(ctx, g.ID, pl); err != nil {
+		t.Fatal(err)
+	}
+	aWT, bWT := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
+	git(t, root, "worktree", "add", "-q", "-b", "mill/g1/a", aWT, base)
+	aHead := writeCommit(t, aWT, "a.txt", "work on a")
+	git(t, root, "worktree", "add", "-q", "-b", "mill/g1/b", bWT, aHead)
+	attemptCommit(t, bWT, "g1/b", "b.txt", "b\n", 1)
+	bHead := attemptCommit(t, bWT, "g1/b", "a2.txt", "b's a2\n", 2)
+	if revert {
+		bHead = attemptCommit(t, bWT, "g1/b", "a2.txt", "", 3)
+	}
+	aNew := writeCommit(t, aWT, "a2.txt", "more work on a")
+	for _, br := range []store.Branch{
+		{TaskID: "g1/a", Name: "mill/g1/a", Base: "main", BaseSHA: base, StartSHA: base, HeadSHA: aNew, GateSHA: aNew, Worktree: aWT},
+		{TaskID: "g1/b", Name: "mill/g1/b", Base: "mill/g1/a", BaseSHA: aHead, StartSHA: aHead, HeadSHA: bHead, GateSHA: bHead, Worktree: bWT},
+	} {
+		if err := o.Store.SaveBranch(ctx, br); err != nil {
+			t.Fatal(err)
+		}
+		if err := o.Store.SetTaskStatus(ctx, br.TaskID, store.TaskVerified, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return o, aNew
+}
+
+func TestSyncRestackReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	o, aNew := revertingGoal(t, true)
+	ctx := context.Background()
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Restacked) != 1 || res.Restacked[0].TaskID != "g1/b" || len(res.Blocked) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+	br, _ := o.Store.GetBranch(ctx, "g1/b")
+	wt := br.Worktree
+	if parent := git(t, wt, "rev-parse", br.HeadSHA+"^"); parent != aNew || br.StartSHA != aNew {
+		t.Fatalf("head parent = %s, start = %s, want %s", parent, br.StartSHA, aNew)
+	}
+	if files := git(t, wt, "diff", "--name-status", aNew, br.HeadSHA); files != "A\tb.txt" {
+		t.Fatalf("net change = %q, want only b.txt added", files)
+	}
+	if got := git(t, wt, "show", br.HeadSHA+":a2.txt"); got != "a2.txt" {
+		t.Fatalf("a2.txt = %q, want a's version", got)
+	}
+	if subject := git(t, wt, "log", "-1", "--format=%s", br.HeadSHA); subject != "mill: g1/b attempts 1-3 (squashed for restack)" {
+		t.Fatalf("replayed commit subject = %q", subject)
+	}
+	if tk, _ := o.Store.GetTask(ctx, "g1/b"); tk.Status != store.TaskVerified {
+		t.Fatalf("status = %s", tk.Status)
+	}
+}
+
+func TestSyncRestackBlocksWhenNetChangeConflicts(t *testing.T) {
+	o, _ := revertingGoal(t, false)
+	ctx := context.Background()
+	before, _ := o.Store.GetBranch(ctx, "g1/b")
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Restacked) != 0 || len(res.Blocked) != 1 || res.Blocked[0].TaskID != "g1/b" {
+		t.Fatalf("result = %+v", res)
+	}
+	if tk, _ := o.Store.GetTask(ctx, "g1/b"); tk.Status != store.TaskBlocked || !strings.Contains(tk.Reason, "a2.txt") {
+		t.Fatalf("task = %s %q", tk.Status, tk.Reason)
+	}
+	after, _ := o.Store.GetBranch(ctx, "g1/b")
+	if head := git(t, after.Worktree, "rev-parse", "HEAD"); head != before.HeadSHA || after.HeadSHA != before.HeadSHA {
+		t.Fatalf("head = %s (recorded %s), want unchanged %s", head, after.HeadSHA, before.HeadSHA)
+	}
+	if st := git(t, after.Worktree, "status", "--porcelain"); st != "" {
+		t.Fatalf("worktree not clean: %q", st)
 	}
 }

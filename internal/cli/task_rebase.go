@@ -112,7 +112,7 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 		return ExitOK
 	}
 
-	newHead, err := gitx.RebaseOnto(ctx, br.Worktree, newTip, oldStart)
+	newHead, err := gitx.ReplayOnto(ctx, br.Worktree, id, newTip, oldStart)
 	var ce *gitx.RebaseConflictError
 	if errors.As(err, &ce) {
 		fmt.Fprintf(env.Stderr, "mill task rebase: rebasing %s onto %s (%s) conflicts; the rebase was aborted and the branch is unchanged.\nConflicting files:\n", id, newBase, short(newTip))

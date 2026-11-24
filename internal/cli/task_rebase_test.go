@@ -353,3 +353,93 @@ func TestTaskRebaseWorksWhileUnrelatedRunHoldsLock(t *testing.T) {
 	}
 	assertNoReviewClaims(t, root)
 }
+
+// addRevertingAttempts commits attempts 2 and 3 of task on its branch: attempt 2 writes name,
+// attempt 3 deletes it again, so the branch's net change does not touch name. It records the
+// new head and returns it.
+func addRevertingAttempts(t *testing.T, s *store.Store, task, name string) string {
+	t.Helper()
+	ctx := context.Background()
+	br, err := s.GetBranch(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := func(n int) {
+		gitC(t, br.Worktree, "add", "-A")
+		gitC(t, br.Worktree, "commit", "-q", "-m", fmt.Sprintf("mill: %s attempt %d", task, n), "-m", fmt.Sprintf("Mill-Task: %s\nMill-Attempt: %d", task, n))
+	}
+	if err := os.WriteFile(filepath.Join(br.Worktree, name), []byte("from "+task+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commit(2)
+	if err := os.Remove(filepath.Join(br.Worktree, name)); err != nil {
+		t.Fatal(err)
+	}
+	commit(3)
+	br.HeadSHA = gitC(t, br.Worktree, "rev-parse", "HEAD")
+	if err := s.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+	return br.HeadSHA
+}
+
+func TestTaskRebaseReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	root := soloRepo(t, `{"solo.txt": "s\n"}`)
+	ctx := context.Background()
+	s := openStore(t, root)
+	addRevertingAttempts(t, s, "solo", "clash.txt")
+	tip := commitOnMain(t, root, "clash.txt", "main\n")
+
+	r := run(t, root, nil, "task", "rebase", "solo")
+	if r.code != ExitOK {
+		t.Fatalf("rebase: %+v", r)
+	}
+	after, _ := s.GetBranch(ctx, "solo")
+	if parent := gitC(t, after.Worktree, "rev-parse", after.HeadSHA+"^"); parent != tip {
+		t.Errorf("replayed commit's parent = %s, want %s", parent, tip)
+	}
+	if files := gitC(t, root, "diff", "--name-only", tip, after.HeadSHA); files != "solo.txt" {
+		t.Errorf("net change = %q, want solo.txt only", files)
+	}
+	if got := gitC(t, root, "show", after.HeadSHA+":clash.txt"); got != "main" {
+		t.Errorf("clash.txt = %q, want main's", got)
+	}
+	if subject := gitC(t, root, "log", "-1", "--format=%s", after.HeadSHA); subject != "mill: solo attempts 1-3 (squashed for restack)" {
+		t.Errorf("replayed commit subject = %q", subject)
+	}
+}
+
+func TestTaskRebaseFanInReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
+	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+		t.Fatalf("run: %+v", r)
+	}
+	ctx := context.Background()
+	s := openStore(t, root)
+	a, _ := s.GetBranch(ctx, "g1/a")
+	b, _ := s.GetBranch(ctx, "g1/b")
+	addRevertingAttempts(t, s, "g1/c", "extra.txt")
+	// b's new commit writes extra.txt, which c's attempt 2 wrote differently.
+	if err := os.WriteFile(filepath.Join(b.Worktree, "extra.txt"), []byte("e\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitC(t, b.Worktree, "add", "extra.txt")
+	gitC(t, b.Worktree, "commit", "-q", "-m", "extra")
+	bTip := gitC(t, b.Worktree, "rev-parse", "HEAD")
+	setStatus(t, root, "g1/c", store.TaskBlocked)
+
+	r := run(t, root, nil, "task", "rebase", "g1/c")
+	if r.code != ExitOK || !strings.Contains(r.stdout, "merged g1/a") {
+		t.Fatalf("rebase: %+v", r)
+	}
+	after, _ := s.GetBranch(ctx, "g1/c")
+	if got := gitC(t, root, "rev-list", "--parents", "-n1", after.StartSHA); got != after.StartSHA+" "+bTip+" "+a.HeadSHA {
+		t.Errorf("start parents = %q, want b tip %s and a head %s", got, bTip, a.HeadSHA)
+	}
+	if files := gitC(t, root, "diff", "--name-only", after.StartSHA, after.HeadSHA); files != "c.txt" {
+		t.Errorf("own changes = %q, want c.txt only", files)
+	}
+	if subject := gitC(t, root, "log", "-1", "--format=%s", after.HeadSHA); subject != "mill: g1/c attempts 1-3 (squashed for restack)" {
+		t.Errorf("replayed commit subject = %q", subject)
+	}
+}

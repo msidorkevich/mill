@@ -1,6 +1,7 @@
 // Package fanin restacks a task with several dependencies (a fan-in task) onto them: it resets
 // the branch to its deepest parent's head (or to the remote base branch tip when that parent
-// landed), merges the other parents that have not landed and replays the task's own commits.
+// landed), merges the other parents that have not landed and replays the net change of the
+// task's own commits as one squashed commit.
 // Start applies the same rules to the starting point of a new task branch.
 //
 // It is shared by the keeper, sync and `mill task rebase`; it lives in its own package because
@@ -460,9 +461,10 @@ func (e *ConflictError) Error() string {
 func (e *ConflictError) Unwrap() error { return e.Err }
 
 // Restack rebuilds the task's branch on o.Target: it resets to the base, merges the other
-// parents that have not landed (with rerere) and replays the task's own commits, the commits
-// after its recorded start that are not merges. On any failure the branch is put back at its
-// old head; an error from the restore is joined to the failure.
+// parents that have not landed (with rerere) and replays the net change of the task's own
+// commits (the commits after its recorded start that are not merges), squashed into
+// one commit. On any failure the branch is put back at its old head; an error from the restore
+// is joined to the failure.
 func Restack(ctx context.Context, o Options) (Result, error) {
 	br, tg := o.Branch, o.Target
 	oldStart := br.StartSHA
@@ -523,6 +525,11 @@ func Restack(ctx context.Context, o Options) (Result, error) {
 
 	if _, err := gitx.Run(ctx, wt, "checkout", "-q", br.Name); err != nil {
 		return fail(fmt.Errorf("check out %s again: %w", br.Name, err))
+	}
+	// Replay the net change of the own commits, so attempts that undo each other cannot
+	// conflict on their own.
+	if _, _, err := gitx.SquashOwn(ctx, wt, br.TaskID, oldStart); err != nil {
+		return fail(err)
 	}
 	st, err := gitx.RebaseStart(ctx, wt, start, oldStart, true)
 	if err != nil {

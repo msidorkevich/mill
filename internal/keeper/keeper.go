@@ -393,8 +393,8 @@ func (k *keeper) resolve(ctx context.Context, t store.Task, wt, onto string, bas
 	return "", nil, ""
 }
 
-// rebase replays the task's own commits onto tip (KP6), resolving stops with rerere or the
-// resolver agent. Any failure puts the branch back where it was and blocks the task.
+// rebase replays the net change of the task's own commits onto tip (KP6), resolving stops
+// with rerere or the resolver agent. Any failure puts the branch back where it was and blocks the task.
 func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto, tip string, landed bool) error {
 	if ok, err := k.preflight(ctx, t, br, onto); err != nil || !ok {
 		return err
@@ -427,6 +427,11 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 			onto, short(tip), step, where, detail, t.ID))
 	}
 
+	// Replay the net change of the task's commits, so attempts that undo each other cannot
+	// conflict on their own.
+	if _, _, err := gitx.SquashOwn(ctx, wt, t.ID, oldStart); err != nil {
+		return fail("squashing the own commits", nil, err.Error())
+	}
 	st, err := gitx.RebaseStart(ctx, wt, tip, oldStart, true)
 	if err != nil {
 		return fail("the rebase", nil, err.Error())
