@@ -163,13 +163,20 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
 			return p.block(ctx, t.ID, store.PhaseImplement, reason, out, err)
 		}
+		implModel, implWhy, err := p.implementerModel(ctx, t, n)
+		if err != nil {
+			return out, err
+		}
+		if implModel == "" {
+			return p.block(ctx, t.ID, store.PhaseImplement, implWhy, out, nil)
+		}
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseImplement, ""); err != nil {
 			return out, err
 		}
 		implPrompt := prompt.Implementer(prompt.ImplementerInput{
 			Task: t.Spec, GateCmds: nonEmpty(gateCmds), Attempt: n - prev, MaxAttempts: p.Cfg.MaxAttempts, Findings: findings,
 		})
-		ar, err := p.agent(ctx, t, n, runner.RoleImplementer, implPrompt, prompt.ImplementerSchema, ImplementerTools, limits, br.Worktree, logDir)
+		ar, err := p.agent(ctx, t, n, runner.RoleImplementer, implModel, implWhy, implPrompt, prompt.ImplementerSchema, ImplementerTools, limits, br.Worktree, logDir)
 		if err != nil {
 			return out, err
 		}
@@ -316,7 +323,8 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside, Flaky: flaky})
-		vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
+		verModel, verWhy := p.verifierModel(implModel)
+		vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
 		if err != nil {
 			return out, err
 		}
@@ -512,11 +520,18 @@ type agentRun struct {
 }
 
 // agent runs one agent with budget enforcement (BG1) and records the attempt.
-func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.Role, promptText string,
+// model is the model the agent runs on and modelWhy why it was chosen; both are recorded on
+// the attempt.
+func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.Role, model, modelWhy, promptText string,
 	schema json.RawMessage, tools []string, limits budget.Limits, dir, logDir string) (agentRun, error) {
 	id, err := p.Store.StartAttempt(ctx, t.ID, n, string(role))
 	if err != nil {
 		return agentRun{}, err
+	}
+	if err := p.Store.SetAttemptModel(ctx, id, model, modelWhy); err != nil {
+		// The attempt never ran: close it so it does not stay running.
+		ferr := p.Store.FinishAttempt(context.WithoutCancel(ctx), id, "error", budget.Usage{}, false, "", "")
+		return agentRun{}, errors.Join(err, ferr)
 	}
 	rctx, cancel := context.WithTimeout(ctx, p.Cfg.Runner.AttemptTimeout.Duration)
 	defer cancel()
@@ -526,11 +541,11 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 	var over string
 	var startErr error
 	started := p.now()
-	live := p.startLiveUsage(ctx, id, t.ID, p.Cfg.Model(t.Size))
+	live := p.startLiveUsage(ctx, id, t.ID, model)
 	defer live.stop() // also on a runner panic; the normal path stops it explicitly below
 	res, runErr := p.Runner.Run(rctx, runner.Request{
 		Role: role, TaskID: t.ID, Prompt: promptText, Dir: dir, Schema: schema, Tools: tools,
-		Model: p.Cfg.Model(t.Size), Budget: limits, Count: p.Cfg.Budget.Count,
+		Model: model, Budget: limits, Count: p.Cfg.Budget.Count,
 		Name:   fmt.Sprintf("%s a%d %s", t.ID, n, role),
 		LogDir: logDir, ProtectedPaths: []string{p.Paths.MillDir}, Env: p.env(p.AgentEnvAllow),
 		OnStart: func(st runner.Started) {
