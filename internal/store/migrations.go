@@ -141,6 +141,16 @@ ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT '';
 ALTER TABLE attempts ADD COLUMN model TEXT NOT NULL DEFAULT '';
 ALTER TABLE attempts ADD COLUMN model_reason TEXT NOT NULL DEFAULT '';
 `,
+	// 11: gate slots, bounding the gates that run at once across mill processes.
+	`
+CREATE TABLE gate_slots (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	task_id     TEXT NOT NULL,
+	attempt     INTEGER NOT NULL,
+	pid         INTEGER NOT NULL,
+	acquired_at TEXT NOT NULL
+);
+`,
 }
 
 // LatestVersion is the schema version this build writes.

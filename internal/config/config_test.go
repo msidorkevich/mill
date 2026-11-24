@@ -450,3 +450,28 @@ func TestDefaultTOMLHasModelsAndRoles(t *testing.T) {
 		t.Error("DefaultTOML still has [sizes.*] blocks")
 	}
 }
+
+func TestMaxParallelGatesDefaultsToOne(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.MaxParallelGates != 1 {
+		t.Fatalf("MaxParallelGates = %d, want 1", cfg.MaxParallelGates)
+	}
+	cfg, err = Parse("max_parallel_gates = 3")
+	if err != nil || cfg.MaxParallelGates != 3 {
+		t.Fatalf("Parse(max_parallel_gates = 3) = %d, %v; want 3", cfg.MaxParallelGates, err)
+	}
+}
+
+func TestMaxParallelGatesBelowOneIsRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{"0", "-1"} {
+		_, err := Parse("max_parallel_gates = " + v)
+		if err == nil || !strings.Contains(err.Error(), "max_parallel_gates must be >= 1, got "+v) {
+			t.Errorf("max_parallel_gates = %s: err = %v, want a clear >= 1 error", v, err)
+		}
+	}
+}
