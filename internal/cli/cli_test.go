@@ -83,6 +83,7 @@ func tools(have map[string]string) *doctor.Options {
 var machine = map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)"}
 
 func TestUsageAndUnknownCommand(t *testing.T) {
+	t.Parallel()
 	if r := run(t, t.TempDir(), nil); r.code != ExitUsage || !strings.Contains(r.stderr, "Usage") {
 		t.Fatalf("no args: %+v", r)
 	}
@@ -98,6 +99,7 @@ func TestUsageAndUnknownCommand(t *testing.T) {
 }
 
 func TestVersion(t *testing.T) {
+	t.Parallel()
 	r := run(t, t.TempDir(), nil, "version")
 	if r.code != ExitOK || r.stdout != "mill dev\n" {
 		t.Fatalf("version: %+v", r)
@@ -126,6 +128,7 @@ func TestInitOutsideGitRepo(t *testing.T) {
 }
 
 func TestInitCreatesLayoutFromSubdirectory(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	sub := filepath.Join(root, "pkg", "x")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
@@ -164,6 +167,7 @@ func TestInitCreatesLayoutFromSubdirectory(t *testing.T) {
 }
 
 func TestInitGitignoreKeepsStateOutOfGit(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	if r := run(t, root, nil, "init"); r.code != ExitOK {
 		t.Fatalf("init: %+v", r)
@@ -195,6 +199,7 @@ func gitBranch(t *testing.T, root string) string {
 }
 
 func TestInitWritesCurrentBranchAsBase(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"master", "main", "trunk"} {
 		root := gitRepo(t) // no commits: unborn branch
 		if out, err := exec.Command("git", "-C", root, "symbolic-ref", "HEAD", "refs/heads/"+name).CombinedOutput(); err != nil {
@@ -215,6 +220,7 @@ func TestInitWritesCurrentBranchAsBase(t *testing.T) {
 }
 
 func TestInitDetachedHeadKeepsMainAndAsksToCheck(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	git := func(args ...string) {
 		t.Helper()
@@ -236,6 +242,7 @@ func TestInitDetachedHeadKeepsMainAndAsksToCheck(t *testing.T) {
 }
 
 func TestInitExistingConfigKeepsBranchAndReportsIt(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	p := project.PathsAt(root)
 	if err := os.MkdirAll(p.MillDir, 0o755); err != nil {
@@ -255,6 +262,7 @@ func TestInitExistingConfigKeepsBranchAndReportsIt(t *testing.T) {
 }
 
 func TestInitIsIdempotentAndKeepsConfig(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	if r := run(t, root, nil, "init"); r.code != ExitOK {
 		t.Fatalf("first init: %+v", r)
@@ -274,6 +282,7 @@ func TestInitIsIdempotentAndKeepsConfig(t *testing.T) {
 }
 
 func TestInitRefusesInvalidExistingConfig(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	p := project.PathsAt(root)
 	if err := os.MkdirAll(p.MillDir, 0o755); err != nil {
@@ -289,6 +298,7 @@ func TestInitRefusesInvalidExistingConfig(t *testing.T) {
 }
 
 func TestDoctorAfterInit(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	if r := run(t, root, nil, "init"); r.code != ExitOK {
 		t.Fatalf("init: %+v", r)
@@ -304,6 +314,7 @@ func TestDoctorAfterInit(t *testing.T) {
 }
 
 func TestDoctorFailsWithExitCode3(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t) // not initialized
 	r := run(t, root, tools(machine), "doctor")
 	if r.code != ExitCheckFailed || !strings.Contains(r.stdout, "FAIL  init") {
@@ -312,6 +323,7 @@ func TestDoctorFailsWithExitCode3(t *testing.T) {
 }
 
 func TestDoctorJSON(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	run(t, root, nil, "init")
 	r := run(t, root, tools(machine), "doctor", "--json")
@@ -332,6 +344,7 @@ func TestDoctorJSON(t *testing.T) {
 }
 
 func TestInitAppendsMissingGitignoreLines(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	p := project.PathsAt(root)
 	if err := os.MkdirAll(p.MillDir, 0o755); err != nil {

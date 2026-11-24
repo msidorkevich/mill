@@ -62,6 +62,7 @@ func TestRunFailsWhenHerdrHostIsUnavailableAndHostFlagOverrides(t *testing.T) {
 }
 
 func TestInvalidHostFlagIsUsageError(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	if r := run(t, root, nil, "task", "run", "--file", tf, "--host", "bogus"); r.code != ExitUsage || !strings.Contains(r.stderr, "--host must be") {
 		t.Fatalf("task run: %+v", r)

@@ -33,6 +33,7 @@ func diamondGoal(t *testing.T) string {
 }
 
 func TestGoalGraphDrawsLanesInDependencyOrder(t *testing.T) {
+	t.Parallel()
 	root := diamondGoal(t)
 	r := run(t, root, nil, "goal", "graph", "g1")
 	if r.code != ExitOK {
@@ -52,6 +53,7 @@ func TestGoalGraphDrawsLanesInDependencyOrder(t *testing.T) {
 }
 
 func TestGoalGraphMermaidPrintsFlowchart(t *testing.T) {
+	t.Parallel()
 	root := diamondGoal(t)
 	r := run(t, root, nil, "goal", "graph", "--mermaid", "g1")
 	if r.code != ExitOK {
@@ -81,6 +83,7 @@ func TestGoalGraphMermaidPrintsFlowchart(t *testing.T) {
 }
 
 func TestGoalGraphUnknownGoalExitsOne(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	r := run(t, root, nil, "goal", "graph", "g9")
 	if r.code != ExitError || !strings.Contains(r.stderr, "mill goal graph") {
@@ -92,6 +95,7 @@ func TestGoalGraphUnknownGoalExitsOne(t *testing.T) {
 }
 
 func TestGoalGraphDraftGoalHasNoTasks(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, diamondPlan))
 	r := run(t, root, nil, "goal", "graph", "g1")

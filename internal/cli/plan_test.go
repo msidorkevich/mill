@@ -55,6 +55,7 @@ func writePlan(t *testing.T, body string) string {
 }
 
 func TestPlanFileCreatesDraftGoal(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	r := run(t, root, nil, "plan", "--file", writePlan(t, overlapPlan))
 	if r.code != ExitOK {
@@ -72,6 +73,7 @@ func TestPlanFileCreatesDraftGoal(t *testing.T) {
 }
 
 func TestPlanFileInvalidReportsEveryProblemAndCreatesNoGoal(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	r := run(t, root, nil, "plan", "--file", writePlan(t, invalidPlan))
 	if r.code != ExitError {
@@ -107,6 +109,7 @@ func plannerRepo(t *testing.T, outputs ...string) string {
 }
 
 func TestPlanGoalTextCreatesDraftGoalWithPlanningCost(t *testing.T) {
+	t.Parallel()
 	root := plannerRepo(t, invalidPlan, validPlan)
 	r := run(t, root, nil, "plan", "add a greeting")
 	if r.code != ExitOK {
@@ -128,6 +131,7 @@ func TestPlanGoalTextCreatesDraftGoalWithPlanningCost(t *testing.T) {
 }
 
 func TestPlanGoalTextInvalidTwiceSavesPlanAndCreatesNoGoal(t *testing.T) {
+	t.Parallel()
 	root := plannerRepo(t, invalidPlan, invalidPlan)
 	r := run(t, root, nil, "plan", "add a greeting")
 	if r.code != ExitError {
@@ -160,6 +164,7 @@ func TestPlanGoalTextInvalidTwiceSavesPlanAndCreatesNoGoal(t *testing.T) {
 }
 
 func TestPlanShowDependencyOrderAndUntrustedChecks(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
 	r := run(t, root, nil, "plan", "show", "g1")
@@ -190,6 +195,7 @@ func TestPlanShowDependencyOrderAndUntrustedChecks(t *testing.T) {
 }
 
 func TestPlanEditFileReplacesDraftPlan(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
 	r := run(t, root, nil, "plan", "edit", "g1", "--file", writePlan(t, overlapPlan))
@@ -202,6 +208,7 @@ func TestPlanEditFileReplacesDraftPlan(t *testing.T) {
 }
 
 func TestPlanEditFileInvalidChangesNothing(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
 	r := run(t, root, nil, "plan", "edit", "g1", "--file", writePlan(t, invalidPlan))
@@ -214,6 +221,7 @@ func TestPlanEditFileInvalidChangesNothing(t *testing.T) {
 }
 
 func TestPlanEditApprovedGoalFails(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
 	run(t, root, nil, "plan", "approve", "g1")
@@ -273,6 +281,7 @@ func TestPlanEditInvalidEditorResultKeepsFile(t *testing.T) {
 }
 
 func TestPlanApproveCreatesTasksAndRefusesNonDraft(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
 	r := run(t, root, nil, "plan", "approve", "g1")
@@ -294,6 +303,7 @@ func TestPlanApproveCreatesTasksAndRefusesNonDraft(t *testing.T) {
 }
 
 func TestGoalListAndShowJSON(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	if r := run(t, root, nil, "goal", "list"); r.code != ExitOK || !strings.Contains(r.stdout, "no goals") {
 		t.Errorf("empty list: %+v", r)
@@ -340,6 +350,7 @@ func TestGoalListAndShowJSON(t *testing.T) {
 }
 
 func TestGoalListCountsPublishedAndLandedTasksAsDone(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
 	run(t, root, nil, "plan", "approve", "g1")
@@ -351,6 +362,7 @@ func TestGoalListCountsPublishedAndLandedTasksAsDone(t *testing.T) {
 }
 
 func TestPlanGoalTextRateLimitedPrintsResetAndCreatesNoGoal(t *testing.T) {
+	t.Parallel()
 	root := plannerRepo(t) // configures the fake runner; the script is replaced below
 	resets := time.Now().Add(2 * time.Hour).Truncate(time.Second)
 	script := `{"planner": [{"rate_limit": {"type": "seven_day", "resets_at": "` + resets.Format(time.RFC3339) + `"}}]}`

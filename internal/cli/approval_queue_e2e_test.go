@@ -71,6 +71,7 @@ func queueChild(t *testing.T) (root, bare string) {
 }
 
 func TestKeepPublishesQueuedChildAfterParentLands(t *testing.T) {
+	t.Parallel()
 	root, bare := queueChild(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -142,6 +143,7 @@ func TestKeepPublishesQueuedChildAfterParentLands(t *testing.T) {
 }
 
 func TestKeepListsQueuedTaskWaitingForUnpublishedParent(t *testing.T) {
+	t.Parallel()
 	root, bare := queueChild(t)
 
 	r := run(t, root, nil, "keep")
@@ -174,6 +176,7 @@ func TestKeepListsQueuedTaskWaitingForUnpublishedParent(t *testing.T) {
 }
 
 func TestKeepBlocksQueuedTaskWhosePublishIsRefused(t *testing.T) {
+	t.Parallel()
 	root, bare := queueChild(t)
 	ctx := context.Background()
 	if r := run(t, root, nil, "review", "approve", "g2/a"); r.code != ExitOK {
@@ -212,6 +215,7 @@ func TestKeepBlocksQueuedTaskWhosePublishIsRefused(t *testing.T) {
 }
 
 func TestReviewChangesRemovesTaskFromQueue(t *testing.T) {
+	t.Parallel()
 	root, bare := queueChild(t)
 	ctx := context.Background()
 	if r := run(t, root, nil, "review", "changes", "g2/b", "-m", "rename the file"); r.code != ExitOK {

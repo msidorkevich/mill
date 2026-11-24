@@ -51,6 +51,7 @@ func startSleeper(t *testing.T) (*exec.Cmd, chan struct{}) {
 }
 
 func TestRecoveryKillsLeftoverWorker(t *testing.T) {
+	t.Parallel()
 	s, id := recoverStore(t)
 	cmd, done := startSleeper(t)
 	if err := s.SetAttemptProcess(context.Background(), id, cmd.Process.Pid, "sleep", "raw"); err != nil {
@@ -72,6 +73,7 @@ func TestRecoveryKillsLeftoverWorker(t *testing.T) {
 }
 
 func TestRecoveryLeavesMismatchedAndMissingProcessesAlone(t *testing.T) {
+	t.Parallel()
 	s, id := recoverStore(t)
 	cmd, done := startSleeper(t)
 	// Command does not match: the pid was reused by something else.
@@ -108,6 +110,7 @@ func TestRecoveryLeavesMismatchedAndMissingProcessesAlone(t *testing.T) {
 }
 
 func TestRecoveryRecordsUsageFromStreamFiles(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s, id := recoverStore(t)
 	dir := t.TempDir()
@@ -190,6 +193,7 @@ func saveWorktree(t *testing.T, s *store.Store, worktree string) {
 }
 
 func TestRecoveryKillsChildrenOfExitedAgent(t *testing.T) {
+	t.Parallel()
 	s, id := recoverStore(t)
 	wt := t.TempDir()
 	saveWorktree(t, s, wt)
@@ -218,6 +222,7 @@ func TestRecoveryKillsChildrenOfExitedAgent(t *testing.T) {
 }
 
 func TestRecoveryLeavesLeaderlessMemberOutsideWorktreeAlone(t *testing.T) {
+	t.Parallel()
 	s, id := recoverStore(t)
 	saveWorktree(t, s, t.TempDir())
 	pgid, child := startOrphanGroup(t, t.TempDir())
@@ -238,6 +243,7 @@ func TestRecoveryLeavesLeaderlessMemberOutsideWorktreeAlone(t *testing.T) {
 }
 
 func TestRecoveryKillsNothingWithoutRecordedWorktree(t *testing.T) {
+	t.Parallel()
 	s, id := recoverStore(t)
 	pgid, child := startOrphanGroup(t, t.TempDir())
 	if err := s.SetAttemptProcess(context.Background(), id, pgid, "sh", "raw"); err != nil {
@@ -256,6 +262,7 @@ func TestRecoveryKillsNothingWithoutRecordedWorktree(t *testing.T) {
 }
 
 func TestGroupMembersEmptyForMissingGroup(t *testing.T) {
+	t.Parallel()
 	gone := exec.Command("true")
 	gone.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := gone.Run(); err != nil {

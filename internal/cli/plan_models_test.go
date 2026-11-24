@@ -35,6 +35,7 @@ func planModelsGoal(t *testing.T) string {
 }
 
 func TestPlanShowModelsTextListsComplexityModelAndCost(t *testing.T) {
+	t.Parallel()
 	root := planModelsGoal(t)
 	r := run(t, root, nil, "plan", "show", "g1")
 	if r.code != ExitOK {
@@ -62,6 +63,7 @@ func TestPlanShowModelsTextListsComplexityModelAndCost(t *testing.T) {
 }
 
 func TestPlanShowModelsJSONIncludesModelAndCost(t *testing.T) {
+	t.Parallel()
 	root := planModelsGoal(t)
 	r := run(t, root, nil, "plan", "show", "g1", "--json")
 	if r.code != ExitOK {
@@ -100,6 +102,7 @@ func TestPlanShowModelsJSONIncludesModelAndCost(t *testing.T) {
 }
 
 func TestPlanShowModelsAllUnpricedPrintsUnknownAndExitsZero(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	body := `{"goal": "U", "tasks": [{"id": "a", "title": "A", "kind": "implement", "spec": "x",
 	  "acceptance": ["x"], "checks": ["true"], "owns": ["a.go"], "size": "S", "model": "mystery"}]}`
@@ -118,6 +121,7 @@ func TestPlanShowModelsAllUnpricedPrintsUnknownAndExitsZero(t *testing.T) {
 }
 
 func TestPlannerRoleModelIsUsedForPlanning(t *testing.T) {
+	t.Parallel()
 	root := plannerRepo(t, validPlan)
 	cfg := "check_cmd = \"true\"\n[runner]\nkind = \"fake\"\nfake_script = \"script.json\"\n" +
 		"[roles]\nplanner = \"fable\"\nverifier_min = \"sonnet\"\n"

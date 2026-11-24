@@ -28,6 +28,7 @@ func crashScript(bDelayMS string) string {
 }
 
 func TestCrashKilledRunRecoversWithoutDuplicates(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go tool not available")
 	}
