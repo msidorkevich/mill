@@ -64,8 +64,9 @@ func watchRepo(t *testing.T) string {
 }
 
 func TestWatchOnceListsRunningAttemptsWithLatestActionAndCounts(t *testing.T) {
+	t.Parallel()
 	root := watchRepo(t)
-	r := run(t, root, nil, "watch", "--once")
+	r := run(t, root, nil, "watch", "--once", "--interval", groupBWatchInterval)
 	if r.code != ExitOK {
 		t.Fatalf("watch: %+v", r)
 	}
@@ -80,38 +81,41 @@ func TestWatchOnceListsRunningAttemptsWithLatestActionAndCounts(t *testing.T) {
 }
 
 func TestWatchWithoutTerminalPrintsOnceAndExits(t *testing.T) {
+	t.Parallel()
 	root := watchRepo(t)
-	r := run(t, root, nil, "watch")
+	r := run(t, root, nil, "watch", "--interval", groupBWatchInterval)
 	if r.code != ExitOK || strings.Contains(r.stdout, "\x1b[") || !strings.Contains(r.stdout, "g1/a") {
 		t.Fatalf("watch: %+v", r)
 	}
 }
 
 func TestWatchNarrowsToGoalOrTaskAndRejectsUnknownIds(t *testing.T) {
+	t.Parallel()
 	root := watchRepo(t)
-	if r := run(t, root, nil, "watch", "g1", "--once"); r.code != ExitOK || !strings.Contains(r.stdout, "goal g1") || !strings.Contains(r.stdout, "g1/a") {
+	if r := run(t, root, nil, "watch", "g1", "--once", "--interval", groupBWatchInterval); r.code != ExitOK || !strings.Contains(r.stdout, "goal g1") || !strings.Contains(r.stdout, "g1/a") {
 		t.Fatalf("goal: %+v", r)
 	}
-	if r := run(t, root, nil, "watch", "g1/a", "--once"); r.code != ExitOK || !strings.Contains(r.stdout, "1 running") {
+	if r := run(t, root, nil, "watch", "g1/a", "--once", "--interval", groupBWatchInterval); r.code != ExitOK || !strings.Contains(r.stdout, "1 running") {
 		t.Fatalf("task: %+v", r)
 	}
-	r := run(t, root, nil, "watch", "g1/b", "--once")
+	r := run(t, root, nil, "watch", "g1/b", "--once", "--interval", groupBWatchInterval)
 	if r.code != ExitOK || !strings.Contains(r.stdout, "nothing running") || !strings.Contains(r.stdout, "1 pending") {
 		t.Fatalf("idle task: %+v", r)
 	}
 	for _, id := range []string{"g9", "g1/zzz"} {
-		if r := run(t, root, nil, "watch", id, "--once"); r.code != ExitError || !strings.Contains(r.stderr, id) {
+		if r := run(t, root, nil, "watch", id, "--once", "--interval", groupBWatchInterval); r.code != ExitError || !strings.Contains(r.stderr, id) {
 			t.Errorf("watch %s: %+v", id, r)
 		}
 	}
 }
 
 func TestWatchSaysNothingRunningWhenIdle(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	if r := run(t, root, nil, "init"); r.code != ExitOK {
 		t.Fatalf("init: %+v", r)
 	}
-	r := run(t, root, nil, "watch", "--once")
+	r := run(t, root, nil, "watch", "--once", "--interval", groupBWatchInterval)
 	if r.code != ExitOK || !strings.Contains(r.stdout, "nothing running") {
 		t.Fatalf("watch: %+v", r)
 	}
@@ -155,6 +159,7 @@ func stageRepo(t *testing.T, phase string) (string, time.Time) {
 }
 
 func TestWatchListsGateStageWithElapsedAndGateLogLastLine(t *testing.T) {
+	t.Parallel()
 	root, at := stageRepo(t, store.PhaseGate)
 	paths := project.PathsAt(root)
 	dir := filepath.Join(paths.Runs, "g1/a", "a1")
@@ -186,6 +191,7 @@ func TestWatchListsGateStageWithElapsedAndGateLogLastLine(t *testing.T) {
 }
 
 func TestWatchListsOtherRunningStages(t *testing.T) {
+	t.Parallel()
 	root, at := stageRepo(t, "commit")
 	paths := project.PathsAt(root)
 	s, err := store.Open(context.Background(), paths.DB, store.Options{})

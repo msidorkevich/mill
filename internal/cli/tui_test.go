@@ -6,6 +6,7 @@ import (
 )
 
 func TestHelpListsTUI(t *testing.T) {
+	t.Parallel()
 	r := run(t, t.TempDir(), nil, "help")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "tui      interactive terminal UI") {
 		t.Fatalf("help: %+v", r)
@@ -13,6 +14,7 @@ func TestHelpListsTUI(t *testing.T) {
 }
 
 func TestTUIHelpFlagExitsZero(t *testing.T) {
+	t.Parallel()
 	r := run(t, t.TempDir(), nil, "tui", "-h")
 	if r.code != ExitOK || !strings.Contains(r.stderr, "mill tui") {
 		t.Fatalf("tui -h: %+v", r)
@@ -20,6 +22,7 @@ func TestTUIHelpFlagExitsZero(t *testing.T) {
 }
 
 func TestTUIOutsideProjectFails(t *testing.T) {
+	t.Parallel()
 	r := run(t, gitRepo(t), nil, "tui")
 	if r.code != ExitError || !strings.Contains(r.stderr, "mill tui:") {
 		t.Fatalf("tui outside an initialized repo: %+v", r)

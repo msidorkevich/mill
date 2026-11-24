@@ -142,7 +142,7 @@ func startRun(t *testing.T, root string, g *gates) *asyncRun {
 	t.Helper()
 	r := &asyncRun{stdout: &syncBuffer{}, stderr: &syncBuffer{}, done: make(chan int, 1)}
 	go func() {
-		r.done <- Run(context.Background(), Env{Stdout: r.stdout, Stderr: r.stderr, Dir: root}, []string{"run"})
+		r.done <- Run(context.Background(), Env{Stdout: r.stdout, Stderr: r.stderr, Dir: root, SchedulerPoll: groupBPoll, TaskRunPoll: groupBPoll}, []string{"run"})
 	}()
 	t.Cleanup(func() {
 		if err := os.WriteFile(filepath.Join(g.dir, "all"), nil, 0o644); err != nil {
@@ -240,6 +240,7 @@ func timeline(out string, ids []string, check func(running map[string]bool)) {
 }
 
 func TestTwoGoalsRunUnderOneScheduler(t *testing.T) {
+	t.Parallel()
 	g := newGates(t)
 	ids := []string{"g1/s", "g1/x", "g2/s", "g2/y"}
 	// g1/s and g2/s own the same file; g2/y's check fails, so g2 ends blocked and g1 done.
@@ -328,6 +329,7 @@ func approveRepo(t *testing.T) (root, bare string, g *gates, s *store.Store, r *
 }
 
 func TestApproveDuringRunLeavesOtherGoalRunning(t *testing.T) {
+	t.Parallel()
 	root, bare, g, s, r := approveRepo(t)
 
 	// Goal A's verified task publishes and lands while goal B's task runs.
@@ -373,6 +375,7 @@ func TestApproveDuringRunLeavesOtherGoalRunning(t *testing.T) {
 }
 
 func TestSyncDuringRunReportsRunningChildBusy(t *testing.T) {
+	t.Parallel()
 	// Sync must list the running g2/q as busy and keep the landed parent's branch under it.
 	root, bare, g, s, r := approveRepo(t)
 
@@ -399,6 +402,7 @@ func TestSyncDuringRunReportsRunningChildBusy(t *testing.T) {
 }
 
 func TestPlanApproveDuringRunStartsGoalInSameRun(t *testing.T) {
+	t.Parallel()
 	g := newGates(t)
 	root := schedRepo(t, schedScript(map[string]string{"g1/a": "a.txt", "g2/b": "b.txt"}), 2)
 	approvePlan(t, root, "g1", schedPlan(t, g, "First", schedTask{id: "a", file: "a.txt", barrier: "g1-a"}))
@@ -429,6 +433,7 @@ func TestPlanApproveDuringRunStartsGoalInSameRun(t *testing.T) {
 }
 
 func TestTaskRunDuringRunJoinsScheduler(t *testing.T) {
+	t.Parallel()
 	g := newGates(t)
 	root := schedRepo(t, schedScript(map[string]string{"g1/a": "a.txt", "hello": "hello.txt"}), 2)
 	approvePlan(t, root, "g1", schedPlan(t, g, "First", schedTask{id: "a", file: "a.txt", barrier: "g1-a"}))
@@ -474,6 +479,7 @@ func deadPID(t *testing.T) int {
 }
 
 func TestStaleAttemptUnderLiveSchedulerWaitsForNextRun(t *testing.T) {
+	t.Parallel()
 	g := newGates(t)
 	// g0/x runs twice: once before the scheduler, once after the next run recovers it.
 	script := `{"tasks": {
@@ -486,7 +492,7 @@ func TestStaleAttemptUnderLiveSchedulerWaitsForNextRun(t *testing.T) {
 }}`
 	root := schedRepo(t, script, 2)
 	approvePlan(t, root, "g1", schedPlan(t, g, "Stale", schedTask{id: "x", file: "x.txt"}))
-	if rr := run(t, root, nil, "run"); rr.code != ExitOK {
+	if rr := groupBRun(t, root, "run"); rr.code != ExitOK {
 		t.Fatalf("first run: %+v", rr)
 	}
 	approvePlan(t, root, "g2", schedPlan(t, g, "Live", schedTask{id: "a", file: "a.txt", barrier: "g2-a"}))
@@ -559,7 +565,7 @@ func TestStaleAttemptUnderLiveSchedulerWaitsForNextRun(t *testing.T) {
 	}
 	assertStale("the live run ended")
 
-	next := run(t, root, nil, "run")
+	next := groupBRun(t, root, "run")
 	if next.code != ExitOK || !strings.Contains(next.stdout, "recovered 1 interrupted task(s) and 1 running attempt(s)") ||
 		!strings.Contains(next.stdout, "goal g1: done") {
 		t.Fatalf("next run: %+v", next)
@@ -574,6 +580,7 @@ func TestStaleAttemptUnderLiveSchedulerWaitsForNextRun(t *testing.T) {
 }
 
 func TestWatchAndGoalShowDuringRunListBothGoals(t *testing.T) {
+	t.Parallel()
 	g := newGates(t)
 	root := schedRepo(t, schedScript(map[string]string{"g1/a": "a.txt", "g2/b": "b.txt"}), 2)
 	approvePlan(t, root, "g1", schedPlan(t, g, "First", schedTask{id: "a", file: "a.txt", barrier: "g1-a"}))
@@ -582,7 +589,7 @@ func TestWatchAndGoalShowDuringRunListBothGoals(t *testing.T) {
 	r := startRun(t, root, g)
 	waitHeld(t, s, r, "g1/a", "g2/b")
 
-	w := run(t, root, nil, "watch", "--once")
+	w := run(t, root, nil, "watch", "--once", "--interval", groupBWatchInterval)
 	if w.code != ExitOK || !strings.Contains(w.stdout, "2 running") || strings.Contains(w.stdout, "nothing running") {
 		t.Fatalf("watch --once: %+v", w)
 	}
