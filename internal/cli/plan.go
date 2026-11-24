@@ -82,8 +82,8 @@ func absPath(env Env, p string) string {
 	return filepath.Join(env.Dir, p)
 }
 
-func printWarnings(env Env, p plan.Plan) {
-	for _, w := range p.Warnings() {
+func printWarnings(env Env, p plan.Plan, checkCmd string) {
+	for _, w := range p.WarningsFor(checkCmd) {
 		fmt.Fprintf(env.Stdout, "warning: %s\n", w)
 	}
 }
@@ -123,7 +123,7 @@ func runPlanCreate(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(env.Stderr, "Fix the problems and run `mill plan --file` again. No goal was created.")
 		return ExitError
 	}
-	_, _, s, err := openProject(ctx, env)
+	_, cfg, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
@@ -132,7 +132,7 @@ func runPlanCreate(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	printDraftGoal(env, g, p)
+	printDraftGoal(env, g, p, cfg.CheckCmd)
 	return ExitOK
 }
 
@@ -145,10 +145,10 @@ func createDraftGoal(ctx context.Context, s *store.Store, p plan.Plan) (store.Go
 	return s.CreateGoal(ctx, p.Goal, raw)
 }
 
-func printDraftGoal(env Env, g store.Goal, p plan.Plan) {
+func printDraftGoal(env Env, g store.Goal, p plan.Plan, checkCmd string) {
 	fmt.Fprintf(env.Stdout, "Created goal %s (draft): %s\n", g.ID, p.Goal)
 	fmt.Fprintf(env.Stdout, "%d tasks\n", len(p.Tasks))
-	printWarnings(env, p)
+	printWarnings(env, p, checkCmd)
 	fmt.Fprintf(env.Stdout, "\nNext: review with `mill plan show %s`, then `mill plan approve %s`.\n", g.ID, g.ID)
 }
 
@@ -211,7 +211,7 @@ func runPlanGoal(ctx context.Context, env Env, goal string) int {
 	if err != nil {
 		return fail(err)
 	}
-	printDraftGoal(env, g, res.Plan)
+	printDraftGoal(env, g, res.Plan, cfg.CheckCmd)
 	fmt.Fprintf(env.Stdout, "%s\n", strings.ToUpper(cost[:1])+cost[1:])
 	return ExitOK
 }
@@ -333,7 +333,7 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		}
 		tasks = append(tasks, pt)
 	}
-	warnings := p.Warnings()
+	warnings := p.WarningsFor(cfg.CheckCmd)
 	if warnings == nil {
 		warnings = []string{}
 	}
@@ -492,7 +492,7 @@ func runPlanEdit(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "mill plan edit: %v\n", err)
 		return ExitError
 	}
-	_, _, s, err := openProject(ctx, env)
+	_, cfg, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
@@ -549,7 +549,7 @@ func runPlanEdit(ctx context.Context, env Env, args []string) int {
 		os.Remove(path)
 	}
 	fmt.Fprintf(env.Stdout, "Updated plan of %s (%d tasks)\n", id, len(p.Tasks))
-	printWarnings(env, p)
+	printWarnings(env, p, cfg.CheckCmd)
 	fmt.Fprintf(env.Stdout, "\nNext: `mill plan show %s`, then `mill plan approve %s`.\n", id, id)
 	return ExitOK
 }

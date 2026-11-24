@@ -48,6 +48,7 @@ func gitRepo(t *testing.T, files map[string]string) string {
 }
 
 func TestSurveyListsFilesReadmeBuildFilesAndCheck(t *testing.T) {
+	t.Parallel()
 	var readme strings.Builder
 	for i := 1; i <= 100; i++ {
 		fmt.Fprintf(&readme, "readme line %d\n", i)
@@ -87,6 +88,7 @@ func TestSurveyListsFilesReadmeBuildFilesAndCheck(t *testing.T) {
 }
 
 func TestSurveySmallRepoWithoutReadmeOrCheck(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t, map[string]string{"main.py": "print(1)\n"})
 	s, err := Survey(context.Background(), root, "")
 	if err != nil {
@@ -103,12 +105,14 @@ func TestSurveySmallRepoWithoutReadmeOrCheck(t *testing.T) {
 }
 
 func TestSurveyOutsideGitRepoFails(t *testing.T) {
+	t.Parallel()
 	if _, err := Survey(context.Background(), t.TempDir(), ""); err == nil {
 		t.Fatal("survey of a non-repo succeeded")
 	}
 }
 
 func TestPlanSchemaRequiresEveryField(t *testing.T) {
+	t.Parallel()
 	var s struct {
 		Type                 string   `json:"type"`
 		AdditionalProperties *bool    `json:"additionalProperties"`
@@ -158,6 +162,7 @@ func TestPlanSchemaRequiresEveryField(t *testing.T) {
 }
 
 func TestPromptIncludesProblemsOnlyWhenGiven(t *testing.T) {
+	t.Parallel()
 	p := Prompt("add a greeting", "SURVEY-TEXT", nil)
 	for _, want := range []string{"add a greeting", "SURVEY-TEXT", "1 to 12", "S", "M", "at least one check", "globs", "disjoint"} {
 		if !strings.Contains(p, want) {
@@ -187,6 +192,7 @@ func step(out string, usd float64) runner.Step {
 }
 
 func TestGenerateReturnsValidPlanFromFirstCall(t *testing.T) {
+	t.Parallel()
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(validPlan, 0.25)}})
 	o := options(t, f)
 	res, err := Generate(context.Background(), o)
@@ -212,6 +218,7 @@ func TestGenerateReturnsValidPlanFromFirstCall(t *testing.T) {
 }
 
 func TestGenerateRetriesOnceWithProblems(t *testing.T) {
+	t.Parallel()
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(invalidPlan, 0.5), step(validPlan, 0.25)}})
 	res, err := Generate(context.Background(), options(t, f))
 	if err != nil {
@@ -235,6 +242,7 @@ func TestGenerateRetriesOnceWithProblems(t *testing.T) {
 }
 
 func TestGenerateTwoInvalidPlansFailWithProblemsAndLastPlan(t *testing.T) {
+	t.Parallel()
 	second := `{"goal": "x", "assumptions": [], "tasks": []}`
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(invalidPlan, 0.5), step(second, 0.5), step(validPlan, 0)}})
 	res, err := Generate(context.Background(), options(t, f))
@@ -251,6 +259,7 @@ func TestGenerateTwoInvalidPlansFailWithProblemsAndLastPlan(t *testing.T) {
 }
 
 func TestGenerateUnparsableOutputIsRetried(t *testing.T) {
+	t.Parallel()
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(`{"goal": "x", "extra": 1}`, 0), step(validPlan, 0)}})
 	res, err := Generate(context.Background(), options(t, f))
 	if err != nil || res.Calls != 2 {
@@ -262,6 +271,7 @@ func TestGenerateUnparsableOutputIsRetried(t *testing.T) {
 }
 
 func TestGenerateAgentErrorFails(t *testing.T) {
+	t.Parallel()
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {{Error: "boom"}}})
 	_, err := Generate(context.Background(), options(t, f))
 	if err == nil || !strings.Contains(err.Error(), "boom") {
@@ -270,6 +280,7 @@ func TestGenerateAgentErrorFails(t *testing.T) {
 }
 
 func TestGenerateStopsAtBudget(t *testing.T) {
+	t.Parallel()
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {{Output: json.RawMessage(validPlan),
 		Usage: []budget.Usage{{CostUSD: 2}, {CostUSD: 2}, {CostUSD: 2}}}}})
 	res, err := Generate(context.Background(), options(t, f))
@@ -282,6 +293,7 @@ func TestGenerateStopsAtBudget(t *testing.T) {
 }
 
 func TestGenerateTimeoutIsPerCall(t *testing.T) {
+	t.Parallel()
 	a, b := step(invalidPlan, 0.5), step(validPlan, 0.25)
 	a.DelayMS, b.DelayMS = 150, 150
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {a, b}})
@@ -297,6 +309,7 @@ func TestGenerateTimeoutIsPerCall(t *testing.T) {
 }
 
 func TestGenerateTimeoutNamesDurationCallAndSetting(t *testing.T) {
+	t.Parallel()
 	slow := step(validPlan, 0.25)
 	slow.DelayMS = 5000
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(invalidPlan, 0.5), slow}})
@@ -317,6 +330,7 @@ func TestGenerateTimeoutNamesDurationCallAndSetting(t *testing.T) {
 }
 
 func TestGenerateRateLimitedNamesLimitAndResetTime(t *testing.T) {
+	t.Parallel()
 	resets := time.Now().Add(2 * time.Hour).Truncate(time.Minute)
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {{RateLimit: &runner.RateLimit{Type: "five_hour", ResetsAt: resets}}, step(validPlan, 0)}})
 	res, err := Generate(context.Background(), options(t, f))
@@ -334,6 +348,7 @@ func TestGenerateRateLimitedNamesLimitAndResetTime(t *testing.T) {
 }
 
 func TestComplexitySchemaRequiredWithEnum(t *testing.T) {
+	t.Parallel()
 	for _, want := range []string{`"complexity", "complexity_reason"]`, `"enum": ["low", "medium", "high"]`} {
 		if !strings.Contains(string(PlanSchema), want) {
 			t.Errorf("schema missing %s", want)
@@ -345,6 +360,7 @@ func TestComplexitySchemaRequiredWithEnum(t *testing.T) {
 }
 
 func TestComplexityPromptExplainsSizeVersusComplexity(t *testing.T) {
+	t.Parallel()
 	p := Prompt("g", "s", nil)
 	for _, want := range []string{"size is the amount of code", "how hard the change is to get right",
 		"Concurrency, crash recovery, security and cross-cutting state are high", "Ordinary feature logic is medium",
@@ -356,6 +372,7 @@ func TestComplexityPromptExplainsSizeVersusComplexity(t *testing.T) {
 }
 
 func TestComplexityHugeIsRejectedByValidation(t *testing.T) {
+	t.Parallel()
 	bad := strings.Replace(validPlan, `"complexity": "medium"`, `"complexity": "huge"`, 1)
 	f := runner.NewFake(runner.Script{runner.RolePlanner: {step(bad, 0.1), step(bad, 0.1)}})
 	if _, err := Generate(context.Background(), options(t, f)); err == nil {
@@ -365,5 +382,15 @@ func TestComplexityHugeIsRejectedByValidation(t *testing.T) {
 	res, err := Generate(context.Background(), options(t, f))
 	if err != nil || res.Plan.Tasks[0].Complexity != "medium" {
 		t.Fatalf("valid complexity: %v %+v", err, res)
+	}
+}
+
+func TestPromptAsksForNarrowChecksAndFastPolling(t *testing.T) {
+	t.Parallel()
+	p := Prompt("goal", "survey", nil)
+	for _, want := range []string{"Task checks must be narrow", "-run", "millisecond polling", "never production"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
 	}
 }
