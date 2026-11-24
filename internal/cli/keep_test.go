@@ -55,6 +55,7 @@ func keepRepo(t *testing.T, checkCmd string) string {
 }
 
 func TestKeepPrintsSummaryAndNothingToDo(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
 	addRemote(t, root)
 	r := run(t, root, nil, "keep")
@@ -64,6 +65,7 @@ func TestKeepPrintsSummaryAndNothingToDo(t *testing.T) {
 }
 
 func TestKeepJSONIsOneDocumentWithoutProgress(t *testing.T) {
+	t.Parallel()
 	root := keepRepo(t, "true")
 	r := run(t, root, nil, "keep", "--json")
 	if r.code != ExitOK {
@@ -108,6 +110,7 @@ func TestKeepJSONIsOneDocumentWithoutProgress(t *testing.T) {
 }
 
 func TestKeepRunsItsPassWhileAnotherHolderHasTheLock(t *testing.T) {
+	t.Parallel()
 	root := keepRepo(t, "true")
 	lock, err := runlock.Acquire(project.PathsAt(root).RunLock)
 	if err != nil {
@@ -122,6 +125,7 @@ func TestKeepRunsItsPassWhileAnotherHolderHasTheLock(t *testing.T) {
 }
 
 func TestKeepReportsBusyTaskAndLeavesItUnchanged(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -201,6 +205,7 @@ func TestKeepWatchRepeatsPassesUntilCancelled(t *testing.T) {
 }
 
 func TestKeepRejectsShortInterval(t *testing.T) {
+	t.Parallel()
 	root := keepRepo(t, "true")
 	r := run(t, root, nil, "keep", "--watch", "--interval", "5s")
 	if r.code != ExitUsage || !strings.Contains(r.stderr, "at least 10s") {
@@ -209,6 +214,7 @@ func TestKeepRejectsShortInterval(t *testing.T) {
 }
 
 func TestKeepCombinedReportsCulpritAndPartner(t *testing.T) {
+	t.Parallel()
 	root := keepRepo(t, "! { test -f a.txt && test -f b.txt; }")
 	r := run(t, root, nil, "keep", "--combined")
 	if r.code != ExitOK {
@@ -222,6 +228,7 @@ func TestKeepCombinedReportsCulpritAndPartner(t *testing.T) {
 }
 
 func TestKeepUnknownGoalListsGoals(t *testing.T) {
+	t.Parallel()
 	root := keepRepo(t, "true")
 	r := run(t, root, nil, "keep", "nope")
 	if r.code != ExitError || !strings.Contains(r.stderr, `unknown goal "nope"`) || !strings.Contains(r.stderr, "g1, g2") {
@@ -230,6 +237,7 @@ func TestKeepUnknownGoalListsGoals(t *testing.T) {
 }
 
 func TestHelpListsKeep(t *testing.T) {
+	t.Parallel()
 	r := run(t, t.TempDir(), nil, "help")
 	if !strings.Contains(r.stdout, "keep ") {
 		t.Errorf("help lacks keep:\n%s", r.stdout)
@@ -237,6 +245,7 @@ func TestHelpListsKeep(t *testing.T) {
 }
 
 func TestKeepReusesCombinedResultUnlessCombinedFlagForcesIt(t *testing.T) {
+	t.Parallel()
 	counter := filepath.Join(t.TempDir(), "gate-runs")
 	root := keepRepo(t, "echo x >> "+counter)
 	gateRuns := func() int {

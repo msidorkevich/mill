@@ -24,6 +24,7 @@ func branchRow(t *testing.T, root, id string) store.Branch {
 }
 
 func TestCleanRemovesLandedWorktreeAndBranchOnly(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, true)
 	ctx := context.Background()
 	a, b := branchRow(t, root, "g2/a"), branchRow(t, root, "g2/b")
@@ -72,6 +73,7 @@ func TestCleanRemovesLandedWorktreeAndBranchOnly(t *testing.T) {
 }
 
 func TestCleanTwiceIsHarmless(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, true)
 	setStatus(t, root, "g2/a", store.TaskLanded)
 	if r := run(t, root, nil, "clean"); r.code != ExitOK {
@@ -89,6 +91,7 @@ func TestCleanTwiceIsHarmless(t *testing.T) {
 }
 
 func TestCleanDryRunChangesNothing(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	a := branchRow(t, root, "g2/a")
@@ -124,6 +127,7 @@ func TestCleanDryRunChangesNothing(t *testing.T) {
 }
 
 func TestCleanRemoteDeletesUnmovedSkipsGoneAndLeavesMoved(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	a, b := branchRow(t, root, "g2/a"), branchRow(t, root, "g2/b")
 	setStatus(t, root, "g2/a", store.TaskLanded)
@@ -161,6 +165,7 @@ func TestCleanRemoteDeletesUnmovedSkipsGoneAndLeavesMoved(t *testing.T) {
 }
 
 func TestCleanRemovesEmptyDirsUnderWorktreeRoot(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, true)
 	setStatus(t, root, "g2/a", store.TaskLanded)
 	a := branchRow(t, root, "g2/a")
@@ -224,6 +229,7 @@ func TestCleanRemovesEmptyDirsUnderWorktreeRoot(t *testing.T) {
 }
 
 func TestCleanLeavesEmptyDirsInsideLiveWorktrees(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, true)
 	setStatus(t, root, "g2/a", store.TaskLanded)
 	a := branchRow(t, root, "g2/a")
@@ -253,6 +259,7 @@ func TestCleanLeavesEmptyDirsInsideLiveWorktrees(t *testing.T) {
 }
 
 func TestCleanMissingWorktreeRootIsNotAnError(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, true)
 	a := branchRow(t, root, "g2/a")
 	if err := os.RemoveAll(filepath.Dir(filepath.Dir(a.Worktree))); err != nil {
@@ -301,6 +308,7 @@ func eventSeq(t *testing.T, s *store.Store, id, kind string) int64 {
 }
 
 func TestSyncCleansUpLandedTaskByDefaultAfterRestackingItsChild(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	a := branchRow(t, root, "g2/a")
@@ -353,6 +361,7 @@ func TestSyncCleansUpLandedTaskByDefaultAfterRestackingItsChild(t *testing.T) {
 }
 
 func TestSyncLeavesMovedReviewBranchOnTheRemote(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	a := branchRow(t, root, "g2/a")
 	f := forge(t, bare)
@@ -379,6 +388,7 @@ func TestSyncLeavesMovedReviewBranchOnTheRemote(t *testing.T) {
 }
 
 func TestSyncCleanOnLandLocalKeepsRemoteBranch(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	setCleanOnLand(t, root, "local")
 	a := branchRow(t, root, "g2/a")
@@ -416,6 +426,7 @@ func TestSyncCleanOnLandLocalKeepsRemoteBranch(t *testing.T) {
 }
 
 func TestSyncCleanOnLandOffCleansNothing(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	setCleanOnLand(t, root, "off")
 	a := branchRow(t, root, "g2/a")
@@ -447,6 +458,7 @@ func TestSyncCleanOnLandOffCleansNothing(t *testing.T) {
 }
 
 func TestSyncKeepsDirtyWorktreeOfLandedTask(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	a := branchRow(t, root, "g2/a")
 	if err := os.WriteFile(filepath.Join(a.Worktree, "notes.txt"), []byte("wip\n"), 0o644); err != nil {
@@ -478,6 +490,7 @@ func TestSyncKeepsDirtyWorktreeOfLandedTask(t *testing.T) {
 }
 
 func TestCleanWorksWhileRunLockIsHeldAndSkipsBusyTask(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, true)
 	ctx := context.Background()
 	a, b := branchRow(t, root, "g2/a"), branchRow(t, root, "g2/b")

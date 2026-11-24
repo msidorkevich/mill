@@ -96,6 +96,7 @@ func forgeMerge(t *testing.T, bare string, merge func(dir string)) string {
 }
 
 func TestE2EPublishReviewAndMergeDetectionAgainstBareRemote(t *testing.T) {
+	t.Parallel()
 	root, bare := e2eRepo(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -230,6 +231,7 @@ func TestE2EPublishReviewAndMergeDetectionAgainstBareRemote(t *testing.T) {
 }
 
 func TestE2EPushReviewRefusesNonReviewBranch(t *testing.T) {
+	t.Parallel()
 	root, bare := e2eRepo(t)
 	before := remoteRefs(t, bare)
 	head := gitC(t, root, "rev-parse", "HEAD")

@@ -64,6 +64,7 @@ func publishedGoal(t *testing.T) (root, bare string) {
 }
 
 func TestApproveTaskWithoutDependenciesPushesOneSquashedCommit(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	before := remoteRefs(t, bare)
 	ctx := context.Background()
@@ -113,6 +114,7 @@ func TestApproveTaskWithoutDependenciesPushesOneSquashedCommit(t *testing.T) {
 }
 
 func TestApproveSingleTaskOmitsGoalTrailer(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
 	spec := `{"id": "solo", "title": "Solo", "kind": "implement", "spec": "write", "acceptance": ["ok"],
   "checks": ["true"], "owns": [], "depends_on": [], "size": "S"}`
@@ -133,6 +135,7 @@ func TestApproveSingleTaskOmitsGoalTrailer(t *testing.T) {
 }
 
 func TestApproveStackedTaskNeedsPublishedParent(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
 	if r := run(t, root, nil, "plan", "--file", writePlan(t, chainPlan)); r.code != ExitOK {
 		t.Fatalf("plan: %+v", r)
@@ -183,6 +186,7 @@ func TestApproveStackedTaskNeedsPublishedParent(t *testing.T) {
 }
 
 func TestApproveFanInTaskNeedsOtherDependenciesLanded(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	before := remoteRefs(t, bare)
 	// c depends on a and b; its deepest parent is b (the last listed on a tie).
@@ -216,6 +220,7 @@ func TestApproveFanInTaskNeedsOtherDependenciesLanded(t *testing.T) {
 }
 
 func TestApproveRerunsGateWhenHeadIsNotGated(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	before := remoteRefs(t, bare)
 	ctx := context.Background()
@@ -238,6 +243,7 @@ func TestApproveRerunsGateWhenHeadIsNotGated(t *testing.T) {
 }
 
 func TestApproveRefusesWhenGateRerunFails(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	before := remoteRefs(t, bare)
 	ctx := context.Background()
@@ -273,6 +279,7 @@ func TestApproveRefusesWhenGateRerunFails(t *testing.T) {
 }
 
 func TestApproveRefusesConflictWithBase(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	commitOnMain(t, root, "a.txt", "other\n")
 	gitC(t, root, "push", "-q", "origin", "main")
@@ -315,6 +322,7 @@ func commitInWorktree(t *testing.T, s *store.Store, id, name, body string) store
 }
 
 func TestRepublishForcePushesWithLease(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	before := remoteRefs(t, bare)
 	ctx := context.Background()
@@ -370,6 +378,7 @@ func TestRepublishForcePushesWithLease(t *testing.T) {
 }
 
 func TestApproveRefusesWithoutConfiguredRemote(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	r := run(t, root, nil, "review", "approve", "g1/a")
 	if r.code != ExitError || !strings.Contains(r.stderr, `remote "origin" is not configured in git`) ||
@@ -382,6 +391,7 @@ func TestApproveRefusesWithoutConfiguredRemote(t *testing.T) {
 }
 
 func TestApproveRefusesUnverifiedTask(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	setStatus(t, root, "g1/a", store.TaskBlocked)
 	r := run(t, root, nil, "review", "approve", "g1/a")
@@ -401,6 +411,7 @@ func TestApproveRefusesUnverifiedTask(t *testing.T) {
 }
 
 func TestApprovePublishesWhileUnrelatedRunHoldsLock(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	s := openStore(t, root)
 	holdRunLock(t, root)
@@ -422,6 +433,7 @@ func TestApprovePublishesWhileUnrelatedRunHoldsLock(t *testing.T) {
 }
 
 func TestApprovePublishesFreeTasksAndReportsBusyOnes(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	s := openStore(t, root)
 	bID, n := runningAttempt(t, s, "g1/b")
@@ -458,6 +470,7 @@ func TestApprovePublishesFreeTasksAndReportsBusyOnes(t *testing.T) {
 }
 
 func TestApproveChildOfLandedParentNeedsSyncFirst(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, false)
 	if r := run(t, root, nil, "review", "approve", "g2/a"); r.code != ExitOK {
 		t.Fatalf("approve parent: %+v", r)
@@ -495,6 +508,7 @@ func TestApproveChildOfLandedParentNeedsSyncFirst(t *testing.T) {
 }
 
 func TestApproveChildRefusedWhileParentHasUnpublishedChanges(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, false)
 	if r := run(t, root, nil, "review", "approve", "g2/a"); r.code != ExitOK {
 		t.Fatalf("approve parent: %+v", r)
