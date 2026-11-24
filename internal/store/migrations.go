@@ -133,6 +133,14 @@ CREATE TABLE task_claims (
 	claimed_at TEXT NOT NULL
 );
 `,
+	// 10: task complexity and model override; the model each attempt ran with and why.
+	`
+ALTER TABLE tasks ADD COLUMN complexity TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN complexity_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT '';
+ALTER TABLE attempts ADD COLUMN model TEXT NOT NULL DEFAULT '';
+ALTER TABLE attempts ADD COLUMN model_reason TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // LatestVersion is the schema version this build writes.
