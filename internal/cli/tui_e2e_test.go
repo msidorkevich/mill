@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -117,14 +118,21 @@ type tuiDriver struct {
 	done chan struct{}
 }
 
-func newTUIDriver(t *testing.T, root string) *tuiDriver {
+// newTUIDriver drives a TUI over the repo in env.Dir; its commands run with env.
+func newTUIDriver(t *testing.T, env Env) *tuiDriver {
 	t.Helper()
-	env := Env{Dir: root, Home: t.TempDir()}
+	root := env.Dir
+	if env.Home == "" {
+		env.Home = t.TempDir()
+	}
 	d := &tuiDriver{t: t, msgs: make(chan tea.Msg, 64), done: make(chan struct{})}
 	s := openStore(t, root)
 	r := newInProcRunner(t, env)
 	t.Cleanup(func() { close(d.done) })
-	d.m = tui.New(tui.Options{Store: s, Paths: project.PathsAt(root), Runner: r})
+	d.m = tui.New(tui.Options{
+		Store: s, Paths: project.PathsAt(root), Runner: r,
+		Getenv: env.getenv, LookPath: env.lookPath,
+	})
 	// Tall enough that the output panel (a quarter of the height) keeps every line.
 	d.send(tea.WindowSizeMsg{Width: 400, Height: 800})
 	d.exec(d.m.Init())
@@ -308,9 +316,9 @@ func goalResults(t *testing.T, root string) map[string]string {
 }
 
 func TestTUIPlanRunReviewApproveAndRejectWithExecHost(t *testing.T) {
-	t.Setenv("HERDR_ENV", "")
+	t.Parallel()
 	root := tuiRepo(t, "exec")
-	d := newTUIDriver(t, root)
+	d := newTUIDriver(t, Env{Dir: root, Getenv: fakeGetenv(nil)})
 	ctx := context.Background()
 
 	planAndApproveViaTUI(t, d)
@@ -371,9 +379,10 @@ func TestTUIPlanRunReviewApproveAndRejectWithExecHost(t *testing.T) {
 	}
 }
 
-// fakeHerdrOnPath puts testdata/tui/herdr first on PATH and returns its log file. It is the
-// only fake herdr of package cli; callers set HERDR_ENV (and HERDR_WORKSPACE_ID) themselves.
-func fakeHerdrOnPath(t *testing.T) string {
+// fakeHerdr copies testdata/tui/herdr to a temp dir and returns an Env.LookPath that finds it
+// as herdr (other programs come from PATH) and its log file. It is the only fake herdr of
+// package cli; callers inject HERDR_ENV (and HERDR_WORKSPACE_ID) through Env.Getenv.
+func fakeHerdr(t *testing.T) (lookPath func(string) (string, error), log string) {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("testdata", "tui", "herdr"))
 	if err != nil {
@@ -383,22 +392,26 @@ func fakeHerdrOnPath(t *testing.T) string {
 	if err := os.WriteFile(filepath.Join(dir, "herdr"), body, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return filepath.Join(dir, "herdr.log")
+	lookPath = func(file string) (string, error) {
+		if file == "herdr" {
+			return filepath.Join(dir, "herdr"), nil
+		}
+		return exec.LookPath(file)
+	}
+	return lookPath, filepath.Join(dir, "herdr.log")
 }
 
 func TestTUIRunsGoalInHerdrTabsLikeExecHost(t *testing.T) {
-	t.Setenv("HERDR_ENV", "")
+	t.Parallel()
 	execRoot := tuiRepo(t, "exec")
-	d := newTUIDriver(t, execRoot)
+	d := newTUIDriver(t, Env{Dir: execRoot, Getenv: fakeGetenv(nil)})
 	planAndApproveViaTUI(t, d)
 	runGoalViaTUI(t, d, execRoot)
 	want := goalResults(t, execRoot)
 
-	log := fakeHerdrOnPath(t)
-	t.Setenv("HERDR_ENV", "1")
+	lookPath, log := fakeHerdr(t)
 	root := tuiRepo(t, "auto")
-	d = newTUIDriver(t, root)
+	d = newTUIDriver(t, Env{Dir: root, Getenv: fakeGetenv(map[string]string{"HERDR_ENV": "1"}), LookPath: lookPath})
 	planAndApproveViaTUI(t, d)
 	runGoalViaTUI(t, d, root)
 
@@ -432,9 +445,9 @@ func TestTUIRunsGoalInHerdrTabsLikeExecHost(t *testing.T) {
 }
 
 func TestTUIRunWithHerdrHostOutsideHerdrShowsError(t *testing.T) {
-	t.Setenv("HERDR_ENV", "")
+	t.Parallel()
 	root := tuiRepo(t, "")
-	d := newTUIDriver(t, root)
+	d := newTUIDriver(t, Env{Dir: root, Getenv: fakeGetenv(nil)})
 	planAndApproveViaTUI(t, d)
 	// Planning needs a host too, so host.kind = herdr is set only before the run.
 	useHostKind(t, root, "herdr")

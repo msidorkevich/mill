@@ -8,11 +8,10 @@ import (
 	"github.com/msidorkevich/mill/internal/project"
 )
 
-// useHostKind sets host.kind in the repo's config and makes sure mill looks like it runs
-// outside herdr.
+// useHostKind sets host.kind in the repo's config. Commands run without HERDR_* (TestMain
+// clears them and tests inject their own Env.Getenv), so mill looks like it runs outside herdr.
 func useHostKind(t *testing.T, root, kind string) {
 	t.Helper()
-	t.Setenv("HERDR_ENV", "")
 	p := project.PathsAt(root)
 	b, err := os.ReadFile(p.Config)
 	if err != nil {
@@ -24,6 +23,7 @@ func useHostKind(t *testing.T, root, kind string) {
 }
 
 func TestTaskRunFailsWhenHerdrHostIsUnavailable(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	useHostKind(t, root, "herdr")
 	r := run(t, root, nil, "task", "run", "--file", tf)
@@ -37,6 +37,7 @@ func TestTaskRunFailsWhenHerdrHostIsUnavailable(t *testing.T) {
 }
 
 func TestTaskRunHostFlagOverridesConfig(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	useHostKind(t, root, "herdr")
 	r := run(t, root, nil, "task", "run", "--file", tf, "--host", "exec")
@@ -46,6 +47,7 @@ func TestTaskRunHostFlagOverridesConfig(t *testing.T) {
 }
 
 func TestRunFailsWhenHerdrHostIsUnavailableAndHostFlagOverrides(t *testing.T) {
+	t.Parallel()
 	root, _ := taskRepo(t, passScript, 3)
 	useHostKind(t, root, "herdr")
 	r := run(t, root, nil, "run", "g")
@@ -70,11 +72,11 @@ func TestInvalidHostFlagIsUsageError(t *testing.T) {
 }
 
 func TestTaskRunInsideHerdrUsesHerdrFromPath(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
-	log := fakeHerdrOnPath(t)
-	t.Setenv("HERDR_ENV", "1")
-	t.Setenv("HERDR_WORKSPACE_ID", "w8")
-	r := run(t, root, nil, "task", "run", "--file", tf)
+	lookPath, log := fakeHerdr(t)
+	env := Env{Getenv: fakeGetenv(map[string]string{"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w8"}), LookPath: lookPath}
+	r := runEnv(t, root, env, "task", "run", "--file", tf)
 	if r.code != ExitOK || !strings.Contains(r.stdout, "hello: verified") {
 		t.Fatalf("task run: %+v", r)
 	}

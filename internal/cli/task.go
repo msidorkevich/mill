@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -188,10 +187,6 @@ func printReviewHint(ctx context.Context, env Env, s *store.Store, id string) {
 	}
 }
 
-// taskRunPollInterval is how often task run reads the store while a running scheduler works
-// on its task.
-var taskRunPollInterval = time.Second
-
 // joinScheduler queues the task for the scheduler (pid) that holds the run lock and waits for
 // its result. It never repairs interrupted state while the scheduler is live; when the
 // scheduler stops before finishing the task, task run takes the lock and runs the task itself.
@@ -273,7 +268,7 @@ func joinScheduler(ctx context.Context, env Env, paths project.Paths, cfg config
 		}
 		select {
 		case <-ctx.Done():
-		case <-time.After(taskRunPollInterval):
+		case <-time.After(env.taskRunPoll()):
 		}
 	}
 	fmt.Fprintf(env.Stderr, "mill task run: stopped waiting; %s stays queued and the running scheduler (pid %d) will still run it (see `mill task show %s`)\n", spec.ID, pid, spec.ID)
@@ -405,7 +400,7 @@ func newPipeline(env Env, name string, paths project.Paths, cfg config.Config, h
 	if hostKind == "" {
 		hostKind = cfg.Host.Kind
 	}
-	h, _, err := host.Select(hostKind, os.Getenv, exec.LookPath)
+	h, _, err := host.Select(hostKind, env.getenv, env.lookPath)
 	if err != nil {
 		return nil, err
 	}

@@ -28,7 +28,7 @@ func runTUI(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	m := tui.New(tui.Options{Store: s, Paths: paths, Runner: r})
+	m := tui.New(tui.Options{Store: s, Paths: paths, Runner: r, Getenv: env.getenv, LookPath: env.lookPath})
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithOutput(env.Stdout))
 	if _, err := p.Run(); err != nil {
 		return fail(fmt.Errorf("the terminal UI stopped: %w", err))

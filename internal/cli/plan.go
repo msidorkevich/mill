@@ -820,7 +820,7 @@ func editTemp(ctx context.Context, env Env, prefix string, data []byte) (string,
 		os.Remove(path)
 		return "", err
 	}
-	editor := os.Getenv("EDITOR")
+	editor := env.getenv("EDITOR")
 	if editor == "" {
 		editor = "vi"
 	}
