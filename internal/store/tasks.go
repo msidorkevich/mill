@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
@@ -57,6 +58,10 @@ type Task struct {
 	Approved        bool   `json:"approved,omitempty"`
 	ApprovedAt      string `json:"approved_at,omitempty"`
 	ApprovedAttempt int    `json:"approved_attempt,omitempty"`
+	// RestackBlockedFrom is set while a blocked task is blocked because a restack of its
+	// branch conflicted: the status (verified or published) it had before, which a successful
+	// retry of the restack restores. Any later status change clears it.
+	RestackBlockedFrom string `json:"restack_blocked_from,omitempty"`
 }
 
 func (s *Store) ts() string { return s.now().UTC().Format(timeLayout) }
@@ -109,7 +114,76 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 	}
 	t.CreatedAt, _ = parseTime(created)
 	t.UpdatedAt, _ = parseTime(updated)
+	if t.Status == TaskBlocked {
+		// Every status change records a task-status event; the latest one tells whether the
+		// block came from a restack.
+		var data string
+		err := s.db.QueryRowContext(ctx, `SELECT data FROM events WHERE task_id = ? AND kind = 'task-status'
+			ORDER BY seq DESC LIMIT 1`, id).Scan(&data)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Task{}, fmt.Errorf("task %s: read its last status change: %w", id, err)
+		}
+		if err == nil {
+			var d map[string]any
+			if err := json.Unmarshal([]byte(data), &d); err != nil {
+				return Task{}, fmt.Errorf("task %s: corrupt status event: %w", id, err)
+			}
+			if from, ok := d["restack_from"].(string); ok && d["status"] == TaskBlocked {
+				t.RestackBlockedFrom = from
+			}
+		}
+		if t.RestackBlockedFrom == "" && legacyRestackReason(t.Reason) {
+			// Blocked by a restack conflict before blocks recorded the former status: a task
+			// with a published commit was published, any other was verified.
+			b, err := s.GetBranch(ctx, id)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return Task{}, fmt.Errorf("task %s: read its branch: %w", id, err)
+			}
+			t.RestackBlockedFrom = TaskVerified
+			if b.PublishedSHA != "" {
+				t.RestackBlockedFrom = TaskPublished
+			}
+		}
+	}
 	return t, nil
+}
+
+// legacyRestackReason reports whether reason is one sync gave when a restack conflicted, before
+// such blocks recorded the task's former status. Only sync's prefix is unambiguous: the keeper
+// gave the same reason for failures after a resolution (verifier), which must not be retried.
+func legacyRestackReason(reason string) bool {
+	return strings.HasPrefix(reason, "sync: restacking ")
+}
+
+// BlockRestack blocks a verified or published task whose restack conflicted, recording reason
+// and the status it had (from), so that a later successful restack can restore it. The
+// task's approval is kept.
+func (s *Store) BlockRestack(ctx context.Context, id, from, reason string) error {
+	if from != TaskVerified && from != TaskPublished {
+		return fmt.Errorf("block %s after a restack: it was %s, but only a verified or published task is restacked", id, from)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("block task %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE tasks SET status = ?, phase = '', reason = ?, updated_at = ? WHERE id = ?`,
+		TaskBlocked, reason, s.ts(), id)
+	if err != nil {
+		return fmt.Errorf("block task %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task %s: %w", id, ErrNotFound)
+	}
+	if err := s.appendEventTx(ctx, tx, "task-status", "", id,
+		map[string]string{"status": TaskBlocked, "phase": "", "reason": reason, "restack_from": from}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("block task %s: %w", id, err)
+	}
+	return nil
 }
 
 // SetTaskStatus changes a task's status, phase and reason and records a task-status event.

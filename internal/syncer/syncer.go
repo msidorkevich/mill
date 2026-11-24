@@ -103,6 +103,12 @@ type Blocked struct {
 	Reason string `json:"reason"`
 }
 
+// Restored is a task blocked by a restack conflict that got its status back.
+type Restored struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"` // verified or published
+}
+
 // GateRed is a restacked task whose gate failed, left unblocked because ReportRedGate is set.
 type GateRed struct {
 	TaskID string      `json:"task_id"`
@@ -135,7 +141,10 @@ type Result struct {
 	// NeedsRepublish lists restacked tasks whose re-publish waits for their parent.
 	NeedsRepublish []NeedsRepublish `json:"needs_republish"`
 	Blocked        []Blocked        `json:"blocked"`
-	GoalsLanded    []string         `json:"goals_landed"`
+	// Restored lists tasks blocked by an earlier restack conflict whose restack now
+	// succeeded; they are back to the status they had.
+	Restored    []Restored `json:"restored"`
+	GoalsLanded []string   `json:"goals_landed"`
 	// GateRed lists restacked tasks whose gate failed; only filled when ReportRedGate is set.
 	GateRed []GateRed `json:"gate_red,omitempty"`
 	// Cleaned lists tasks landed in this sync that were cleaned up (clean_on_land);
@@ -185,13 +194,18 @@ func (s *syncer) withClaim(ctx context.Context, id, status string, fn func() err
 	return ferr
 }
 
+// newResult is an empty result whose lists are empty rather than nil.
+func newResult(o Options) Result {
+	return Result{Remote: o.Cfg.Remote, BaseBranch: o.Cfg.BaseBranch,
+		Landed: []Landed{}, Restacked: []Restacked{}, Republished: []Republished{}, NeedsRepublish: []NeedsRepublish{}, Blocked: []Blocked{}, Restored: []Restored{},
+		GoalsLanded: []string{}, Cleaned: []Cleaned{}, NotCleaned: []NotCleaned{}, Busy: []Busy{}}
+}
+
 // Sync fetches the remote, marks merged tasks landed, restacks and re-publishes their
 // children and marks fully landed goals. Problems with one task block that task and are
 // reported in the result; an error means the sync itself could not continue.
 func Sync(ctx context.Context, o Options) (Result, error) {
-	res := Result{Remote: o.Cfg.Remote, BaseBranch: o.Cfg.BaseBranch,
-		Landed: []Landed{}, Restacked: []Restacked{}, Republished: []Republished{}, NeedsRepublish: []NeedsRepublish{}, Blocked: []Blocked{},
-		GoalsLanded: []string{}, Cleaned: []Cleaned{}, NotCleaned: []NotCleaned{}, Busy: []Busy{}}
+	res := newResult(o)
 	if o.Claimer.Owner == "" {
 		o.Claimer = store.NewClaimer("sync")
 	}
@@ -234,6 +248,27 @@ func Sync(ctx context.Context, o Options) (Result, error) {
 	// Last, so that children of landed tasks were restacked off their branches first.
 	s.cleanLanded(ctx)
 	return res, nil
+}
+
+// Restore gives task id, blocked by a restack conflict and since restacked by hand onto onto
+// (`mill task rebase`), back the status it had: it re-runs the gate and re-publishes a
+// published task, as a sync does after a restack. The caller holds the task's claim. A task
+// not blocked by a restack is left alone.
+func Restore(ctx context.Context, o Options, id, onto string) (Result, error) {
+	res := newResult(o)
+	t, err := o.Store.GetTask(ctx, id)
+	if err != nil {
+		return res, err
+	}
+	if !restackBlocked(t) {
+		return res, nil
+	}
+	br, err := o.Store.GetBranch(ctx, id)
+	if err != nil {
+		return res, fmt.Errorf("task %s is blocked but its branch cannot be loaded: %w", id, err)
+	}
+	s := &syncer{Options: o, upstream: o.Cfg.Remote + "/" + o.Cfg.BaseBranch, res: &res}
+	return res, s.settle(ctx, t, br, onto)
 }
 
 // cleanLanded removes what the tasks landed in this sync leave behind, as clean_on_land says.
@@ -473,7 +508,8 @@ func (s *syncer) restackGoal(ctx context.Context, g store.Goal) error {
 		if err != nil {
 			return err
 		}
-		if t.Status != store.TaskVerified && t.Status != store.TaskPublished {
+		// A task blocked by a restack conflict is retried: the cause may be gone.
+		if t.Status != store.TaskVerified && t.Status != store.TaskPublished && !restackBlocked(t) {
 			continue
 		}
 		if err := s.restack(ctx, t); err != nil {
@@ -483,22 +519,33 @@ func (s *syncer) restackGoal(ctx context.Context, g store.Goal) error {
 	return nil
 }
 
+// restackBlocked reports whether t is blocked because a restack of its branch conflicted.
+func restackBlocked(t store.Task) bool {
+	return t.Status == store.TaskBlocked && t.RestackBlockedFrom != ""
+}
+
 // restack rebases one task when its dependency landed or moved (KP2), re-runs the gate (KP3)
-// and re-publishes it if it was published.
+// and re-publishes it if it was published. A task blocked by an earlier restack conflict is
+// restacked again and, on success, gets back the status it had.
 func (s *syncer) restack(ctx context.Context, t store.Task) error {
 	deps, err := s.Store.TaskDeps(ctx, t.ID)
 	if err != nil {
 		return err
 	}
-	if len(deps) == 0 {
+	if len(deps) == 0 && !restackBlocked(t) {
 		return nil
 	}
 	br, err := s.Store.GetBranch(ctx, t.ID)
 	if err != nil {
 		return fmt.Errorf("task %s is %s but its branch cannot be loaded: %w", t.ID, t.Status, err)
 	}
+	if len(deps) == 0 {
+		return s.retryOntoBase(ctx, t, br)
+	}
 	if len(deps) > 1 {
-		if s.LeaveFanIn {
+		// A restack-blocked fan-in task is retried here even when the caller restacks fan-in
+		// tasks itself: the caller only looks at verified and published tasks.
+		if s.LeaveFanIn && !restackBlocked(t) {
 			return nil
 		}
 		return s.restackFanIn(ctx, t, br)
@@ -517,6 +564,10 @@ func (s *syncer) restack(ctx context.Context, t store.Task) error {
 	switch {
 	case dt.Status == store.TaskLanded:
 		if br.Base != db.Name {
+			if restackBlocked(t) {
+				// Blocked restacking onto the base branch (the keeper's restack).
+				return s.retryOntoBase(ctx, t, br)
+			}
 			return nil // already moved off the dependency's branch
 		}
 		onto, landed = s.Cfg.BaseBranch, true
@@ -528,6 +579,10 @@ func (s *syncer) restack(ctx context.Context, t store.Task) error {
 			return nil
 		}
 		if db.HeadSHA == br.BaseSHA {
+			if restackBlocked(t) {
+				// The dependency is back where the task starts: nothing to restack.
+				return s.withClaim(ctx, t.ID, t.Status, func() error { return s.settle(ctx, t, br, db.Name) })
+			}
 			// Already on the dependency's head; a published task restacked earlier may
 			// still wait for its re-publish.
 			return s.republishIfStale(ctx, t, br, dt, db)
@@ -537,6 +592,26 @@ func (s *syncer) restack(ctx context.Context, t store.Task) error {
 		return nil // the dependency is being reworked; wait for it
 	}
 	return s.withClaim(ctx, t.ID, t.Status, func() error { return s.rebase(ctx, t, br, onto, ontoSHA, landed) })
+}
+
+// retryOntoBase retries the restack of a restack-blocked task that sits on the base branch:
+// it is restacked onto the remote base branch unless it already contains it.
+func (s *syncer) retryOntoBase(ctx context.Context, t store.Task, br store.Branch) error {
+	tip, err := gitx.RevParse(ctx, s.Paths.Root, "refs/remotes/"+s.upstream)
+	if err != nil {
+		return err
+	}
+	if br.HeadSHA == "" {
+		return nil
+	}
+	in, err := gitx.IsAncestor(ctx, s.Paths.Root, tip, br.HeadSHA)
+	if err != nil {
+		return fmt.Errorf("compare %s with %s: %w", t.ID, s.upstream, err)
+	}
+	if in {
+		return s.withClaim(ctx, t.ID, t.Status, func() error { return s.settle(ctx, t, br, s.Cfg.BaseBranch) })
+	}
+	return s.withClaim(ctx, t.ID, t.Status, func() error { return s.rebase(ctx, t, br, s.Cfg.BaseBranch, tip, false) })
 }
 
 // restackFanIn restacks a fan-in task whose dependencies moved or landed onto its deepest
@@ -555,6 +630,10 @@ func (s *syncer) restackFanIn(ctx context.Context, t store.Task, br store.Branch
 		return fmt.Errorf("compare fan-in task %s with its dependencies: %w", t.ID, err)
 	}
 	if !moved {
+		if restackBlocked(t) {
+			// The dependencies are back where the task starts: nothing to restack.
+			return s.withClaim(ctx, t.ID, t.Status, func() error { return s.settle(ctx, t, br, tg.Onto) })
+		}
 		return nil
 	}
 	return s.withClaim(ctx, t.ID, t.Status, func() error { return s.restackFanInClaimed(ctx, t, br, tg) })
@@ -568,8 +647,8 @@ func (s *syncer) restackFanInClaimed(ctx context.Context, t store.Task, br store
 	fr, err := fanin.Restack(ctx, fanin.Options{Branch: br, Target: tg})
 	var ce *fanin.ConflictError
 	if errors.As(err, &ce) {
-		return s.block(ctx, t.ID, fmt.Sprintf("sync: restacking fan-in task onto %s (%s) conflicts at %s in %s; the branch is unchanged. Restack it by hand in %s, then run `mill run --retry-blocked`",
-			tg.Onto, short(tg.BaseSHA), ce.Step, strings.Join(ce.Files, ", "), br.Worktree))
+		return s.blockRestack(ctx, t, fmt.Sprintf("sync: restacking fan-in task onto %s (%s) conflicts at %s in %s; the branch is unchanged. Every sync retries the restack; or restack it by hand in %s, then run `mill task rebase %s`",
+			tg.Onto, short(tg.BaseSHA), ce.Step, strings.Join(ce.Files, ", "), br.Worktree, t.ID))
 	}
 	if err != nil {
 		return fmt.Errorf("restack %s onto %s: %w", t.ID, tg.Onto, err)
@@ -592,28 +671,52 @@ func (s *syncer) block(ctx context.Context, id, reason string) error {
 	return nil
 }
 
+// blockRestack blocks t because its restack could not be done, recording the status it had
+// (or had before an earlier restack blocked it) so that a later sync retries the restack.
+func (s *syncer) blockRestack(ctx context.Context, t store.Task, reason string) error {
+	from := t.Status
+	if restackBlocked(t) {
+		from = t.RestackBlockedFrom
+	}
+	if err := s.Store.BlockRestack(ctx, t.ID, from, reason); err != nil {
+		return fmt.Errorf("block %s (%s): %w", t.ID, reason, err)
+	}
+	s.res.Blocked = append(s.res.Blocked, Blocked{TaskID: t.ID, Reason: reason})
+	s.logf("%s: blocked: %s", t.ID, reason)
+	return nil
+}
+
+// blockPreflight blocks t because its worktree cannot be restacked. A task already blocked by
+// a restack stays a restack block, so later syncs keep retrying it.
+func (s *syncer) blockPreflight(ctx context.Context, t store.Task, reason string) error {
+	if restackBlocked(t) {
+		return s.blockRestack(ctx, t, reason)
+	}
+	return s.block(ctx, t.ID, reason)
+}
+
 // preflight checks the task's worktree can be restacked onto onto: it has a starting point,
 // is a clean checkout of the branch at the recorded head. A failed check blocks the task.
 func (s *syncer) preflight(ctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
 	if br.StartSHA == "" && br.BaseSHA == "" {
-		return false, s.block(ctx, t.ID, "sync: no recorded starting point, so its own commits cannot be told apart; rebase it by hand")
+		return false, s.blockPreflight(ctx, t, "sync: no recorded starting point, so its own commits cannot be told apart; rebase it by hand")
 	}
 	if !gitx.IsWorktreeOn(ctx, br.Worktree, br.Name) {
-		return false, s.block(ctx, t.ID, fmt.Sprintf("sync: worktree %s is not a checkout of %s, so it cannot be restacked onto %s; restore it", br.Worktree, br.Name, onto))
+		return false, s.blockPreflight(ctx, t, fmt.Sprintf("sync: worktree %s is not a checkout of %s, so it cannot be restacked onto %s; restore it", br.Worktree, br.Name, onto))
 	}
 	dirty, err := gitx.HasChanges(ctx, br.Worktree)
 	if err != nil {
 		return false, err
 	}
 	if dirty {
-		return false, s.block(ctx, t.ID, fmt.Sprintf("sync: worktree %s has uncommitted changes, so it cannot be restacked onto %s; commit or discard them", br.Worktree, onto))
+		return false, s.blockPreflight(ctx, t, fmt.Sprintf("sync: worktree %s has uncommitted changes, so it cannot be restacked onto %s; commit or discard them", br.Worktree, onto))
 	}
 	head, err := gitx.RevParse(ctx, br.Worktree, "HEAD")
 	if err != nil {
 		return false, err
 	}
 	if head != br.HeadSHA {
-		return false, s.block(ctx, t.ID, fmt.Sprintf("sync: branch %s is at %s but mill recorded head %s; it was not restacked", br.Name, short(head), short(br.HeadSHA)))
+		return false, s.blockPreflight(ctx, t, fmt.Sprintf("sync: branch %s is at %s but mill recorded head %s; it was not restacked", br.Name, short(head), short(br.HeadSHA)))
 	}
 	return true, nil
 }
@@ -631,8 +734,8 @@ func (s *syncer) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	newHead, err := gitx.ReplayOnto(ctx, br.Worktree, t.ID, ontoSHA, oldStart)
 	var ce *gitx.RebaseConflictError
 	if errors.As(err, &ce) {
-		return s.block(ctx, t.ID, fmt.Sprintf("sync: restacking onto %s (%s) conflicts in %s; the branch is unchanged",
-			onto, short(ontoSHA), strings.Join(ce.Files, ", ")))
+		return s.blockRestack(ctx, t, fmt.Sprintf("sync: restacking onto %s (%s) conflicts in %s; the branch is unchanged. Every sync retries the restack; or rebase it by hand in %s, then run `mill task rebase %s`",
+			onto, short(ontoSHA), strings.Join(ce.Files, ", "), br.Worktree, t.ID))
 	}
 	if err != nil {
 		return fmt.Errorf("restack %s onto %s: %w", t.ID, onto, err)
@@ -660,6 +763,22 @@ func (s *syncer) finish(ctx context.Context, t store.Task, old, br store.Branch,
 	}
 	s.res.Restacked = append(s.res.Restacked, Restacked{TaskID: t.ID, Onto: onto, OntoSHA: ontoSHA, OldHead: oldHead, NewHead: newHead})
 	s.logf("%s: restacked onto %s (%s), head %s -> %s", t.ID, onto, short(ontoSHA), short(oldHead), short(newHead))
+	return s.settle(ctx, t, br, onto)
+}
+
+// settle checks a restacked task t at br's head: a task blocked by an earlier restack gets
+// back the status it had, the gate is re-run and a published task is re-published.
+func (s *syncer) settle(ctx context.Context, t store.Task, br store.Branch, onto string) error {
+	newHead := br.HeadSHA
+	if restackBlocked(t) {
+		from := t.RestackBlockedFrom
+		if err := s.Store.SetTaskStatus(ctx, t.ID, from, "", ""); err != nil {
+			return fmt.Errorf("%s was restacked but restoring its status %s failed: %w", t.ID, from, err)
+		}
+		t.Status, t.Reason, t.RestackBlockedFrom = from, "", ""
+		s.res.Restored = append(s.res.Restored, Restored{TaskID: t.ID, Status: from})
+		s.logf("%s: restack succeeded; %s again", t.ID, from)
+	}
 
 	// KP3: the gate is re-run, the verifier is not.
 	po := publish.Options{Store: s.Store, Cfg: s.Cfg, Paths: s.Paths, Host: s.Host, TaskID: t.ID}

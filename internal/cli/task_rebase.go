@@ -9,7 +9,9 @@ import (
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/fanin"
 	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/syncer"
 )
 
 func runTaskRebase(ctx context.Context, env Env, args []string) int {
@@ -86,7 +88,7 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 			return fail(fmt.Errorf("dependency branch %q: %w", db.Name, err))
 		}
 	default:
-		return rebaseFanIn(ctx, env, s, cfg, paths.Root, t, br, oldStart)
+		return rebaseFanIn(ctx, env, s, cfg, paths, t, br, oldStart)
 	}
 
 	if !gitx.IsWorktreeOn(ctx, br.Worktree, br.Name) {
@@ -109,6 +111,9 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 	}
 	if upToDate {
 		fmt.Fprintf(env.Stdout, "%s is already up to date: %s already contains %s (%s). Nothing changed.\n", id, br.Name, newBase, short(newTip))
+		if t.RestackBlockedFrom != "" {
+			return restoreAfterRebase(ctx, env, s, cfg, paths, t, newBase)
+		}
 		return ExitOK
 	}
 
@@ -136,6 +141,9 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 	}
 
 	fmt.Fprintf(env.Stdout, "Rebased %s onto %s.\n  starting point  %s -> %s\n  head            %s -> %s\n", id, newBase, short(oldStart), short(newTip), short(head), short(newHead))
+	if t.RestackBlockedFrom != "" {
+		return restoreAfterRebase(ctx, env, s, cfg, paths, t, newBase)
+	}
 	if goalID != "" {
 		fmt.Fprintf(env.Stdout, "Next: mill run %s --retry-blocked\n", goalID)
 	} else {
@@ -148,8 +156,9 @@ func runTaskRebase(ctx context.Context, env Env, args []string) int {
 // dependency (or the remote base branch when that one landed), merges the other dependencies
 // that have not landed and replays the task's own commits. A conflict aborts and leaves the
 // branch unchanged.
-func rebaseFanIn(ctx context.Context, env Env, s *store.Store, cfg config.Config, root string, t store.Task, br store.Branch, oldStart string) int {
+func rebaseFanIn(ctx context.Context, env Env, s *store.Store, cfg config.Config, paths project.Paths, t store.Task, br store.Branch, oldStart string) int {
 	id := t.ID
+	root := paths.Root
 	fail := func(err error) int {
 		fmt.Fprintf(env.Stderr, "mill task rebase: %v\n", err)
 		return ExitError
@@ -199,6 +208,9 @@ func rebaseFanIn(ctx context.Context, env Env, s *store.Store, cfg config.Config
 	}
 	if !moved {
 		fmt.Fprintf(env.Stdout, "%s is already up to date: %s already contains its dependencies. Nothing changed.\n", id, br.Name)
+		if t.RestackBlockedFrom != "" {
+			return restoreAfterRebase(ctx, env, s, cfg, paths, t, tg.Onto)
+		}
 		return ExitOK
 	}
 
@@ -231,8 +243,33 @@ func rebaseFanIn(ctx context.Context, env Env, s *store.Store, cfg config.Config
 	}
 	fmt.Fprintf(env.Stdout, "Restacked %s onto %s and merged %s.\n  starting point  %s -> %s\n  head            %s -> %s\n",
 		id, tg.Onto, merged, short(oldStart), short(fr.StartSHA), short(head), short(fr.Head))
+	if t.RestackBlockedFrom != "" {
+		return restoreAfterRebase(ctx, env, s, cfg, paths, t, tg.Onto)
+	}
 	if goalID != "" {
 		fmt.Fprintf(env.Stdout, "Next: mill run %s --retry-blocked\n", goalID)
 	}
+	return ExitOK
+}
+
+// restoreAfterRebase gives task t, blocked by a restack conflict and now rebased onto onto,
+// back the status it had (verified or published), as a sync does after a restack: the gate
+// re-runs and a published task is re-published. The caller holds the task's claim.
+func restoreAfterRebase(ctx context.Context, env Env, s *store.Store, cfg config.Config, paths project.Paths, t store.Task, onto string) int {
+	res, err := syncer.Restore(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: env.Stdout, Home: env.Home}, t.ID, onto)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "mill task rebase: %s was rebased but restoring its status %s failed: %v; run `mill task rebase %s` again\n", t.ID, t.RestackBlockedFrom, err, t.ID)
+		return ExitError
+	}
+	if len(res.Blocked) > 0 {
+		fmt.Fprintf(env.Stderr, "mill task rebase: %s was rebased but is blocked again: %s\n", t.ID, res.Blocked[0].Reason)
+		return ExitError
+	}
+	now, err := s.GetTask(ctx, t.ID)
+	if err != nil {
+		fmt.Fprintf(env.Stderr, "mill task rebase: %v\n", err)
+		return ExitError
+	}
+	fmt.Fprintf(env.Stdout, "%s is %s again; it was blocked only because a restack conflicted.\n", t.ID, now.Status)
 	return ExitOK
 }

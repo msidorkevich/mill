@@ -315,6 +315,17 @@ func (k *keeper) block(ctx context.Context, id, reason string) error {
 	return nil
 }
 
+// blockRestack blocks the verified or published task t because its restack failed, recording
+// its status so that a later sync retries the restack and restores it.
+func (k *keeper) blockRestack(ctx context.Context, t store.Task, reason string) error {
+	if err := k.Store.BlockRestack(ctx, t.ID, t.Status, reason); err != nil {
+		return fmt.Errorf("block %s (%s): %w", t.ID, reason, err)
+	}
+	k.res.Blocked = append(k.res.Blocked, Blocked{TaskID: t.ID, Reason: reason})
+	k.logf("%s: blocked: %s", t.ID, reason)
+	return nil
+}
+
 // preflight checks the task's worktree can be rebased onto onto: it has a starting point and
 // is a clean checkout of the branch at the recorded head. A failed check blocks the task and
 // returns ok false.
@@ -414,8 +425,9 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 
 	old := br
 	wt := br.Worktree
-	// fail undoes the rebase and blocks the task; step names what failed.
-	fail := func(step string, files []string, detail string) error {
+	// undo undoes the rebase and blocks the task; step names what failed. A block during the
+	// rebase itself (restack) is retried by later syncs.
+	undo := func(restack bool, step string, files []string, detail string) error {
 		if err := k.restore(ctx, old); err != nil {
 			return fmt.Errorf("%s: rebasing onto %s failed (%s: %s) and the branch could not be restored: %w", t.ID, onto, step, detail, err)
 		}
@@ -423,9 +435,14 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 		if len(files) > 0 {
 			where = " in " + strings.Join(files, ", ")
 		}
-		return k.block(ctx, t.ID, fmt.Sprintf("keeper: rebasing onto %s (%s) failed at %s%s: %s; the branch is unchanged. Resolve the conflict by hand, then run `mill task rebase %s` or `mill run --retry-blocked`",
-			onto, short(tip), step, where, detail, t.ID))
+		reason := fmt.Sprintf("keeper: rebasing onto %s (%s) failed at %s%s: %s; the branch is unchanged. Resolve the conflict by hand, then run `mill task rebase %s` or `mill run --retry-blocked`",
+			onto, short(tip), step, where, detail, t.ID)
+		if restack {
+			return k.blockRestack(ctx, t, reason)
+		}
+		return k.block(ctx, t.ID, reason)
 	}
+	fail := func(step string, files []string, detail string) error { return undo(true, step, files, detail) }
 
 	// Replay the net change of the task's commits, so attempts that undo each other cannot
 	// conflict on their own.
@@ -455,7 +472,8 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 		br.Base = k.Cfg.BaseBranch
 	}
 	br.BaseSHA, br.StartSHA, br.HeadSHA = tip, tip, st.Head
-	return k.settle(ctx, t, old, br, restacked{onto: onto, tip: tip, oldStart: oldStart, agent: agent, rerere: rerere}, fail)
+	return k.settle(ctx, t, old, br, restacked{onto: onto, tip: tip, oldStart: oldStart, agent: agent, rerere: rerere},
+		func(step string, files []string, detail string) error { return undo(false, step, files, detail) })
 }
 
 // restacked describes a finished rebase or fan-in restack for settle.

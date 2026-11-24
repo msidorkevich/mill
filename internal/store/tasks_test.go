@@ -773,3 +773,67 @@ func TestRunningStagesListsRunningTasksWithoutRunningAttempt(t *testing.T) {
 		t.Fatalf("stages = %+v", got)
 	}
 }
+
+func TestBlockRestackRecordsFormerStatusUntilTheNextStatusChange(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "t1", TaskVerified, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApproveTask(ctx, "t1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BlockRestack(ctx, "t1", TaskPending, "x"); err == nil {
+		t.Fatal("restack block of a pending task accepted")
+	}
+	if err := s.BlockRestack(ctx, "t1", TaskVerified, "restack conflicts"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.GetTask(ctx, "t1")
+	if got.Status != TaskBlocked || got.Reason != "restack conflicts" || got.RestackBlockedFrom != TaskVerified || !got.Approved {
+		t.Fatalf("task = %+v", got)
+	}
+	// Any other block replaces it.
+	if err := s.SetTaskStatus(ctx, "t1", TaskBlocked, "", "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetTask(ctx, "t1"); got.RestackBlockedFrom != "" || got.Reason != "rejected" {
+		t.Fatalf("task = %+v", got)
+	}
+	if err := s.BlockRestack(ctx, "missing", TaskVerified, "x"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing task err = %v", err)
+	}
+}
+
+func TestTaskBlockedByOlderRestackConflictCountsAsRestackBlocked(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	for _, id := range []string{"v", "p", "k", "other"} {
+		if err := s.CreateTask(ctx, spec(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SaveBranch(ctx, Branch{TaskID: "p", Name: "mill/t/p", PublishedRef: "review/p", PublishedSHA: "abc"}); err != nil {
+		t.Fatal(err)
+	}
+	// Blocks recorded the way sync did before it kept the former status; a keeper reason is
+	// ambiguous (it also covers failures after a resolution) and is not a restack block.
+	for id, reason := range map[string]string{
+		"v":     "sync: restacking onto origin/main (1234abcd) conflicts in b.txt; the branch is unchanged",
+		"p":     "sync: restacking fan-in task onto origin/main (1234abcd) conflicts at replaying x in b.txt; the branch is unchanged. Restack it by hand",
+		"k":     "keeper: rebasing onto origin/main (1234abcd) failed at verify: fail; the branch is unchanged",
+		"other": "sync: the gate failed after restacking onto origin/main",
+	} {
+		if err := s.SetTaskStatus(ctx, id, TaskBlocked, "", reason); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id, want := range map[string]string{"v": TaskVerified, "p": TaskPublished, "k": "", "other": ""} {
+		if got, err := s.GetTask(ctx, id); err != nil || got.RestackBlockedFrom != want {
+			t.Errorf("%s: blocked from %q (err %v), want %q", id, got.RestackBlockedFrom, err, want)
+		}
+	}
+}

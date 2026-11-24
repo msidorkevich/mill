@@ -83,7 +83,9 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 	}
 
 	old := br
-	fail := func(step string, files []string, detail string) error {
+	// undo puts the branch back and blocks the task; a block during the restack itself
+	// (restack) is retried by later syncs.
+	undo := func(restack bool, step string, files []string, detail string) error {
 		if err := k.restore(ctx, old); err != nil {
 			return fmt.Errorf("%s: restacking onto %s failed (%s: %s) and the branch could not be restored: %w", t.ID, tg.Onto, step, detail, err)
 		}
@@ -91,9 +93,14 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 		if len(files) > 0 {
 			where = " in " + strings.Join(files, ", ")
 		}
-		return k.block(ctx, t.ID, fmt.Sprintf("keeper: restacking fan-in task onto %s (%s) failed at %s%s: %s; the branch is unchanged. Resolve the conflict by hand, then run `mill task rebase %s` or `mill run --retry-blocked`",
-			tg.Onto, short(tg.BaseSHA), step, where, detail, t.ID))
+		reason := fmt.Sprintf("keeper: restacking fan-in task onto %s (%s) failed at %s%s: %s; the branch is unchanged. Resolve the conflict by hand, then run `mill task rebase %s` or `mill run --retry-blocked`",
+			tg.Onto, short(tg.BaseSHA), step, where, detail, t.ID)
+		if restack {
+			return k.blockRestack(ctx, t, reason)
+		}
+		return k.block(ctx, t.ID, reason)
 	}
+	fail := func(step string, files []string, detail string) error { return undo(true, step, files, detail) }
 
 	// resolveErr carries the failed step of the resolver out of fanin.Restack.
 	type resolveErr struct{ step, detail string }
@@ -119,5 +126,6 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 	}
 
 	br.Base, br.BaseSHA, br.StartSHA, br.HeadSHA = tg.Base, tg.BaseSHA, fr.StartSHA, fr.Head
-	return k.settle(ctx, t, old, br, restacked{onto: tg.Onto, tip: tg.BaseSHA, oldStart: oldStart, agent: fr.Resolved, rerere: fr.Rerere}, fail)
+	return k.settle(ctx, t, old, br, restacked{onto: tg.Onto, tip: tg.BaseSHA, oldStart: oldStart, agent: fr.Resolved, rerere: fr.Rerere},
+		func(step string, files []string, detail string) error { return undo(false, step, files, detail) })
 }
