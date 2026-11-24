@@ -46,11 +46,19 @@ type Config struct {
 	GateCheckBase bool `toml:"gate_check_base"`
 	// EnvAllow lists extra environment variables passed to workers and gate commands, on top
 	// of the built-in allowlist (SE3).
-	EnvAllow []string        `toml:"env_allow"`
-	Runner   RunnerConfig    `toml:"runner"`
-	Host     HostConfig      `toml:"host"`
-	Sizes    map[string]Size `toml:"sizes"`
-	Budget   Budget          `toml:"budget"`
+	EnvAllow []string     `toml:"env_allow"`
+	Runner   RunnerConfig `toml:"runner"`
+	Host     HostConfig   `toml:"host"`
+	// Sizes is the legacy size -> model mapping, used only when the file has no [models].
+	Sizes map[string]Size `toml:"sizes"`
+	// Models maps a task's size and complexity to a model: size -> complexity -> model.
+	// Nil means the mapping comes from Sizes (legacy fallback).
+	Models map[string]map[string]string `toml:"models"`
+	// ModelTiers orders model families from cheapest to strongest. A model belongs to the
+	// first tier whose name it contains; escalation moves up this list.
+	ModelTiers []string    `toml:"model_tiers"`
+	Roles      RolesConfig `toml:"roles"`
+	Budget     Budget      `toml:"budget"`
 	// Prices overrides the built-in token prices (USD per million tokens), keyed by model
 	// alias or id. Used to estimate the cost of runs that end without a result.
 	Prices map[string]price.Rates `toml:"prices"`
@@ -90,6 +98,15 @@ type Size struct {
 	Model string `toml:"model"`
 }
 
+// RolesConfig holds the models of the non-implementing roles.
+type RolesConfig struct {
+	// Planner is the model that plans goals.
+	Planner string `toml:"planner"`
+	// VerifierMin is the lowest model a verifier runs on; a verifier never runs below the
+	// implementer's tier.
+	VerifierMin string `toml:"verifier_min"`
+}
+
 // Budget holds the spending limits (BG1, BG2, BG6).
 type Budget struct {
 	Count   budget.Count          `toml:"count"`
@@ -112,6 +129,7 @@ var (
 	ChildrenOnModes  = []string{"verified", "published"}
 	CleanOnLandModes = []string{"all", "local", "off"}
 	SizeNames        = []string{"S", "M", "L"}
+	Complexities     = []string{"low", "medium", "high"}
 )
 
 // Default returns the built-in defaults. DefaultTOML documents the same values.
@@ -136,10 +154,12 @@ func Default() Config {
 			AttemptTimeout: Duration{30 * time.Minute},
 		},
 		Host: HostConfig{Kind: "auto"},
-		Sizes: map[string]Size{
-			"S": {Model: "sonnet"},
-			"M": {Model: "opus"},
+		Models: map[string]map[string]string{
+			"S": {"low": "haiku", "medium": "sonnet", "high": "opus"},
+			"M": {"low": "sonnet", "medium": "opus", "high": "opus"},
 		},
+		ModelTiers: []string{"haiku", "sonnet", "opus"},
+		Roles:      RolesConfig{Planner: "opus", VerifierMin: "sonnet"},
 		Budget: Budget{
 			Count:   budget.CountBillable,
 			Attempt: budget.Limits{USD: 2, Tokens: 400_000},
@@ -174,6 +194,10 @@ gate_rerun = true         # re-run failed gate commands once; passing then = fla
 gate_check_base = true    # run still-failing commands on the task's starting point; failing there too blocks the task
 env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
 
+# Model families from cheapest to strongest. A model belongs to the first tier whose name it
+# contains ("claude-opus-5-5" is opus); retries and verifiers move up this list.
+model_tiers = ["haiku", "sonnet", "opus"]
+
 [runner]
 kind = "claude"           # or "fake" (scripted, zero tokens; set fake_script)
 claude_bin = "claude"
@@ -182,10 +206,17 @@ attempt_timeout = "30m"   # per agent run
 [host]
 kind = "auto"             # "auto": herdr inside a herdr pane (HERDR_ENV=1, herdr on PATH), else exec; "exec": plain processes; "herdr": always herdr, fails outside a herdr pane
 
-[sizes.S]
-model = "sonnet"
-[sizes.M]
-model = "opus"
+# Model per task size and complexity. A file with [models] uses only its entries; a file
+# without [models] but with legacy [sizes.X] model = "..." blocks maps every complexity of a
+# size to that model.
+[models]
+S = { low = "haiku", medium = "sonnet", high = "opus" }
+M = { low = "sonnet", medium = "opus", high = "opus" }
+# L = { low = "opus", medium = "opus", high = "opus" }
+
+[roles]
+planner = "opus"          # model that plans goals
+verifier_min = "sonnet"   # verifiers run on the implementer's model or this, whichever tier is higher
 
 [budget]
 count = "billable"        # tokens counted against limits: "billable" or "all" (adds cache reads)
@@ -231,6 +262,8 @@ func Parse(text string) (Config, error) {
 	cfg := Default()
 	// Maps are replaced, not merged, when the file sets them.
 	cfg.Sizes = nil
+	cfg.Models = nil
+	cfg.ModelTiers = nil
 	cfg.Budget.Size = nil
 	md, err := toml.Decode(text, &cfg)
 	if err != nil {
@@ -247,6 +280,14 @@ func Parse(text string) (Config, error) {
 	def := Default()
 	if !md.IsDefined("sizes") {
 		cfg.Sizes = def.Sizes
+	}
+	// [models] wins; without it, [sizes] is the legacy mapping (Models stays nil); with
+	// neither, the default mapping applies.
+	if !md.IsDefined("models") && !md.IsDefined("sizes") {
+		cfg.Models = def.Models
+	}
+	if !md.IsDefined("model_tiers") {
+		cfg.ModelTiers = def.ModelTiers
 	}
 	if !md.IsDefined("budget", "size") {
 		cfg.Budget.Size = def.Budget.Size
@@ -314,6 +355,37 @@ func (c Config) Validate() error {
 			add("sizes.%s.model must not be empty", name)
 		}
 	}
+	for size, byComplexity := range c.Models {
+		if !oneOf(size, SizeNames) {
+			add("models.%s: unknown size, want one of %v", size, SizeNames)
+		}
+		for cx, m := range byComplexity {
+			if !oneOf(cx, Complexities) {
+				add("models.%s.%s: unknown complexity, want one of %v", size, cx, Complexities)
+			}
+			if m == "" {
+				add("models.%s.%s must not be empty", size, cx)
+			}
+		}
+	}
+	if len(c.ModelTiers) == 0 {
+		add("model_tiers must not be empty")
+	}
+	seen := map[string]bool{}
+	for _, t := range c.ModelTiers {
+		if t == "" {
+			add("model_tiers: tier names must not be empty")
+		} else if seen[t] {
+			add("model_tiers: %q appears more than once", t)
+		}
+		seen[t] = true
+	}
+	if c.Roles.Planner == "" {
+		add("roles.planner must not be empty")
+	}
+	if c.Roles.VerifierMin == "" {
+		add("roles.verifier_min must not be empty")
+	}
 	for name, r := range c.Prices {
 		for key, v := range map[string]float64{"input": r.Input, "output": r.Output,
 			"cache_write_5m": r.CacheWrite5m, "cache_write_1h": r.CacheWrite1h, "cache_read": r.CacheRead} {
@@ -362,8 +434,68 @@ func (c Config) Worktrees(root, home string) string {
 	return filepath.Join(base, repoKey(root))
 }
 
-// Model returns the model for a task size, or "" if the size has no mapping.
-func (c Config) Model(size string) string { return c.Sizes[size].Model }
+// Model returns the model for a task size at medium complexity, or "" if there is no mapping.
+func (c Config) Model(size string) string {
+	m, _ := c.TaskModel(size, "medium", "")
+	return m
+}
+
+// TaskModel picks the model for a task: the override when one is given, else the mapping for
+// size and complexity. why says where the model came from; when there is no mapping, model
+// is "" and why names the config key to add.
+func (c Config) TaskModel(size, complexity, override string) (model, why string) {
+	if override != "" {
+		return override, "override"
+	}
+	if c.Models == nil {
+		if m := c.Sizes[size].Model; m != "" {
+			return m, fmt.Sprintf("mapping %s/%s (sizes fallback)", size, complexity)
+		}
+		return "", fmt.Sprintf("no model for size %q: add [sizes.%s] model = \"...\" or a [models] section with %s.%s", size, size, size, complexity)
+	}
+	if m := c.Models[size][complexity]; m != "" {
+		return m, fmt.Sprintf("mapping %s/%s", size, complexity)
+	}
+	return "", fmt.Sprintf("no model for size %q, complexity %q: add %s = \"...\" to [models.%s]", size, complexity, complexity, size)
+}
+
+// Tier returns the index in ModelTiers of the first tier name contained in model, or -1 when
+// the model belongs to no tier.
+func (c Config) Tier(model string) int {
+	for i, t := range c.ModelTiers {
+		if t != "" && strings.Contains(model, t) {
+			return i
+		}
+	}
+	return -1
+}
+
+// Escalate returns the model steps tiers above model, capped at the top tier. A model that
+// belongs to no tier, or that would not move, is returned unchanged.
+func (c Config) Escalate(model string, steps int) string {
+	t := c.Tier(model)
+	if t < 0 || steps <= 0 {
+		return model
+	}
+	n := min(t+steps, len(c.ModelTiers)-1)
+	if n == t {
+		return model
+	}
+	return c.ModelTiers[n]
+}
+
+// VerifierModel returns the model a verifier runs on for an implementer on impl: the higher of
+// impl and Roles.VerifierMin by tier. An untiered impl is returned unchanged.
+func (c Config) VerifierModel(impl string) string {
+	it := c.Tier(impl)
+	if it < 0 {
+		return impl
+	}
+	if c.Tier(c.Roles.VerifierMin) > it {
+		return c.Roles.VerifierMin
+	}
+	return impl
+}
 
 func oneOf(v string, set []string) bool {
 	for _, s := range set {

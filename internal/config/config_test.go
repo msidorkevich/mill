@@ -274,3 +274,150 @@ func TestCleanOnLandDefaultsToAllAndIsValidated(t *testing.T) {
 		t.Errorf("invalid clean_on_land accepted: %v", err)
 	}
 }
+
+func TestModelsDefaultMapping(t *testing.T) {
+	cfg := Default()
+	want := map[[2]string]string{
+		{"S", "low"}: "haiku", {"S", "medium"}: "sonnet", {"S", "high"}: "opus",
+		{"M", "low"}: "sonnet", {"M", "medium"}: "opus", {"M", "high"}: "opus",
+	}
+	for k, w := range want {
+		got, why := cfg.TaskModel(k[0], k[1], "")
+		if got != w || why != "mapping "+k[0]+"/"+k[1] {
+			t.Errorf("TaskModel(%s, %s) = %q, %q; want %q", k[0], k[1], got, why, w)
+		}
+	}
+	if cfg.Model("S") != "sonnet" || cfg.Model("M") != "opus" {
+		t.Errorf("Model() does not return the medium mapping")
+	}
+}
+
+func TestModelsMissingEntryNamesKeyToAdd(t *testing.T) {
+	got, why := Default().TaskModel("L", "high", "")
+	if got != "" || !strings.Contains(why, "models") || !strings.Contains(why, "L") || !strings.Contains(why, "high") {
+		t.Fatalf("TaskModel(L, high) = %q, %q", got, why)
+	}
+}
+
+func TestModelsOverrideWins(t *testing.T) {
+	got, why := Default().TaskModel("S", "low", "claude-opus-5-5")
+	if got != "claude-opus-5-5" || why != "override" {
+		t.Fatalf("got %q, %q", got, why)
+	}
+}
+
+func TestSizesFallbackMapsEveryComplexity(t *testing.T) {
+	cfg, err := Parse("[sizes.S]\nmodel = \"x\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cx := range Complexities {
+		got, why := cfg.TaskModel("S", cx, "")
+		if got != "x" || why != "mapping S/"+cx+" (sizes fallback)" {
+			t.Errorf("TaskModel(S, %s) = %q, %q", cx, got, why)
+		}
+	}
+	if got, why := cfg.TaskModel("M", "low", ""); got != "" || !strings.Contains(why, "sizes.M") {
+		t.Errorf("TaskModel(M, low) = %q, %q; want no model and a hint", got, why)
+	}
+}
+
+func TestModelsSectionIgnoresSizes(t *testing.T) {
+	cfg, err := Parse("[sizes.S]\nmodel = \"x\"\n[models.S]\nlow = \"y\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, why := cfg.TaskModel("S", "low", ""); got != "y" || why != "mapping S/low" {
+		t.Fatalf("TaskModel(S, low) = %q, %q", got, why)
+	}
+	if got, _ := cfg.TaskModel("S", "medium", ""); got != "" {
+		t.Fatalf("TaskModel(S, medium) = %q, want no mapping (sizes ignored, defaults replaced)", got)
+	}
+}
+
+func TestModelsValidation(t *testing.T) {
+	tests := []struct{ name, toml, want string }{
+		{"unknown complexity", "[models.S]\nextreme = \"opus\"", "models.S.extreme"},
+		{"empty model", "[models.S]\nlow = \"\"", "models.S.low"},
+		{"unknown size", "[models.XL]\nlow = \"opus\"", "models.XL"},
+		{"empty tiers", "model_tiers = []", "model_tiers"},
+		{"duplicate tiers", "model_tiers = [\"a\", \"a\"]", "model_tiers"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(tt.toml)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want mention of %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRolesConfigDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	if cfg.Roles.Planner != "opus" || cfg.Roles.VerifierMin != "sonnet" {
+		t.Fatalf("roles = %+v", cfg.Roles)
+	}
+	cfg, err := Parse("[roles]\nplanner = \"sonnet\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Roles.Planner != "sonnet" || cfg.Roles.VerifierMin != "sonnet" {
+		t.Fatalf("roles = %+v", cfg.Roles)
+	}
+	for _, key := range []string{"planner", "verifier_min"} {
+		_, err := Parse("[roles]\n" + key + " = \"\"\n")
+		if err == nil || !strings.Contains(err.Error(), "roles."+key) {
+			t.Errorf("empty roles.%s: err = %v", key, err)
+		}
+	}
+}
+
+func TestTierFindsFirstContainedName(t *testing.T) {
+	cfg := Default()
+	for model, want := range map[string]int{"haiku": 0, "sonnet": 1, "claude-opus-5-5": 2, "gpt-x": -1} {
+		if got := cfg.Tier(model); got != want {
+			t.Errorf("Tier(%q) = %d, want %d", model, got, want)
+		}
+	}
+}
+
+func TestEscalateMovesUpTiersCappedAtTop(t *testing.T) {
+	cfg := Default()
+	tests := []struct {
+		model string
+		steps int
+		want  string
+	}{
+		{"haiku", 1, "sonnet"},
+		{"sonnet", 5, "opus"},
+		{"claude-opus-5-5", 1, "claude-opus-5-5"},
+		{"gpt-x", 2, "gpt-x"},
+		{"haiku", 0, "haiku"},
+	}
+	for _, tt := range tests {
+		if got := cfg.Escalate(tt.model, tt.steps); got != tt.want {
+			t.Errorf("Escalate(%q, %d) = %q, want %q", tt.model, tt.steps, got, tt.want)
+		}
+	}
+}
+
+func TestVerifierModelIsHigherOfImplAndMinimum(t *testing.T) {
+	cfg := Default()
+	for impl, want := range map[string]string{"haiku": "sonnet", "sonnet": "sonnet", "opus": "opus", "gpt-x": "gpt-x"} {
+		if got := cfg.VerifierModel(impl); got != want {
+			t.Errorf("VerifierModel(%q) = %q, want %q", impl, got, want)
+		}
+	}
+}
+
+func TestDefaultTOMLHasModelsAndRoles(t *testing.T) {
+	for _, s := range []string{"[models]", "[roles]", "model_tiers"} {
+		if !strings.Contains(DefaultTOML, s) {
+			t.Errorf("DefaultTOML lacks %s", s)
+		}
+	}
+	if strings.Contains(DefaultTOML, "\n[sizes.") {
+		t.Error("DefaultTOML still has [sizes.*] blocks")
+	}
+}
