@@ -24,6 +24,7 @@ func opts(t *testing.T, cmds ...string) Options {
 }
 
 func TestAllPass(t *testing.T) {
+	t.Parallel()
 	r := Run(context.Background(), opts(t, "echo one", "echo two >&2"))
 	if !r.Passed || len(r.Commands) != 2 || r.Reason != "" {
 		t.Fatalf("result = %+v", r)
@@ -34,6 +35,7 @@ func TestAllPass(t *testing.T) {
 }
 
 func TestFailureKeepsRunningAndReports(t *testing.T) {
+	t.Parallel()
 	r := Run(context.Background(), opts(t, "echo boom; exit 2", "echo after"))
 	if r.Passed {
 		t.Fatal("gate passed with a failing command")
@@ -50,6 +52,7 @@ func TestFailureKeepsRunningAndReports(t *testing.T) {
 }
 
 func TestNoChecksFails(t *testing.T) {
+	t.Parallel()
 	r := Run(context.Background(), opts(t, "", "   "))
 	if r.Passed || !strings.Contains(r.Reason, "no checks configured") {
 		t.Fatalf("empty gate = %+v", r)
@@ -57,6 +60,7 @@ func TestNoChecksFails(t *testing.T) {
 }
 
 func TestTimeoutFails(t *testing.T) {
+	t.Parallel()
 	o := opts(t, "sleep 5")
 	o.Timeout = 200 * time.Millisecond
 	r := Run(context.Background(), o)
@@ -66,6 +70,7 @@ func TestTimeoutFails(t *testing.T) {
 }
 
 func TestCouldNotRunFails(t *testing.T) {
+	t.Parallel()
 	o := opts(t, "true")
 	o.Dir = "/nonexistent/dir"
 	r := Run(context.Background(), o)
@@ -75,8 +80,11 @@ func TestCouldNotRunFails(t *testing.T) {
 }
 
 func TestRunsInWorktreeWithGivenEnv(t *testing.T) {
-	t.Setenv("MILL_GATE_SECRET", "x")
-	o := opts(t, `test -f marker && test -z "$MILL_GATE_SECRET"`)
+	t.Parallel()
+	// The environment mill would filter holds a secret; the gate sees only what Env passes.
+	o := opts(t, `test -f marker && test -z "$MILL_GATE_SECRET" && test "$MILL_GATE_KEEP" = y`)
+	o.Env = host.AllowEnv(append(os.Environ(), "MILL_GATE_SECRET=x", "MILL_GATE_KEEP=y"),
+		append(append([]string{}, host.DefaultEnvAllow...), "MILL_GATE_KEEP"))
 	if err := os.WriteFile(filepath.Join(o.Dir, "marker"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +94,7 @@ func TestRunsInWorktreeWithGivenEnv(t *testing.T) {
 }
 
 func TestLogsAreNeverOverwritten(t *testing.T) {
+	t.Parallel()
 	o := opts(t, "echo first")
 	r1 := Run(context.Background(), o)
 	o.Cmds = []string{"echo second"}
@@ -100,6 +109,7 @@ func TestLogsAreNeverOverwritten(t *testing.T) {
 }
 
 func TestTailIsBounded(t *testing.T) {
+	t.Parallel()
 	o := opts(t, fmt.Sprintf("i=0; while [ $i -lt %d ]; do echo line$i; i=$((i+1)); done", TailLines+50))
 	r := Run(context.Background(), o)
 	lines := strings.Split(r.Commands[0].Tail, "\n")

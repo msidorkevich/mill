@@ -33,7 +33,8 @@ func fakeHerdr(t *testing.T, create string) (h *Herdr, log, dir string) {
 	if create == "" {
 		create = `echo '` + realTabCreate + `'`
 	}
-	script := "#!/bin/sh\n" +
+	// herdr's own environment holds a variable the worker must not see.
+	script := "#!/bin/sh\nexport MILL_TEST_OUTSIDE=leak\n" +
 		"echo \"$*\" >> " + shQuote(log) + "\n" +
 		"case \"$1 $2\" in\n" +
 		"'tab create') " + create + " ;;\n" +
@@ -46,7 +47,7 @@ func fakeHerdr(t *testing.T, create string) (h *Herdr, log, dir string) {
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return &Herdr{Bin: bin, Workspace: "w8", Poll: 10 * time.Millisecond, StartTimeout: 10 * time.Second, Grace: 2 * time.Second}, log, dir
+	return &Herdr{Bin: bin, Workspace: "w8", Poll: 10 * time.Millisecond, StartTimeout: 10 * time.Second, Grace: 500 * time.Millisecond}, log, dir
 }
 
 func herdrLog(t *testing.T, log string) []string {
@@ -75,7 +76,7 @@ func waitHerdr(t *testing.T, h Handle) Exit {
 }
 
 func TestHerdrCapturesOutputExitCodeAndExactEnv(t *testing.T) {
-	t.Setenv("MILL_TEST_OUTSIDE", "leak")
+	t.Parallel()
 	hh, log, _ := fakeHerdr(t, "")
 	dir := t.TempDir()
 	logs := filepath.Join(dir, "logs")
@@ -149,6 +150,7 @@ func TestHerdrCapturesOutputExitCodeAndExactEnv(t *testing.T) {
 }
 
 func TestHerdrStdinDirAndPaneMirror(t *testing.T) {
+	t.Parallel()
 	hh, _, fake := fakeHerdr(t, "")
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -181,6 +183,7 @@ func TestHerdrStdinDirAndPaneMirror(t *testing.T) {
 }
 
 func TestHerdrKillStopsProcessGroupAndClosesPane(t *testing.T) {
+	t.Parallel()
 	hh, log, _ := fakeHerdr(t, "")
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
@@ -208,6 +211,7 @@ func TestHerdrKillStopsProcessGroupAndClosesPane(t *testing.T) {
 }
 
 func TestHerdrContextCancelKills(t *testing.T) {
+	t.Parallel()
 	hh, log, _ := fakeHerdr(t, "")
 	ctx, cancel := context.WithCancel(context.Background())
 	h, err := hh.Start(ctx, ProcSpec{Argv: []string{"/bin/sleep", "30"}, Env: []string{"PATH=/usr/bin:/bin"}})
@@ -224,6 +228,7 @@ func TestHerdrContextCancelKills(t *testing.T) {
 }
 
 func TestHerdrStartErrors(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, create, want string
 	}{
@@ -248,6 +253,7 @@ func TestHerdrStartErrors(t *testing.T) {
 }
 
 func TestHerdrStartFailsWhenPidNeverAppears(t *testing.T) {
+	t.Parallel()
 	hh, log, _ := fakeHerdr(t, "")
 	// A herdr that accepts `pane run` but never runs the wrapper.
 	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n[ \"$2\" = create ] && echo '" + realTabCreate + "'\nexit 0\n"
@@ -265,6 +271,7 @@ func TestHerdrStartFailsWhenPidNeverAppears(t *testing.T) {
 }
 
 func TestSelect(t *testing.T) {
+	t.Parallel()
 	env := func(v string) func(string) string {
 		return func(k string) string {
 			if k == "HERDR_ENV" {
@@ -332,6 +339,7 @@ func waitHerdrResult(t *testing.T, h Handle) (Exit, error, time.Duration) {
 }
 
 func TestHerdrRunsEachWorkerInOwnLabelledTabWithNotice(t *testing.T) {
+	t.Parallel()
 	hh, log, fake := fakeHerdr(t, "")
 	dir := t.TempDir()
 	h, err := hh.Start(context.Background(), ProcSpec{
@@ -377,6 +385,7 @@ func TestHerdrRunsEachWorkerInOwnLabelledTabWithNotice(t *testing.T) {
 }
 
 func TestHerdrWaitReportsClosedPane(t *testing.T) {
+	t.Parallel()
 	hh, log, fake := fakeHerdr(t, "")
 	hh.Grace = 300 * time.Millisecond
 	dir := t.TempDir()
@@ -411,6 +420,7 @@ func TestHerdrWaitReportsClosedPane(t *testing.T) {
 }
 
 func TestHerdrWaitReturnsAfterCancelWhenExitFileNeverAppears(t *testing.T) {
+	t.Parallel()
 	hh, log, fake := fakeHerdr(t, "")
 	hh.StartTimeout, hh.Grace = 300*time.Millisecond, 300*time.Millisecond
 	// A wrapper that reports a worker pid, stays alive and never writes its exit file.

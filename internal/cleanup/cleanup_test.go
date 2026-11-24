@@ -51,6 +51,7 @@ func landedTask(t *testing.T) (Options, store.Branch, string) {
 }
 
 func TestCleanupKeepsDirtyWorktreeAndBranch(t *testing.T) {
+	t.Parallel()
 	o, br, _ := landedTask(t)
 	ctx := context.Background()
 	if err := os.WriteFile(filepath.Join(br.Worktree, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
@@ -73,6 +74,7 @@ func TestCleanupKeepsDirtyWorktreeAndBranch(t *testing.T) {
 }
 
 func TestCleanupRemovesWorktreeAndBranchThenPrunesEmptyDirs(t *testing.T) {
+	t.Parallel()
 	o, br, wtRoot := landedTask(t)
 	ctx := context.Background()
 	o.KeepDirty = true
@@ -103,6 +105,7 @@ func TestCleanupRemovesWorktreeAndBranchThenPrunesEmptyDirs(t *testing.T) {
 }
 
 func TestCleanupLeavesBusyTaskAloneAndReleasesItsClaims(t *testing.T) {
+	t.Parallel()
 	o, br, _ := landedTask(t)
 	ctx := context.Background()
 	if _, err := o.Store.StartAttempt(ctx, "x", 1, "implementer"); err != nil {
@@ -125,6 +128,7 @@ func TestCleanupLeavesBusyTaskAloneAndReleasesItsClaims(t *testing.T) {
 }
 
 func TestCleanupClaimIsReleasedAfterCleaning(t *testing.T) {
+	t.Parallel()
 	o, br, _ := landedTask(t)
 	ctx := context.Background()
 	r, err := Task(ctx, o, "x")

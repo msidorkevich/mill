@@ -30,6 +30,7 @@ func check(t *testing.T, got, want string) {
 }
 
 func TestGraphDrawsChainInDependencyOrder(t *testing.T) {
+	t.Parallel()
 	// Input order is not dependency order: rows must put dependencies first.
 	g := Graph{
 		Nodes: []Node{{"c", "c", "pending"}, {"b", "b", "running"}, {"a", "a", "landed"}},
@@ -43,6 +44,7 @@ func TestGraphDrawsChainInDependencyOrder(t *testing.T) {
 }
 
 func TestGraphDrawsFanOutAndFanIn(t *testing.T) {
+	t.Parallel()
 	g := Graph{
 		Nodes: []Node{{"a", "a", "landed"}, {"b", "b", "verified"}, {"c", "c", "published"}, {"d", "d", "pending"}},
 		Edges: []Edge{{"b", "a"}, {"c", "a"}, {"d", "b"}, {"d", "c"}},
@@ -58,6 +60,7 @@ func TestGraphDrawsFanOutAndFanIn(t *testing.T) {
 }
 
 func TestGraphDrawsWideFanOutAndEndingLane(t *testing.T) {
+	t.Parallel()
 	g := Graph{
 		Nodes: []Node{{"a", "a", "landed"}, {"b", "b", "running"}, {"c", "c", "blocked"},
 			{"d", "d", "failed"}, {"long", "long", "pending"}},
@@ -77,6 +80,7 @@ func TestGraphDrawsWideFanOutAndEndingLane(t *testing.T) {
 }
 
 func TestGraphKeepsIndependentTasksApart(t *testing.T) {
+	t.Parallel()
 	// Two unrelated tasks must not be drawn as consecutive * in one lane (a chain).
 	g := Graph{Nodes: []Node{{"x", "x", "landed"}, {"y", "y", "pending"}}}
 	check(t, terminal(t, g), `* ✓ x  landed
@@ -97,6 +101,7 @@ func TestGraphKeepsIndependentTasksApart(t *testing.T) {
 }
 
 func TestGraphListsDependenciesInInputOrder(t *testing.T) {
+	t.Parallel()
 	g := Graph{
 		Nodes: []Node{{"m", "m", "pending"}, {"z", "z", "landed"}, {"a", "a", "landed"}},
 		Edges: []Edge{{"m", "a"}, {"m", "z"}},
@@ -108,6 +113,7 @@ func TestGraphListsDependenciesInInputOrder(t *testing.T) {
 }
 
 func TestGraphRejectsCycleAndUnknownDependency(t *testing.T) {
+	t.Parallel()
 	var b strings.Builder
 	cycle := Graph{Nodes: []Node{{"a", "a", "pending"}, {"b", "b", "pending"}}, Edges: []Edge{{"a", "b"}, {"b", "a"}}}
 	if err := Terminal(&b, cycle); err == nil || !strings.Contains(err.Error(), "cycle") {
@@ -123,6 +129,7 @@ func TestGraphRejectsCycleAndUnknownDependency(t *testing.T) {
 }
 
 func TestGraphMermaidFanIn(t *testing.T) {
+	t.Parallel()
 	g := Graph{
 		Nodes: []Node{{"merge-all", "merge-all", "pending"}, {"api.v2", "api.v2", "landed"},
 			{"end", "end", "failed"}, {"cli", "cli", "landed"}},

@@ -21,6 +21,7 @@ func open(t *testing.T, path string) *Store {
 }
 
 func TestOpenCreatesSchemaInWALMode(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 
@@ -42,6 +43,7 @@ func TestOpenCreatesSchemaInWALMode(t *testing.T) {
 }
 
 func TestReopenIsIdempotent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	s := open(t, path)
@@ -58,6 +60,7 @@ func TestReopenIsIdempotent(t *testing.T) {
 }
 
 func TestRefusesNewerSchema(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	s := open(t, path)
@@ -72,6 +75,7 @@ func TestRefusesNewerSchema(t *testing.T) {
 }
 
 func TestEventsAppendAndRead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 
@@ -113,6 +117,7 @@ func TestEventsAppendAndRead(t *testing.T) {
 }
 
 func TestEventsAreAppendOnly(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if _, err := s.AppendEvent(ctx, "x", "", "", nil); err != nil {
@@ -127,6 +132,7 @@ func TestEventsAreAppendOnly(t *testing.T) {
 }
 
 func TestAppendEventRejectsEmptyKind(t *testing.T) {
+	t.Parallel()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if _, err := s.AppendEvent(context.Background(), "", "", "", nil); err == nil {
 		t.Fatal("empty kind accepted")
@@ -134,6 +140,7 @@ func TestAppendEventRejectsEmptyKind(t *testing.T) {
 }
 
 func TestForeignKeysEnforced(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	_, err := s.DB().ExecContext(ctx,

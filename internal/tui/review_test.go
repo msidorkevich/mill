@@ -50,7 +50,6 @@ func seedReview(t *testing.T) *store.Store {
 // newModelWith builds a model like newModel, with env as the environment and edit as the editor.
 func newModelWith(t *testing.T, s Store, env map[string]string, edit EditFunc) (*Model, *FakeRunner) {
 	t.Helper()
-	t.Setenv("TMPDIR", t.TempDir())
 	f := NewFakeRunner()
 	m := New(Options{
 		Store:    s,
@@ -60,6 +59,7 @@ func newModelWith(t *testing.T, s Store, env map[string]string, edit EditFunc) (
 		Getenv:   func(k string) string { return env[k] },
 		LookPath: func(string) (string, error) { return "", errors.New("not found") },
 		Edit:     edit,
+		TempDir:  t.TempDir(),
 	})
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
 	m.Update(tickMsg(clock))
@@ -108,6 +108,7 @@ func starts(f *FakeRunner) [][]string {
 }
 
 func TestReviewListsTasksDependenciesFirst(t *testing.T) {
+	t.Parallel()
 	s := seedReview(t)
 	if err := s.ApproveTask(context.Background(), "solo", 0); err != nil {
 		t.Fatal(err)
@@ -133,6 +134,7 @@ func TestReviewListsTasksDependenciesFirst(t *testing.T) {
 }
 
 func TestDependencyOrderKeepsStoreOrderOtherwise(t *testing.T) {
+	t.Parallel()
 	review := []store.ReviewTask{{TaskSummary: store.TaskSummary{ID: "g1/c"}}, {TaskSummary: store.TaskSummary{ID: "g1/a"}},
 		{TaskSummary: store.TaskSummary{ID: "x"}}, {TaskSummary: store.TaskSummary{ID: "g1/b"}}}
 	tasks := map[string][]goalTask{"g1": {
@@ -151,6 +153,7 @@ func TestDependencyOrderKeepsStoreOrderOtherwise(t *testing.T) {
 }
 
 func TestReviewEnterOpensTaskDetail(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seedReview(t))
 	toReview(m)
 	press(m, "down")
@@ -196,6 +199,7 @@ func inBothViews(t *testing.T, row int, newM func(t *testing.T) (*Model, *FakeRu
 func plainModel(t *testing.T) (*Model, *FakeRunner) { return newModel(t, seedReview(t)) }
 
 func TestApproveKeyStartsReviewApprove(t *testing.T) {
+	t.Parallel()
 	inBothViews(t, 1, plainModel, func(t *testing.T, m *Model, f *FakeRunner) {
 		press(m, "a")
 		if got, want := lastStart(t, f), []string{"review", "approve", "g1/m"}; !slices.Equal(got, want) {
@@ -205,6 +209,7 @@ func TestApproveKeyStartsReviewApprove(t *testing.T) {
 }
 
 func TestRejectStartsReviewRejectWithReason(t *testing.T) {
+	t.Parallel()
 	inBothViews(t, 0, plainModel, func(t *testing.T, m *Model, f *FakeRunner) {
 		press(m, "x")
 		if !strings.Contains(screen(m), "reject reason:") {
@@ -222,6 +227,7 @@ func TestRejectStartsReviewRejectWithReason(t *testing.T) {
 }
 
 func TestRejectWithEmptyReasonRunsNothing(t *testing.T) {
+	t.Parallel()
 	inBothViews(t, 0, plainModel, func(t *testing.T, m *Model, f *FakeRunner) {
 		press(m, "x", " ", "enter")
 		if s := starts(f); len(s) != 0 {
@@ -258,6 +264,7 @@ func stubEditor(text string, err error, edited *[]string) EditFunc {
 }
 
 func TestChangesEditsCommentsThenStartsReviewChanges(t *testing.T) {
+	t.Parallel()
 	var edited []string
 	newM := func(t *testing.T) (*Model, *FakeRunner) {
 		return newModelWith(t, seedReview(t), map[string]string{"EDITOR": "myeditor -w"}, stubEditor("Fix the nil check.\n\nAdd a test.\n", nil, &edited))
@@ -282,7 +289,33 @@ func TestChangesEditsCommentsThenStartsReviewChanges(t *testing.T) {
 	})
 }
 
+func TestChangesWritesCommentFileInTempDir(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	var edited []string
+	m := New(Options{
+		Store:    seedReview(t),
+		Paths:    project.PathsAt(t.TempDir()),
+		Runner:   NewFakeRunner(),
+		Now:      func() time.Time { return clock },
+		Getenv:   func(k string) string { return map[string]string{"EDITOR": "vi"}[k] },
+		LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		Edit:     stubEditor("Fix it.\n", nil, &edited),
+		TempDir:  tmp,
+	})
+	f := m.opts.Runner.(*FakeRunner)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 50})
+	m.Update(tickMsg(clock))
+	toReview(m)
+	drain(m, press(m, "c"))
+	args := lastStarted(t, f)
+	if path := args[len(args)-1]; filepath.Dir(path) != tmp {
+		t.Fatalf("comment file = %q, want it in %q", path, tmp)
+	}
+}
+
 func TestChangesWithFailingEditorRunsNothing(t *testing.T) {
+	t.Parallel()
 	var edited []string
 	newM := func(t *testing.T) (*Model, *FakeRunner) {
 		return newModelWith(t, seedReview(t), map[string]string{"EDITOR": "vi"}, stubEditor("", errors.New("exit status 1"), &edited))
@@ -299,6 +332,7 @@ func TestChangesWithFailingEditorRunsNothing(t *testing.T) {
 }
 
 func TestChangesWithoutEditorRunsNothing(t *testing.T) {
+	t.Parallel()
 	var edited []string
 	m, f := newModelWith(t, seedReview(t), nil, stubEditor("x", nil, &edited))
 	toReview(m)
@@ -312,6 +346,7 @@ func TestChangesWithoutEditorRunsNothing(t *testing.T) {
 }
 
 func TestRetryGoalTaskStartsRunRetryBlocked(t *testing.T) {
+	t.Parallel()
 	inBothViews(t, 1, plainModel, func(t *testing.T, m *Model, f *FakeRunner) {
 		press(m, "r")
 		if got, want := lastStart(t, f), []string{"run", "g1", "--retry-blocked"}; !slices.Equal(got, want) {
@@ -321,6 +356,7 @@ func TestRetryGoalTaskStartsRunRetryBlocked(t *testing.T) {
 }
 
 func TestRetryStandaloneTaskRunsItsSpecWithRetry(t *testing.T) {
+	t.Parallel()
 	inBothViews(t, 2, plainModel, func(t *testing.T, m *Model, f *FakeRunner) {
 		f.Script(FakeResult{Stdout: taskShowJSON(t, spec("solo"), 1, 0.5)}, "task", "show", "solo", "--json")
 		drain(m, press(m, "r"))
@@ -339,6 +375,7 @@ func TestRetryStandaloneTaskRunsItsSpecWithRetry(t *testing.T) {
 }
 
 func TestRetryStandaloneTaskWithFailedShowRunsNothing(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seedReview(t))
 	f.Script(FakeResult{Stderr: "mill task show: database is locked\n", Code: 1}, "task", "show", "solo", "--json")
 	toReview(m)

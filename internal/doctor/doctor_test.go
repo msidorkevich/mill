@@ -15,6 +15,7 @@ import (
 )
 
 func TestParseGitVersion(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		in   string
 		want [3]int
@@ -36,6 +37,7 @@ func TestParseGitVersion(t *testing.T) {
 }
 
 func TestAtLeast(t *testing.T) {
+	t.Parallel()
 	if !atLeast([3]int{2, 38, 0}, MinGit) || !atLeast([3]int{2, 50, 1}, MinGit) || !atLeast([3]int{3, 0, 0}, MinGit) {
 		t.Error("supported version rejected")
 	}
@@ -118,6 +120,7 @@ func initRepo(t *testing.T, dir, cfgText string) project.Paths {
 var goodTools = map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)"}
 
 func TestAllGreen(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	initRepo(t, dir, `check_cmd = "go test ./..."`)
 	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
@@ -132,6 +135,7 @@ func TestAllGreen(t *testing.T) {
 }
 
 func TestOldGitFailsAndSkipsTheRest(t *testing.T) {
+	t.Parallel()
 	r := Run(context.Background(), fakeEnv{tools: map[string]string{"git": "git version 2.30.1"}}.opts(t.TempDir()))
 	c := byName(r)
 	if r.OK || c["git"].Status != Fail {
@@ -145,6 +149,7 @@ func TestOldGitFailsAndSkipsTheRest(t *testing.T) {
 }
 
 func TestNotInitialized(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
 	c := byName(r)
@@ -154,6 +159,7 @@ func TestNotInitialized(t *testing.T) {
 }
 
 func TestEmptyCheckCmdWarns(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	initRepo(t, dir, config.DefaultTOML)
 	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
@@ -166,6 +172,7 @@ func TestEmptyCheckCmdWarns(t *testing.T) {
 }
 
 func TestInvalidConfigFails(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	initRepo(t, dir, "max_parallel = 0")
 	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
@@ -176,6 +183,7 @@ func TestInvalidConfigFails(t *testing.T) {
 }
 
 func TestMissingClaudeFails(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	initRepo(t, dir, `check_cmd = "true"`)
 	r := Run(context.Background(), fakeEnv{tools: map[string]string{"git": "git version 2.50.1"}}.opts(dir))
@@ -185,6 +193,7 @@ func TestMissingClaudeFails(t *testing.T) {
 }
 
 func TestFakeRunnerScript(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	p := initRepo(t, dir, "check_cmd = \"true\"\n[runner]\nkind = \"fake\"\nfake_script = \"script.json\"\n")
 	opts := fakeEnv{tools: map[string]string{"git": "git version 2.50.1"}}.opts(dir)
@@ -201,6 +210,7 @@ func TestFakeRunnerScript(t *testing.T) {
 }
 
 func TestMissingDatabaseFails(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	p := initRepo(t, dir, `check_cmd = "true"`)
 	for _, f := range []string{p.DB, p.DB + "-wal", p.DB + "-shm"} {
@@ -216,6 +226,7 @@ func TestMissingDatabaseFails(t *testing.T) {
 }
 
 func TestHostCheckReportsEffectiveHost(t *testing.T) {
+	t.Parallel()
 	withHerdr := map[string]string{"git": "git version 2.50.1", "claude": "2.1.0", "herdr": "herdr 0.9.5"}
 	cases := []struct {
 		name   string
@@ -247,6 +258,7 @@ func TestHostCheckReportsEffectiveHost(t *testing.T) {
 }
 
 func TestGitignoreMissingLinesWarn(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	p := initRepo(t, dir, `check_cmd = "go test ./..."`)
 	if err := os.WriteFile(p.GitIgnore, []byte("runs/\nmill.db\n"), 0o644); err != nil {
@@ -264,6 +276,7 @@ func TestGitignoreMissingLinesWarn(t *testing.T) {
 }
 
 func TestGitignoreSkippedWhenNotInitialized(t *testing.T) {
+	t.Parallel()
 	dir := gitRepo(t)
 	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
 	if c := byName(r)["gitignore"]; c.Status != Skip {

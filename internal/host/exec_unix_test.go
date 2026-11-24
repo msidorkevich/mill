@@ -38,6 +38,7 @@ func read(t *testing.T, p string) string {
 }
 
 func TestExecCapturesOutputAndExitCode(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	out, errp := filepath.Join(dir, "logs", "out"), filepath.Join(dir, "logs", "err")
 	_, ex := run(t, context.Background(), ProcSpec{
@@ -58,6 +59,7 @@ func TestExecCapturesOutputAndExitCode(t *testing.T) {
 }
 
 func TestExecRunsInDir(t *testing.T) {
+	t.Parallel()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +72,7 @@ func TestExecRunsInDir(t *testing.T) {
 }
 
 func TestExecStdin(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	in, out := filepath.Join(dir, "in"), filepath.Join(dir, "out")
 	if err := os.WriteFile(in, []byte("prompt text"), 0o644); err != nil {
@@ -82,7 +85,9 @@ func TestExecStdin(t *testing.T) {
 }
 
 func TestExecDoesNotInheritEnvironment(t *testing.T) {
-	t.Setenv("MILL_TEST_SECRET", "s3cret")
+	t.Parallel()
+	// The environment the allowlist filters, as if mill had been started with a secret.
+	environ := append(os.Environ(), "MILL_TEST_SECRET=s3cret")
 	dir := t.TempDir()
 
 	// nil Env means an empty environment.
@@ -92,9 +97,9 @@ func TestExecDoesNotInheritEnvironment(t *testing.T) {
 		t.Fatalf("nil Env leaked variables: %q", got)
 	}
 
-	// The allowlist keeps PATH but drops the secret.
+	// The default allowlist keeps PATH but drops the secret.
 	out = filepath.Join(dir, "allow-env")
-	run(t, context.Background(), ProcSpec{Argv: []string{"/usr/bin/env"}, Env: WorkerEnv(), StdoutPath: out})
+	run(t, context.Background(), ProcSpec{Argv: []string{"/usr/bin/env"}, Env: AllowEnv(environ, DefaultEnvAllow), StdoutPath: out})
 	got := read(t, out)
 	if strings.Contains(got, "MILL_TEST_SECRET") {
 		t.Fatalf("secret leaked through WorkerEnv: %q", got)
@@ -105,13 +110,14 @@ func TestExecDoesNotInheritEnvironment(t *testing.T) {
 
 	// An explicit extra key is passed through.
 	out = filepath.Join(dir, "extra-env")
-	run(t, context.Background(), ProcSpec{Argv: []string{"/usr/bin/env"}, Env: WorkerEnv("MILL_TEST_SECRET"), StdoutPath: out})
+	run(t, context.Background(), ProcSpec{Argv: []string{"/usr/bin/env"}, Env: AllowEnv(environ, append(append([]string{}, DefaultEnvAllow...), "MILL_TEST_SECRET")), StdoutPath: out})
 	if !strings.Contains(read(t, out), "MILL_TEST_SECRET=s3cret") {
 		t.Fatal("extra allowlisted key not passed")
 	}
 }
 
 func TestAllowEnv(t *testing.T) {
+	t.Parallel()
 	got := AllowEnv([]string{"A=1", "B=2", "C=3=x", "MALFORMED"}, []string{"C", "A", "MALFORMED"})
 	want := []string{"A=1", "C=3=x"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
@@ -121,6 +127,7 @@ func TestAllowEnv(t *testing.T) {
 
 // Kill must stop the process and the children it started.
 func TestExecKillStopsProcessGroup(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	h, err := NewExec().Start(context.Background(), ProcSpec{
@@ -145,6 +152,7 @@ func TestExecKillStopsProcessGroup(t *testing.T) {
 }
 
 func TestExecContextCancelKills(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	h, err := NewExec().Start(ctx, ProcSpec{Argv: []string{"/bin/sleep", "30"}})
 	if err != nil {
@@ -165,6 +173,7 @@ func TestExecContextCancelKills(t *testing.T) {
 }
 
 func TestExecStartErrors(t *testing.T) {
+	t.Parallel()
 	if _, err := NewExec().Start(context.Background(), ProcSpec{}); err == nil {
 		t.Fatal("empty argv accepted")
 	}
@@ -204,6 +213,7 @@ func waitGone(t *testing.T, pid int) {
 }
 
 func TestProcessInfoAndKillGroup(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("sleep", "30")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -232,6 +242,7 @@ func TestProcessInfoAndKillGroup(t *testing.T) {
 }
 
 func TestProcessInfoMissingPidIsNotAlive(t *testing.T) {
+	t.Parallel()
 	cmd := exec.Command("true")
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
@@ -242,6 +253,7 @@ func TestProcessInfoMissingPidIsNotAlive(t *testing.T) {
 }
 
 func TestProcessCwdReportsWorkingDirectory(t *testing.T) {
+	t.Parallel()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

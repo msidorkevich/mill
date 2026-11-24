@@ -9,6 +9,7 @@ import (
 )
 
 func TestMigrateFromV9OldTasksReadMediumComplexityAndNoTaskModel(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	saved := migrations
@@ -47,6 +48,7 @@ func TestMigrateFromV9OldTasksReadMediumComplexityAndNoTaskModel(t *testing.T) {
 }
 
 func TestTaskModelAndComplexityRoundTripThroughCreateTask(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	sp := spec("t1")
@@ -66,6 +68,7 @@ func TestTaskModelAndComplexityRoundTripThroughCreateTask(t *testing.T) {
 }
 
 func TestTaskWithEmptyComplexityReadsMedium(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -78,6 +81,7 @@ func TestTaskWithEmptyComplexityReadsMedium(t *testing.T) {
 }
 
 func TestGoalTasksCarryComplexityAndTaskModelFromPlan(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, err := s.CreateGoal(ctx, "g", nil)
@@ -112,6 +116,7 @@ func TestGoalTasksCarryComplexityAndTaskModelFromPlan(t *testing.T) {
 }
 
 func TestUpdateTaskSpecPersistsTaskModelAndComplexity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	sp := spec("t1")
@@ -136,6 +141,7 @@ func TestUpdateTaskSpecPersistsTaskModelAndComplexity(t *testing.T) {
 }
 
 func TestUpdateGoalTaskSpecPersistsTaskModelAndComplexity(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, err := s.CreateGoal(ctx, "g", nil)
@@ -170,6 +176,7 @@ func TestUpdateGoalTaskSpecPersistsTaskModelAndComplexity(t *testing.T) {
 }
 
 func TestSetAttemptModelIsReturnedByAttempts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -192,6 +199,7 @@ func TestSetAttemptModelIsReturnedByAttempts(t *testing.T) {
 }
 
 func TestSetAttemptModelUnknownAttemptIsError(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	err := s.SetAttemptModel(ctx, 4242, "opus", "x")

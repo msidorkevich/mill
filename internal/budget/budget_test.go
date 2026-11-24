@@ -6,6 +6,7 @@ import (
 )
 
 func TestTokensCountModes(t *testing.T) {
+	t.Parallel()
 	u := Usage{InputTokens: 10, OutputTokens: 20, CacheWriteTokens: 30, CacheReadTokens: 1000}
 	if got := u.Tokens(CountBillable); got != 60 {
 		t.Fatalf("billable = %d, want 60", got)
@@ -16,6 +17,7 @@ func TestTokensCountModes(t *testing.T) {
 }
 
 func TestExceeded(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		u      Usage
@@ -47,6 +49,7 @@ func TestExceeded(t *testing.T) {
 }
 
 func TestOverride(t *testing.T) {
+	t.Parallel()
 	base := Limits{USD: 2, Tokens: 400_000}
 	if got := base.Override(Limits{Tokens: 200_000}); got != (Limits{USD: 2, Tokens: 200_000}) {
 		t.Fatalf("got %+v", got)
@@ -57,6 +60,7 @@ func TestOverride(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
+	t.Parallel()
 	if err := (Limits{USD: -1}).Validate(); err == nil {
 		t.Fatal("negative usd accepted")
 	}
@@ -69,6 +73,7 @@ func TestValidate(t *testing.T) {
 }
 
 func TestCovers(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		limit Limits
@@ -93,6 +98,7 @@ func TestCovers(t *testing.T) {
 }
 
 func TestUsageAdd(t *testing.T) {
+	t.Parallel()
 	a := Usage{InputTokens: 1, OutputTokens: 2, CacheWriteTokens: 3, CacheReadTokens: 4, CostUSD: 0.5}
 	got := a.Add(a)
 	want := Usage{InputTokens: 2, OutputTokens: 4, CacheWriteTokens: 6, CacheReadTokens: 8, CostUSD: 1}

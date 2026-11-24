@@ -35,6 +35,7 @@ func startRunning(t *testing.T, s *store.Store, estimated bool) {
 }
 
 func TestAgentsViewShowsRunningAttempt(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	startRunning(t, s, true)
 	m, _ := newModel(t, s)
@@ -51,6 +52,7 @@ func TestAgentsViewShowsRunningAttempt(t *testing.T) {
 }
 
 func TestAgentsViewExactCostHasNoTilde(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	startRunning(t, s, false)
 	m, _ := newModel(t, s)
@@ -62,6 +64,7 @@ func TestAgentsViewExactCostHasNoTilde(t *testing.T) {
 }
 
 func TestAgentsViewNothingRunning(t *testing.T) {
+	t.Parallel()
 	m, _ := newModel(t, seed(t))
 	press(m, "tab", "tab", "tab")
 	if out := m.View(); !strings.Contains(out, "nothing running") {
@@ -70,12 +73,14 @@ func TestAgentsViewNothingRunning(t *testing.T) {
 }
 
 func TestFmtElapsedHours(t *testing.T) {
+	t.Parallel()
 	if got := fmtElapsed(time.Hour + 2*time.Minute + 3*time.Second); got != "1h02m03s" {
 		t.Errorf("fmtElapsed = %q", got)
 	}
 }
 
 func TestAgentsViewSelectedTask(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	startRunning(t, s, false)
 	m, _ := newModel(t, s)
@@ -86,6 +91,7 @@ func TestAgentsViewSelectedTask(t *testing.T) {
 }
 
 func TestAgentsViewShowsGateRowWithLogLastLine(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	if err := s.SetTaskStatus(context.Background(), "g1/b", store.TaskRunning, store.PhaseGate, ""); err != nil {
 		t.Fatal(err)

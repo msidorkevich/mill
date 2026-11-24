@@ -8,6 +8,7 @@ import (
 )
 
 func TestActionsListsEveryActionInLastActionFormat(t *testing.T) {
+	t.Parallel()
 	tool := func(name, input string) string {
 		return `{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"` + name + `","input":` + input + `}]}}` + "\n"
 	}
@@ -41,6 +42,7 @@ func TestActionsListsEveryActionInLastActionFormat(t *testing.T) {
 }
 
 func TestActionsOfEmptyStreamIsEmpty(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "s.jsonl")
 	if err := os.WriteFile(path, []byte(`{"type":"system","subtype":"init"}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -52,6 +54,7 @@ func TestActionsOfEmptyStreamIsEmpty(t *testing.T) {
 }
 
 func TestActionsMissingFileFails(t *testing.T) {
+	t.Parallel()
 	if _, err := Actions(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("missing file: want an error")
 	}

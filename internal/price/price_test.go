@@ -10,6 +10,7 @@ import (
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 func TestEstimatePricesEveryBuiltInModelAndAlias(t *testing.T) {
+	t.Parallel()
 	u := budget.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheWriteTokens: 1_000_000, CacheReadTokens: 1_000_000}
 	cases := []struct {
 		model string
@@ -33,6 +34,7 @@ func TestEstimatePricesEveryBuiltInModelAndAlias(t *testing.T) {
 }
 
 func TestEstimatePricesEachTokenKindSeparately(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		u    budget.Usage
 		want float64
@@ -50,6 +52,7 @@ func TestEstimatePricesEachTokenKindSeparately(t *testing.T) {
 }
 
 func TestEstimateResolvesSuffixedModelIDs(t *testing.T) {
+	t.Parallel()
 	got, ok := Estimate("claude-opus-5-5[1m]", budget.Usage{InputTokens: 1_000_000}, nil)
 	if !ok || !near(got, 4) {
 		t.Errorf("got %v, %v; want 4, true", got, ok)
@@ -57,6 +60,7 @@ func TestEstimateResolvesSuffixedModelIDs(t *testing.T) {
 }
 
 func TestEstimateHonoursOverridesByAliasOrID(t *testing.T) {
+	t.Parallel()
 	u := budget.Usage{InputTokens: 1_000_000}
 	for _, key := range []string{"opus", "claude-opus-5-5"} {
 		for _, model := range []string{"opus", "claude-opus-5-5", "claude-opus-5-5[1m]"} {
@@ -73,6 +77,7 @@ func TestEstimateHonoursOverridesByAliasOrID(t *testing.T) {
 }
 
 func TestEstimateUnknownModelIsNotOK(t *testing.T) {
+	t.Parallel()
 	for _, m := range []string{"", "gpt-4", "claude-opus-9"} {
 		if got, ok := Estimate(m, budget.Usage{InputTokens: 10}, nil); ok || got != 0 {
 			t.Errorf("Estimate(%q) = %v, %v; want 0, false", m, got, ok)
@@ -85,6 +90,7 @@ func TestEstimateUnknownModelIsNotOK(t *testing.T) {
 }
 
 func TestTokenCostSplitsEightyTwenty(t *testing.T) {
+	t.Parallel()
 	// opus: 800K input at $4/M + 200K output at $20/M.
 	got, ok := TokenCost("opus", 1_000_000, nil)
 	if !ok || !near(got, 3.2+4) {
@@ -100,6 +106,7 @@ func TestTokenCostSplitsEightyTwenty(t *testing.T) {
 }
 
 func TestTokenCostUnknownModelIsNotOK(t *testing.T) {
+	t.Parallel()
 	if got, ok := TokenCost("gpt-4", 1000, nil); ok || got != 0 {
 		t.Errorf("TokenCost(gpt-4) = %v, %v; want 0, false", got, ok)
 	}

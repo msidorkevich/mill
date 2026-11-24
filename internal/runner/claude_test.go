@@ -64,6 +64,7 @@ func baseReq(t *testing.T) Request {
 }
 
 func TestClaudeSuccess(t *testing.T) {
+	t.Parallel()
 	bin, argsFile, stdinFile := fakeClaude(t, []string{lineInit, lineAsst1, lineAsst1b, lineAsst2, lineResult}, "")
 	req := baseReq(t)
 	req.Model = "sonnet"
@@ -125,6 +126,7 @@ func TestClaudeSuccess(t *testing.T) {
 }
 
 func TestClaudeNoBudgetFlagWhenUnlimited(t *testing.T) {
+	t.Parallel()
 	bin, argsFile, _ := fakeClaude(t, []string{lineResult}, "")
 	if _, err := newClaude(bin).Run(context.Background(), baseReq(t)); err != nil {
 		t.Fatal(err)
@@ -136,6 +138,7 @@ func TestClaudeNoBudgetFlagWhenUnlimited(t *testing.T) {
 }
 
 func TestClaudeBudgetSubtype(t *testing.T) {
+	t.Parallel()
 	r := `{"type":"result","subtype":"error_max_budget_usd","is_error":true,"total_cost_usd":1.01,"usage":{"input_tokens":5,"output_tokens":5}}`
 	bin, _, _ := fakeClaude(t, []string{r}, "")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -145,6 +148,7 @@ func TestClaudeBudgetSubtype(t *testing.T) {
 }
 
 func TestClaudeErrorResult(t *testing.T) {
+	t.Parallel()
 	r := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{r}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -154,6 +158,7 @@ func TestClaudeErrorResult(t *testing.T) {
 }
 
 func TestClaudeNoStructuredOutput(t *testing.T) {
+	t.Parallel()
 	r := `{"type":"result","subtype":"success","is_error":false,"result":"just prose","usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{r}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -163,6 +168,7 @@ func TestClaudeNoStructuredOutput(t *testing.T) {
 }
 
 func TestClaudeJSONResultTextFallback(t *testing.T) {
+	t.Parallel()
 	r := `{"type":"result","subtype":"success","is_error":false,"result":"{\"a\":1}","usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{r}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -172,6 +178,7 @@ func TestClaudeJSONResultTextFallback(t *testing.T) {
 }
 
 func TestClaudeExitWithoutResult(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{lineInit}, "echo 'not logged in' >&2; exit 1")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
 	if err != nil {
@@ -183,6 +190,7 @@ func TestClaudeExitWithoutResult(t *testing.T) {
 }
 
 func TestClaudePermissionDenialsWarn(t *testing.T) {
+	t.Parallel()
 	r := `{"type":"result","subtype":"success","is_error":false,"structured_output":{"x":1},"usage":{},"permission_denials":[{"tool_name":"Bash"}]}`
 	bin, _, _ := fakeClaude(t, []string{r}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -192,6 +200,7 @@ func TestClaudePermissionDenialsWarn(t *testing.T) {
 }
 
 func TestClaudeStringMessageEventIsNotUnparseable(t *testing.T) {
+	t.Parallel()
 	denied := `{"type":"system","subtype":"permission_denied","message":"Permission to use Bash was denied"}`
 	r := `{"type":"result","subtype":"success","is_error":false,"structured_output":{"x":1},"usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{lineInit, denied, r}, "")
@@ -205,6 +214,7 @@ func TestClaudeStringMessageEventIsNotUnparseable(t *testing.T) {
 }
 
 func TestClaudeInvalidJSONLineIsUnparseable(t *testing.T) {
+	t.Parallel()
 	r := `{"type":"result","subtype":"success","is_error":false,"structured_output":{"x":1},"usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{"not json", r}, "")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -218,6 +228,7 @@ func TestClaudeInvalidJSONLineIsUnparseable(t *testing.T) {
 
 // Budget enforcement: the caller cancels from OnUsage and the process is killed.
 func TestClaudeCancelledFromOnUsage(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{lineInit, lineAsst1}, "sleep 30")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -244,12 +255,14 @@ func TestClaudeCancelledFromOnUsage(t *testing.T) {
 }
 
 func TestClaudeRequiresLogDir(t *testing.T) {
+	t.Parallel()
 	if _, err := newClaude("claude").Run(context.Background(), Request{Role: RoleImplementer}); err == nil {
 		t.Fatal("missing LogDir accepted")
 	}
 }
 
 func TestRoleSettingsReadOnly(t *testing.T) {
+	t.Parallel()
 	b, err := RoleSettings([]string{"Read", "Glob", "Grep"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -276,6 +289,7 @@ func TestRoleSettingsReadOnly(t *testing.T) {
 // The final usage correction can cross a limit after claude already finished; the
 // finished result must win over the cancellation it triggers.
 func TestClaudeFinishedRunSurvivesLateCancel(t *testing.T) {
+	t.Parallel()
 	small := `{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"output_tokens":5}}}`
 	result := `{"type":"result","subtype":"success","is_error":false,"structured_output":{"ok":true},"total_cost_usd":0.02,"usage":{"input_tokens":2,"cache_creation_input_tokens":100,"output_tokens":900}}`
 	bin, _, _ := fakeClaude(t, []string{small, result}, "")
@@ -302,6 +316,7 @@ func TestClaudeFinishedRunSurvivesLateCancel(t *testing.T) {
 }
 
 func TestClaudeReportsStartedProcess(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{lineResult}, "")
 	req := baseReq(t)
 	var got []Started
@@ -319,6 +334,7 @@ func TestClaudeReportsStartedProcess(t *testing.T) {
 }
 
 func TestClaudeKilledRunEstimatesCostFromInitModel(t *testing.T) {
+	t.Parallel()
 	initOpus := `{"type":"system","subtype":"init","model":"claude-opus-5-5[1m]"}`
 	bin, _, _ := fakeClaude(t, []string{initOpus, lineAsst1}, "sleep 30")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -340,6 +356,7 @@ func TestClaudeKilledRunEstimatesCostFromInitModel(t *testing.T) {
 }
 
 func TestClaudeEstimateFallsBackToRequestModelAndOverrides(t *testing.T) {
+	t.Parallel()
 	noModel := `{"type":"system","subtype":"init"}`
 	bin, _, _ := fakeClaude(t, []string{noModel, lineAsst1}, "exit 1")
 	c := newClaude(bin)
@@ -357,6 +374,7 @@ func TestClaudeEstimateFallsBackToRequestModelAndOverrides(t *testing.T) {
 }
 
 func TestClaudeUnknownModelLeavesCostZeroAndWarns(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{lineInit, lineAsst1}, "exit 1")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
 	if err != nil {
@@ -371,6 +389,7 @@ func TestClaudeUnknownModelLeavesCostZeroAndWarns(t *testing.T) {
 }
 
 func TestClaudeReportedCostIsNotEstimated(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{`{"type":"system","subtype":"init","model":"opus"}`, lineAsst1, lineResult}, "")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
 	if err != nil {
@@ -391,6 +410,7 @@ func writeStream(t *testing.T, lines ...string) string {
 }
 
 func TestUsageFromStreamDeduplicatesAssistantUsageWithoutResult(t *testing.T) {
+	t.Parallel()
 	p := writeStream(t, lineInit, lineAsst1, lineAsst1b, lineAsst2)
 	u, model, finished, err := UsageFromStream(p)
 	if err != nil {
@@ -403,6 +423,7 @@ func TestUsageFromStreamDeduplicatesAssistantUsageWithoutResult(t *testing.T) {
 }
 
 func TestUsageFromStreamResultIsAuthoritative(t *testing.T) {
+	t.Parallel()
 	p := writeStream(t, lineInit, lineAsst1, lineAsst2, lineResult)
 	u, model, finished, err := UsageFromStream(p)
 	if err != nil {
@@ -415,12 +436,14 @@ func TestUsageFromStreamResultIsAuthoritative(t *testing.T) {
 }
 
 func TestUsageFromStreamMissingFileFails(t *testing.T) {
+	t.Parallel()
 	if _, _, _, err := UsageFromStream(filepath.Join(t.TempDir(), "nope")); err == nil {
 		t.Fatal("missing stream accepted")
 	}
 }
 
 func TestLastActionDescribesLatestToolCallOrText(t *testing.T) {
+	t.Parallel()
 	tool := func(name, input string) string {
 		return `{"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","name":"` + name + `","input":` + input + `}]}}` + "\n"
 	}
@@ -462,6 +485,7 @@ const (
 )
 
 func TestClaudeRateLimitedRunReportsLimitAndReset(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{lineInit, lineAsst1, lineLimitWarn, lineLimitRejected, lineLimitText, lineLimitResult}, "")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
 	if err != nil {
@@ -480,6 +504,7 @@ func TestClaudeRateLimitedRunReportsLimitAndReset(t *testing.T) {
 }
 
 func TestClaudeRateLimitedWithoutEventHasUnknownReset(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{lineInit, lineLimitResult}, "")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
 	if err != nil {
@@ -491,6 +516,7 @@ func TestClaudeRateLimitedWithoutEventHasUnknownReset(t *testing.T) {
 }
 
 func TestClaudeRateLimitedOnRejectedEventWithOtherError(t *testing.T) {
+	t.Parallel()
 	errRes := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{lineLimitRejected, errRes}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -500,6 +526,7 @@ func TestClaudeRateLimitedOnRejectedEventWithOtherError(t *testing.T) {
 }
 
 func TestClaudeUsageWarningAddedOnceAndKeepsSuccess(t *testing.T) {
+	t.Parallel()
 	bin, _, _ := fakeClaude(t, []string{lineInit, lineLimitWarn, lineLimitWarn, lineResult}, "")
 	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
 	if err != nil {
@@ -512,6 +539,7 @@ func TestClaudeUsageWarningAddedOnceAndKeepsSuccess(t *testing.T) {
 }
 
 func TestClaudeOtherErrorResultStaysError(t *testing.T) {
+	t.Parallel()
 	errRes := `{"type":"result","subtype":"success","is_error":true,"api_error_status":500,"result":"overloaded","usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{lineLimitWarn, errRes}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
@@ -521,6 +549,7 @@ func TestClaudeOtherErrorResultStaysError(t *testing.T) {
 }
 
 func TestUsageFromStreamHandlesRateLimitedStream(t *testing.T) {
+	t.Parallel()
 	path := writeStream(t, lineInit, lineAsst1, lineLimitWarn, lineLimitRejected, lineLimitText, lineLimitResult)
 	u, model, finished, err := UsageFromStream(path)
 	if err != nil || !finished || model != "claude-haiku" || u.InputTokens != 2 {
@@ -550,6 +579,7 @@ func (lostHandle) Wait() (host.Exit, error) {
 }
 
 func TestClaudeRecordsHostErrorWhenWorkerPaneIsClosed(t *testing.T) {
+	t.Parallel()
 	c := NewClaude("claude", lostHost{})
 	c.Poll = 10 * time.Millisecond
 	res, err := c.Run(context.Background(), baseReq(t))

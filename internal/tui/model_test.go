@@ -116,6 +116,7 @@ func lastStart(t *testing.T, f *FakeRunner) []string {
 }
 
 func TestGoalsViewListsGoalsAndSelectedGoalGraph(t *testing.T) {
+	t.Parallel()
 	m, _ := newModel(t, seed(t))
 	v := screen(m)
 	for _, want := range []string{"g1", "Build the widget", "approved", "g2", "Polish the docs", "draft"} {
@@ -145,6 +146,7 @@ func TestGoalsViewListsGoalsAndSelectedGoalGraph(t *testing.T) {
 }
 
 func TestTickPicksUpNewGoals(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	m, _ := newModel(t, s)
 	if _, err := s.CreateGoal(context.Background(), "Third thing", nil); err != nil {
@@ -160,6 +162,7 @@ func TestTickPicksUpNewGoals(t *testing.T) {
 }
 
 func TestNewPlanStartsPlanWithText(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	press(m, "n")
 	press(m, "add", " ", "q", "?") // q and ? are text while typing
@@ -173,6 +176,7 @@ func TestNewPlanStartsPlanWithText(t *testing.T) {
 }
 
 func TestEscCancelsNewPlan(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	press(m, "n", "x", "esc")
 	if len(f.Calls()) != 0 {
@@ -184,6 +188,7 @@ func TestEscCancelsNewPlan(t *testing.T) {
 }
 
 func TestApproveStartsPlanApprove(t *testing.T) {
+	t.Parallel()
 	for _, key := range []string{"A", "enter"} {
 		m, f := newModel(t, seed(t))
 		press(m, "down", key)
@@ -194,6 +199,7 @@ func TestApproveStartsPlanApprove(t *testing.T) {
 }
 
 func TestRunStartsRunForGoal(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	press(m, "R")
 	if got, want := lastStart(t, f), []string{"run", "g1"}; !slices.Equal(got, want) {
@@ -202,6 +208,7 @@ func TestRunStartsRunForGoal(t *testing.T) {
 }
 
 func TestKeepStartsWatchAndSecondPressInterrupts(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	f.Script(FakeResult{Running: true}, "keep", "g1", "--watch")
 	press(m, "k")
@@ -221,6 +228,7 @@ func TestKeepStartsWatchAndSecondPressInterrupts(t *testing.T) {
 }
 
 func TestPauseWithNothingRunning(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	press(m, "p")
 	if v := screen(m); !strings.Contains(v, "nothing to pause") {
@@ -232,6 +240,7 @@ func TestPauseWithNothingRunning(t *testing.T) {
 }
 
 func TestPauseInterruptsLatestRunningRun(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	f.Script(FakeResult{Running: true}, "run", "g1")
 	press(m, "R")
@@ -245,6 +254,7 @@ func TestPauseInterruptsLatestRunningRun(t *testing.T) {
 }
 
 func TestPauseSkipsFinishedCommands(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	cmd := press(m, "R") // unscripted: exits 0 at once
 	m.Update(cmd())
@@ -258,6 +268,7 @@ func TestPauseSkipsFinishedCommands(t *testing.T) {
 }
 
 func TestFailedCommandShowsExitCodeAndStderr(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	f.Script(FakeResult{Stderr: "mill run: goal g1 is blocked\n", Code: 1}, "run", "g1")
 	cmd := press(m, "R")
@@ -278,6 +289,7 @@ func TestFailedCommandShowsExitCodeAndStderr(t *testing.T) {
 }
 
 func TestSucceededCommandShowsExitZero(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	f.Script(FakeResult{Stdout: "g1 started\n"}, "run", "g1")
 	m.Update(press(m, "R")())
@@ -288,6 +300,7 @@ func TestSucceededCommandShowsExitZero(t *testing.T) {
 }
 
 func TestCommandThatCannotStartIsReported(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seed(t))
 	f.Script(FakeResult{StartErr: errors.New("no such file")}, "run", "g1")
 	if cmd := press(m, "R"); cmd != nil {
@@ -299,6 +312,7 @@ func TestCommandThatCannotStartIsReported(t *testing.T) {
 }
 
 func TestHelpListsKeysAndSkipNotAvailable(t *testing.T) {
+	t.Parallel()
 	m, _ := newModel(t, seed(t))
 	press(m, "?")
 	v := screen(m)
@@ -318,6 +332,7 @@ func TestHelpListsKeysAndSkipNotAvailable(t *testing.T) {
 }
 
 func TestQuitReturnsTeaQuit(t *testing.T) {
+	t.Parallel()
 	m, _ := newModel(t, seed(t))
 	cmd := press(m, "q")
 	if cmd == nil {
@@ -329,6 +344,7 @@ func TestQuitReturnsTeaQuit(t *testing.T) {
 }
 
 func TestTabsSwitchViews(t *testing.T) {
+	t.Parallel()
 	m, _ := newModel(t, seed(t))
 	press(m, "tab")
 	if v := screen(m); !strings.Contains(v, "no tasks await review") || strings.Contains(v, "Build the widget") {
@@ -352,6 +368,7 @@ func (failingStore) ListGoals(context.Context) ([]store.Goal, error) {
 }
 
 func TestStoreErrorIsShownNotHidden(t *testing.T) {
+	t.Parallel()
 	m, _ := newModel(t, failingStore{seed(t)})
 	if v := screen(m); !strings.Contains(v, "reading the store failed: database is locked") {
 		t.Errorf("view hides the store error:\n%s", v)
@@ -360,6 +377,7 @@ func TestStoreErrorIsShownNotHidden(t *testing.T) {
 
 // TestPackageHasNoStoreWritesOrSQL checks the package source: the TUI only reads the store.
 func TestPackageHasNoStoreWritesOrSQL(t *testing.T) {
+	t.Parallel()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)

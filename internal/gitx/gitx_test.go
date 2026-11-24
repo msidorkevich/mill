@@ -39,6 +39,7 @@ func mustRun(t *testing.T, ctx context.Context, dir string, args ...string) stri
 }
 
 func TestWorktreeCommitDiff(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	base, err := RevParse(ctx, r, "main")
@@ -89,6 +90,7 @@ func TestWorktreeCommitDiff(t *testing.T) {
 }
 
 func TestReattachExistingBranch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	base, _ := RevParse(ctx, r, "main")
@@ -111,6 +113,7 @@ func TestReattachExistingBranch(t *testing.T) {
 }
 
 func TestCommitUsesMillIdentityWhenNoneConfigured(t *testing.T) {
+	// Serial: gitx reads the process environment (no injected env), so HOME and XDG_CONFIG_HOME are set with t.Setenv.
 	ctx := context.Background()
 	t.Setenv("HOME", t.TempDir()) // no global identity
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -121,6 +124,7 @@ func TestCommitUsesMillIdentityWhenNoneConfigured(t *testing.T) {
 }
 
 func TestGitEnvIsIgnored(t *testing.T) {
+	// Serial: gitx reads the process environment (no injected env), so GIT_DIR is set with t.Setenv.
 	ctx := context.Background()
 	r := repo(t)
 	t.Setenv("GIT_DIR", "/nonexistent")
@@ -130,6 +134,7 @@ func TestGitEnvIsIgnored(t *testing.T) {
 }
 
 func TestErrorsIncludeStderr(t *testing.T) {
+	t.Parallel()
 	r := repo(t)
 	_, err := Run(context.Background(), r, "rev-parse", "--verify", "no-such-ref")
 	if err == nil || !strings.Contains(err.Error(), "git rev-parse") {
@@ -138,6 +143,7 @@ func TestErrorsIncludeStderr(t *testing.T) {
 }
 
 func TestMergeCreatesMergeCommitAndReportsConflicts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := repo(t)
 	write := func(name, body string) {
@@ -182,6 +188,7 @@ func TestMergeCreatesMergeCommitAndReportsConflicts(t *testing.T) {
 }
 
 func TestChangedFilesListsAddedModifiedDeletedRenamed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	write := func(name, body string) {
@@ -220,6 +227,7 @@ func TestChangedFilesListsAddedModifiedDeletedRenamed(t *testing.T) {
 }
 
 func TestDetachedWorktreeAtShaIsAddedAndRemoved(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	first, _ := RevParse(ctx, r, "main")
@@ -287,6 +295,7 @@ func bareRemote(t *testing.T, r string) string {
 }
 
 func TestFetchGetsRemoteBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	bare := bareRemote(t, r)
@@ -310,6 +319,7 @@ func TestFetchGetsRemoteBranches(t *testing.T) {
 }
 
 func TestMergeConflictsCleanAndConflicting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	mustRun(t, ctx, r, "branch", "clean")
@@ -343,6 +353,7 @@ func TestMergeConflictsCleanAndConflicting(t *testing.T) {
 }
 
 func TestCommitTreeAndTreeOf(t *testing.T) {
+	// Serial: gitx reads the process environment (no injected env), so HOME and XDG_CONFIG_HOME are set with t.Setenv.
 	t.Setenv("HOME", t.TempDir()) // no global identity
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ctx := context.Background()
@@ -383,6 +394,7 @@ func TestCommitTreeAndTreeOf(t *testing.T) {
 }
 
 func TestPushReviewUsesLease(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	bare := bareRemote(t, r)
@@ -417,6 +429,7 @@ func TestPushReviewUsesLease(t *testing.T) {
 }
 
 func TestPushReviewRefusesNonReviewBranchesWithoutGit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// Not a repository: any git call would fail with git's own error.
 	dir := filepath.Join(t.TempDir(), "missing")
@@ -429,6 +442,7 @@ func TestPushReviewRefusesNonReviewBranchesWithoutGit(t *testing.T) {
 }
 
 func TestDeleteReviewRefusesNonReviewBranchesWithoutGit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// Not a repository: any git call would fail with git's own error.
 	dir := filepath.Join(t.TempDir(), "missing")
@@ -441,6 +455,7 @@ func TestDeleteReviewRefusesNonReviewBranchesWithoutGit(t *testing.T) {
 }
 
 func TestPatchLanded(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
@@ -469,6 +484,7 @@ func TestPatchLanded(t *testing.T) {
 }
 
 func TestFindTrailer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	old := commitFile(t, r, "a.txt", "1\n", "first\n\nMill-Task: g1/a\n")
@@ -492,6 +508,7 @@ func TestFindTrailer(t *testing.T) {
 }
 
 func TestFindPatchReturnsTheSquashCommit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
@@ -515,6 +532,7 @@ func TestFindPatchReturnsTheSquashCommit(t *testing.T) {
 }
 
 func TestContainingCommitFindsMergeOrFastForward(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	mustRun(t, ctx, r, "checkout", "-q", "-b", "task")
@@ -562,6 +580,7 @@ func divergedRepo(t *testing.T, conflict bool) (dir, base, main, feat string) {
 }
 
 func TestRebaseStartWithoutConflictFinishes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, base, main, _ := divergedRepo(t, false)
 	st, err := RebaseStart(ctx, dir, main, base, false)
@@ -581,6 +600,7 @@ func TestRebaseStartWithoutConflictFinishes(t *testing.T) {
 }
 
 func TestRebaseStartStopsOnConflictWithoutAborting(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, base, main, _ := divergedRepo(t, true)
 	featShared := mustRun(t, ctx, dir, "rev-parse", "feat~1")
@@ -600,6 +620,7 @@ func TestRebaseStartStopsOnConflictWithoutAborting(t *testing.T) {
 }
 
 func TestRebaseContinueFinishesWithoutEditor(t *testing.T) {
+	// Serial: gitx reads the process environment (no injected env), so EDITOR and VISUAL are set with t.Setenv.
 	ctx := context.Background()
 	dir, base, main, _ := divergedRepo(t, true)
 	t.Setenv("EDITOR", "false") // an editor would fail the continue
@@ -629,6 +650,7 @@ func TestRebaseContinueFinishesWithoutEditor(t *testing.T) {
 }
 
 func TestRebaseAbortRestoresOriginalHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, base, main, feat := divergedRepo(t, true)
 	if _, err := RebaseStart(ctx, dir, main, base, false); err != nil {
@@ -649,6 +671,7 @@ func TestRebaseAbortRestoresOriginalHead(t *testing.T) {
 }
 
 func TestRebaseStartReusesRecordedResolutionWithRerere(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, base, main, feat := divergedRepo(t, true)
 	st, err := RebaseStart(ctx, dir, main, base, true)
@@ -678,6 +701,7 @@ func TestRebaseStartReusesRecordedResolutionWithRerere(t *testing.T) {
 }
 
 func TestMergeStartReportsConflictAndContinueCommits(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, _, _, feat := divergedRepo(t, true)
 	mustRun(t, ctx, dir, "checkout", "-q", "main")
@@ -716,6 +740,7 @@ func TestMergeStartReportsConflictAndContinueCommits(t *testing.T) {
 }
 
 func TestMergeStartWithoutConflictCommits(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, _, _, _ := divergedRepo(t, false)
 	mustRun(t, ctx, dir, "checkout", "-q", "main")
@@ -732,6 +757,7 @@ func TestMergeStartWithoutConflictCommits(t *testing.T) {
 }
 
 func TestMergeAbortRestoresOriginalHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, _, main, _ := divergedRepo(t, true)
 	mustRun(t, ctx, dir, "checkout", "-q", "main")
@@ -750,6 +776,7 @@ func TestMergeAbortRestoresOriginalHead(t *testing.T) {
 }
 
 func TestMergeStartReusesRecordedResolutionWithRerere(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, _, main, _ := divergedRepo(t, true)
 	mustRun(t, ctx, dir, "checkout", "-q", "main")
@@ -777,6 +804,7 @@ func TestMergeStartReusesRecordedResolutionWithRerere(t *testing.T) {
 }
 
 func TestConflictHunksShowsOnlyMarkerRegionsWithContext(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	var lines []string
@@ -807,6 +835,7 @@ func TestConflictHunksShowsOnlyMarkerRegionsWithContext(t *testing.T) {
 }
 
 func TestHasConflictMarkersListsFilesStillMarked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	files := map[string]string{
@@ -830,6 +859,7 @@ func TestHasConflictMarkersListsFilesStillMarked(t *testing.T) {
 }
 
 func TestCommitSummariesListsSubjectsAndTrailersOldestFirst(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, base, _, feat := divergedRepo(t, false)
 	got, err := CommitSummaries(ctx, dir, base, feat)
@@ -851,6 +881,7 @@ func TestCommitSummariesListsSubjectsAndTrailersOldestFirst(t *testing.T) {
 }
 
 func TestReplayOntoAppliesNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := repo(t)
 	base := mustRun(t, ctx, dir, "rev-parse", "HEAD")
@@ -891,6 +922,7 @@ func TestReplayOntoAppliesNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
 }
 
 func TestReplayOntoConflictLeavesBranchAtOldHead(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir, base, main, feat := divergedRepo(t, true)
 	_, err := ReplayOnto(ctx, dir, "x", main, base)
@@ -910,6 +942,7 @@ func TestReplayOntoConflictLeavesBranchAtOldHead(t *testing.T) {
 }
 
 func TestSquashOwnWithoutAttemptTrailersNamesOwnCommits(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := repo(t)
 	base := mustRun(t, ctx, dir, "rev-parse", "HEAD")
@@ -933,6 +966,7 @@ func TestSquashOwnWithoutAttemptTrailersNamesOwnCommits(t *testing.T) {
 }
 
 func TestApplyTreeCarriesOnlyTheChangeOntoTheTarget(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	r := repo(t)
 	base := mustRun(t, ctx, r, "rev-parse", "HEAD")
