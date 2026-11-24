@@ -67,6 +67,12 @@ func writeCommit(t *testing.T, dir, name, content, msg string) string {
 // branch changes the second line of shared.txt. checkCmd is the gate.
 func setup(t *testing.T, checkCmd string, script runner.Script) *env {
 	t.Helper()
+	return setupWith(t, checkCmd, script)
+}
+
+// setupWith is setup with more tasks in the goal's plan; only g1/a gets a branch.
+func setupWith(t *testing.T, checkCmd string, script runner.Script, more ...taskspec.Spec) *env {
+	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -94,6 +100,7 @@ func setup(t *testing.T, checkCmd string, script runner.Script) *env {
 	t.Cleanup(func() { s.Close() })
 	pl := plan.Plan{Goal: "keep", Tasks: []taskspec.Spec{{ID: "a", Title: "Task a", Kind: "implement", Spec: "change b",
 		Acceptance: []string{"b says task"}, Owns: []string{}, Size: "S"}}}
+	pl.Tasks = append(pl.Tasks, more...)
 	raw, _ := json.Marshal(pl)
 	g, err := s.CreateGoal(ctx, "keep", raw)
 	if err != nil {

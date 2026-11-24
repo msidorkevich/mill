@@ -607,6 +607,8 @@ func waitingReason(err error) string {
 		return "the other dependencies land"
 	case strings.Contains(re.Msg, "its branch is still based on"):
 		return "`mill sync` moves it onto the base branch"
+	case strings.Contains(re.Msg, "does not hold the parent's head") && re.Parent != "":
+		return fmt.Sprintf("`mill sync` or `mill keep` restacks it onto the new head of %s", re.Parent)
 	case strings.Contains(re.Msg, "that are not published") && re.Parent != "":
 		return fmt.Sprintf("parent %s publishes its new changes", re.Parent)
 	case re.Parent != "":

@@ -247,7 +247,7 @@ func (k *keeper) task(ctx context.Context, t store.Task, br store.Branch) error 
 	if len(deps) > 1 {
 		return k.restackFanIn(ctx, t, br)
 	}
-	onto, landed := k.upstream, false
+	onto, landed, stacked := k.upstream, false, false
 	var tip string
 	if len(deps) == 1 {
 		dep := deps[0]
@@ -263,7 +263,7 @@ func (k *keeper) task(ctx context.Context, t store.Task, br store.Branch) error 
 		case dt.Status == store.TaskLanded:
 			landed = br.Base == db.Name
 		case store.Done(dt.Status) && db.HeadSHA != "":
-			onto, tip = db.Name, db.HeadSHA
+			onto, tip, stacked = db.Name, db.HeadSHA, true
 		default:
 			k.skip(t.ID, fmt.Sprintf("dependency %s is %s; waiting for it", dep, dt.Status))
 			return nil
@@ -293,7 +293,16 @@ func (k *keeper) task(ctx context.Context, t store.Task, br store.Branch) error 
 		return fmt.Errorf("conflict check of %s against %s: %w", t.ID, onto, err)
 	}
 	if len(files) == 0 {
-		return nil
+		if !stacked {
+			return nil
+		}
+		// A branch stacked on a parent whose head moved (restacked or fixed earlier in this
+		// pass) is restacked even without a conflict: published from a branch that lacks the
+		// parent's head, it would be stacked on a stale parent.
+		return k.withClaim(ctx, t.ID, t.Status, func() error {
+			k.logf("%s: does not hold the head of %s (%s); rebasing", t.ID, onto, short(tip))
+			return k.rebase(ctx, t, br, onto, tip, landed)
+		})
 	}
 	return k.withClaim(ctx, t.ID, t.Status, func() error {
 		k.logf("%s: conflicts with %s (%s) in %s; rebasing", t.ID, onto, short(tip), strings.Join(files, ", "))
