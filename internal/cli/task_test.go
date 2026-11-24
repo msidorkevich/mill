@@ -324,12 +324,9 @@ type asyncRun struct {
 // milliseconds while it waits for a scheduler.
 func startTaskRun(t *testing.T, ctx context.Context, root string, args ...string) *asyncRun {
 	t.Helper()
-	old := taskRunPollInterval
-	taskRunPollInterval = 5 * time.Millisecond
-	t.Cleanup(func() { taskRunPollInterval = old })
 	r := &asyncRun{stdout: &syncBuffer{}, stderr: &syncBuffer{}, done: make(chan int, 1)}
 	go func() {
-		r.done <- Run(ctx, Env{Stdout: r.stdout, Stderr: r.stderr, Dir: root}, append([]string{"task", "run"}, args...))
+		r.done <- Run(ctx, Env{Stdout: r.stdout, Stderr: r.stderr, Dir: root, TaskRunPoll: 5 * time.Millisecond}, append([]string{"task", "run"}, args...))
 	}()
 	return r
 }
@@ -368,6 +365,7 @@ func openTestStore(t *testing.T, root string) *store.Store {
 }
 
 func TestTaskRunWaitsForSchedulerHoldingRunLock(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	ctx := context.Background()
 	paths := project.PathsAt(root)
@@ -422,6 +420,7 @@ func TestTaskRunWaitsForSchedulerHoldingRunLock(t *testing.T) {
 }
 
 func TestTaskRunWaitingForSchedulerReportsBlockedTask(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	ctx := context.Background()
 	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
@@ -443,6 +442,7 @@ func TestTaskRunWaitingForSchedulerReportsBlockedTask(t *testing.T) {
 }
 
 func TestTaskRunRunsTaskItselfWhenSchedulerStops(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	ctx := context.Background()
 	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
@@ -463,6 +463,7 @@ func TestTaskRunRunsTaskItselfWhenSchedulerStops(t *testing.T) {
 }
 
 func TestTaskRunWaitingLeavesOtherRunningAttemptsAndStaysQueuedOnInterrupt(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	bg := context.Background()
 	s := openTestStore(t, root)
@@ -547,6 +548,7 @@ func TestTaskRunRetryRefusedWhileSchedulerRunsTask(t *testing.T) {
 }
 
 func TestTaskRunRetryUnderSchedulerRequeuesBlockedTask(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	ctx := context.Background()
 	s := openTestStore(t, root)

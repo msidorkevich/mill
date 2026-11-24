@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/plan"
@@ -57,13 +56,9 @@ func modelsE2EScript() string {
 }
 
 // modelsE2ERepo makes an initialized repo on main with the fake script and cfgExtra appended
-// to a config that runs the fake runner, and injects millisecond poll intervals.
+// to a config that runs the fake runner.
 func modelsE2ERepo(t *testing.T, script, cfgExtra string) string {
 	t.Helper()
-	old := taskRunPollInterval
-	taskRunPollInterval = time.Millisecond
-	t.Cleanup(func() { taskRunPollInterval = old })
-
 	root := gitRepo(t)
 	ctx := context.Background()
 	if _, err := gitx.Run(ctx, root, "checkout", "-q", "-b", "main"); err != nil {
@@ -159,6 +154,7 @@ func modelsE2EWantModel(t *testing.T, v modelsE2ETaskShow, id, role string, n in
 }
 
 func TestModelsEndToEndPlanRunTaskShowAndStats(t *testing.T) {
+	t.Parallel()
 	root := modelsE2ERepo(t, modelsE2EScript(), "")
 	if r := run(t, root, nil, "plan", "--file", writePlan(t, modelsE2EPlan)); r.code != ExitOK {
 		t.Fatalf("plan: %+v", r)
@@ -291,6 +287,7 @@ func modelsE2EWantLegacyPlanShow(t *testing.T, root string) {
 }
 
 func TestModelsEndToEndLegacyPlanUsesMediumAndSizesFallback(t *testing.T) {
+	t.Parallel()
 	cfg := "[sizes.S]\nmodel = \"sonnet\"\n"
 
 	// A draft goal whose stored plan has no complexity.

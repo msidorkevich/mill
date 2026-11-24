@@ -18,19 +18,6 @@ const (
 	keepMinInterval = 10 * time.Second
 )
 
-// keepWait blocks for d or until ctx is done; it reports whether the wait completed.
-// Tests replace it so they never sleep.
-var keepWait = func(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
 type keepOpts struct {
 	goal     string
 	combined bool
@@ -86,7 +73,7 @@ func runKeep(ctx context.Context, env Env, args []string) int {
 			}
 			return ExitOK
 		}
-		if !keepWait(ctx, *interval) || ctx.Err() != nil {
+		if !env.keepWait(ctx, *interval) || ctx.Err() != nil {
 			return ExitOK
 		}
 	}

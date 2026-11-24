@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/doctor"
@@ -37,6 +38,55 @@ type Env struct {
 	Home   string // user home; "" = os.UserHomeDir()
 	// Doctor overrides doctor options (tool lookup) in tests; nil uses the real machine.
 	Doctor *doctor.Options
+	// Getenv reads the process environment (EDITOR, HERDR_*); nil = os.Getenv.
+	Getenv func(string) string
+	// LookPath finds programs on PATH (herdr); nil = exec.LookPath.
+	LookPath func(string) (string, error)
+	// TaskRunPoll is how often task run reads the store while a running scheduler works on
+	// its task; 0 = 1s.
+	TaskRunPoll time.Duration
+	// KeepWait blocks for d or until ctx is done and reports whether the wait completed
+	// (keep --watch between passes); nil = a real timer.
+	KeepWait func(ctx context.Context, d time.Duration) bool
+}
+
+// getenv returns the value of the environment variable key through env.Getenv.
+func (env Env) getenv(key string) string {
+	if env.Getenv == nil {
+		return os.Getenv(key)
+	}
+	return env.Getenv(key)
+}
+
+// lookPath finds file on PATH through env.LookPath.
+func (env Env) lookPath(file string) (string, error) {
+	if env.LookPath == nil {
+		return exec.LookPath(file)
+	}
+	return env.LookPath(file)
+}
+
+// taskRunPoll is env.TaskRunPoll or its default.
+func (env Env) taskRunPoll() time.Duration {
+	if env.TaskRunPoll <= 0 {
+		return time.Second
+	}
+	return env.TaskRunPoll
+}
+
+// keepWait waits through env.KeepWait or, when nil, a real timer.
+func (env Env) keepWait(ctx context.Context, d time.Duration) bool {
+	if env.KeepWait != nil {
+		return env.KeepWait(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 type command struct {

@@ -85,6 +85,7 @@ func TestTaskEditUpdatesGoalTaskRowAndPlanTogether(t *testing.T) {
 }
 
 func TestTaskEditRunsEditorAndAppliesResult(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "x\n"}`), "")
 	setStatus(t, root, "g1/a", store.TaskFailed)
 	ed := filepath.Join(t.TempDir(), "ed.sh")
@@ -92,8 +93,7 @@ func TestTaskEditRunsEditorAndAppliesResult(t *testing.T) {
 	if err := os.WriteFile(ed, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("EDITOR", ed)
-	r := run(t, root, nil, "task", "edit", "g1/a")
+	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": ed})}, "task", "edit", "g1/a")
 	if r.code != ExitOK {
 		t.Fatalf("edit: %+v", r)
 	}
@@ -104,6 +104,7 @@ func TestTaskEditRunsEditorAndAppliesResult(t *testing.T) {
 }
 
 func TestTaskEditInvalidEditorResultKeepsFileAndChangesNothing(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "x\n"}`), "")
 	setStatus(t, root, "g1/a", store.TaskBlocked)
 	ed := filepath.Join(t.TempDir(), "ed.sh")
@@ -111,8 +112,7 @@ func TestTaskEditInvalidEditorResultKeepsFileAndChangesNothing(t *testing.T) {
 	if err := os.WriteFile(ed, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("EDITOR", ed)
-	r := run(t, root, nil, "task", "edit", "g1/a")
+	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": ed})}, "task", "edit", "g1/a")
 	if r.code != ExitError || !strings.Contains(r.stderr, "kind must be one of") || !strings.Contains(r.stderr, "kept in ") {
 		t.Fatalf("edit: %+v", r)
 	}

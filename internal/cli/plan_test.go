@@ -233,10 +233,11 @@ func editorScript(t *testing.T, body string) string {
 }
 
 func TestPlanEditRunsEditorAndAppliesValidResult(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
-	t.Setenv("EDITOR", editorScript(t, `sed 's/First/Edited task/' "$1" > "$1.new" && mv "$1.new" "$1"`))
-	r := run(t, root, nil, "plan", "edit", "g1")
+	editor := editorScript(t, `sed 's/First/Edited task/' "$1" > "$1.new" && mv "$1.new" "$1"`)
+	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": editor})}, "plan", "edit", "g1")
 	if r.code != ExitOK {
 		t.Fatalf("edit: %+v", r)
 	}
@@ -246,10 +247,11 @@ func TestPlanEditRunsEditorAndAppliesValidResult(t *testing.T) {
 }
 
 func TestPlanEditInvalidEditorResultKeepsFile(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
-	t.Setenv("EDITOR", editorScript(t, `echo '{"goal": ""}' > "$1"`))
-	r := run(t, root, nil, "plan", "edit", "g1")
+	editor := editorScript(t, `echo '{"goal": ""}' > "$1"`)
+	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": editor})}, "plan", "edit", "g1")
 	if r.code != ExitError || !strings.Contains(r.stderr, "goal must not be empty") {
 		t.Fatalf("edit: %+v", r)
 	}

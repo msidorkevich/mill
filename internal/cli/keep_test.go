@@ -171,13 +171,13 @@ func TestKeepReportsBusyTaskAndLeavesItUnchanged(t *testing.T) {
 }
 
 func TestKeepWatchRepeatsPassesUntilCancelled(t *testing.T) {
+	t.Parallel()
 	root := keepRepo(t, "true")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	waits := 0
 	var got []time.Duration
-	old := keepWait
-	keepWait = func(ctx context.Context, d time.Duration) bool {
+	wait := func(ctx context.Context, d time.Duration) bool {
 		got = append(got, d)
 		waits++
 		if waits == 2 {
@@ -186,10 +186,9 @@ func TestKeepWatchRepeatsPassesUntilCancelled(t *testing.T) {
 		}
 		return true
 	}
-	defer func() { keepWait = old }()
 
 	var out, errb bytes.Buffer
-	code := Run(ctx, Env{Stdout: &out, Stderr: &errb, Dir: root}, []string{"keep", "--watch", "--interval", "10s"})
+	code := Run(ctx, Env{Stdout: &out, Stderr: &errb, Dir: root, KeepWait: wait}, []string{"keep", "--watch", "--interval", "10s"})
 	if code != ExitOK {
 		t.Fatalf("code = %d\n%s", code, errb.String())
 	}

@@ -29,6 +29,22 @@ func run(t *testing.T, dir string, d *doctor.Options, args ...string) result {
 	return result{code, out.String(), errb.String()}
 }
 
+// runEnv runs mill in dir with env's injected fields (Getenv, LookPath, ...); Stdout, Stderr
+// and Dir are set here.
+func runEnv(t *testing.T, dir string, env Env, args ...string) result {
+	t.Helper()
+	var out, errb bytes.Buffer
+	env.Stdout, env.Stderr, env.Dir = &out, &errb, dir
+	code := Run(context.Background(), env, args)
+	return result{code, out.String(), errb.String()}
+}
+
+// fakeGetenv returns an Env.Getenv that reads vars only, so a command never sees the
+// process environment.
+func fakeGetenv(vars map[string]string) func(string) string {
+	return func(k string) string { return vars[k] }
+}
+
 func gitRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -99,6 +115,9 @@ func TestInitOutsideGitRepo(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	dir := t.TempDir()
+	// git reads GIT_CEILING_DIRECTORIES from the process environment while project discovery
+	// runs it, and discovery takes no environment of its own, so this test stays serial: the
+	// ceiling keeps git from finding a repository above the temp dir.
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
 	r := run(t, dir, nil, "init")
 	if r.code != ExitError || !strings.Contains(r.stderr, "not inside a git repository") {
