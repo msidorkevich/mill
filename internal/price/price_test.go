@@ -83,3 +83,24 @@ func TestEstimateUnknownModelIsNotOK(t *testing.T) {
 		t.Errorf("custom override: %v, %v", got, ok)
 	}
 }
+
+func TestTokenCostSplitsEightyTwenty(t *testing.T) {
+	// opus: 800K input at $4/M + 200K output at $20/M.
+	got, ok := TokenCost("opus", 1_000_000, nil)
+	if !ok || !near(got, 3.2+4) {
+		t.Errorf("TokenCost(opus, 1M) = %v, %v; want 7.2, true", got, ok)
+	}
+	got, ok = TokenCost("custom", 1_000_000, map[string]Rates{"custom": {Input: 1, Output: 10}})
+	if !ok || !near(got, 0.8+2) {
+		t.Errorf("TokenCost(custom) = %v, %v; want 2.8, true", got, ok)
+	}
+	if got, ok := TokenCost("opus", 0, nil); !ok || got != 0 {
+		t.Errorf("TokenCost(opus, 0) = %v, %v; want 0, true", got, ok)
+	}
+}
+
+func TestTokenCostUnknownModelIsNotOK(t *testing.T) {
+	if got, ok := TokenCost("gpt-4", 1000, nil); ok || got != 0 {
+		t.Errorf("TokenCost(gpt-4) = %v, %v; want 0, false", got, ok)
+	}
+}

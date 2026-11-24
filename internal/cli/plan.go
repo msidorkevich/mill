@@ -14,9 +14,11 @@ import (
 	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/planner"
+	"github.com/msidorkevich/mill/internal/price"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -174,10 +176,11 @@ func runPlanGoal(ctx context.Context, env Env, goal string) int {
 	}
 	allow := append(append(append([]string{}, host.DefaultEnvAllow...), cfg.EnvAllow...), p.AgentEnvAllow...)
 
-	fmt.Fprintf(env.Stdout, "Planning (model %s, logs in %s)...\n", cfg.Model("M"), logDir)
+	model := cfg.Roles.Planner
+	fmt.Fprintf(env.Stdout, "Planning (model %s, logs in %s)...\n", model, logDir)
 	res, err := planner.Generate(ctx, planner.Options{
 		Runner: p.Runner, Goal: goal, Root: paths.Root, CheckCmd: cfg.CheckCmd,
-		Model: cfg.Model("M"), Budget: cfg.AttemptBudget("M"), Count: cfg.Budget.Count,
+		Model: model, Budget: cfg.AttemptBudget("M"), Count: cfg.Budget.Count,
 		LogDir: logDir, ProtectedPaths: []string{paths.MillDir}, Env: host.AllowEnv(os.Environ(), allow),
 		Timeout: cfg.Runner.AttemptTimeout.Duration,
 	})
@@ -258,16 +261,25 @@ func goalArg(env Env, name, usage string, fs interface {
 }
 
 type planTask struct {
-	ID         string   `json:"id"`
-	Title      string   `json:"title"`
-	Kind       string   `json:"kind"`
-	Size       string   `json:"size"`
-	DependsOn  []string `json:"depends_on"`
-	Owns       []string `json:"owns"`
-	Checks     []string `json:"checks"`
-	Acceptance []string `json:"acceptance"`
-	Status     string   `json:"status,omitempty"`
-	Phase      string   `json:"phase,omitempty"`
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Kind       string `json:"kind"`
+	Size       string `json:"size"`
+	Complexity string `json:"complexity"`
+	// ComplexityReason is the planner's reason for the complexity.
+	ComplexityReason string `json:"complexity_reason"`
+	// Model is the model the task's first attempt runs on; "" when the config maps none.
+	Model    string `json:"model"`
+	ModelWhy string `json:"model_why"`
+	// CostLowUSD and CostHighUSD estimate the task's cost; null when a model has no rates.
+	CostLowUSD  *float64 `json:"cost_low_usd"`
+	CostHighUSD *float64 `json:"cost_high_usd"`
+	DependsOn   []string `json:"depends_on"`
+	Owns        []string `json:"owns"`
+	Checks      []string `json:"checks"`
+	Acceptance  []string `json:"acceptance"`
+	Status      string   `json:"status,omitempty"`
+	Phase       string   `json:"phase,omitempty"`
 }
 
 func runPlanShow(ctx context.Context, env Env, args []string) int {
@@ -281,7 +293,7 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "mill plan show: %v\n", err)
 		return ExitError
 	}
-	_, _, s, err := openProject(ctx, env)
+	_, cfg, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
@@ -306,7 +318,12 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 	for _, tid := range order {
 		t := p.Tasks[byID[tid]]
 		pt := planTask{ID: t.ID, Title: t.Title, Kind: t.Kind, Size: t.Size, DependsOn: nz(t.DependsOn),
-			Owns: nz(t.Owns), Checks: nz(t.Checks), Acceptance: nz(t.Acceptance)}
+			Owns: nz(t.Owns), Checks: nz(t.Checks), Acceptance: nz(t.Acceptance),
+			Complexity: t.Complexity, ComplexityReason: t.ComplexityReason}
+		pt.Model, pt.ModelWhy = cfg.TaskModel(t.Size, t.Complexity, t.Model)
+		if lo, hi, ok := taskCostRange(cfg, pt.Model, t.Size); ok {
+			pt.CostLowUSD, pt.CostHighUSD = &lo, &hi
+		}
 		if g.Status != store.GoalDraft {
 			st, err := s.GetTask(ctx, store.TaskID(g.ID, t.ID))
 			if err != nil {
@@ -354,6 +371,16 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 	for i, t := range tasks {
 		fmt.Fprintf(w, "\n%d. %s: %s\n", i+1, t.ID, t.Title)
 		fmt.Fprintf(w, "   kind        %s, size %s\n", t.Kind, t.Size)
+		reason := t.ComplexityReason
+		if reason == "" {
+			reason = "no reason given"
+		}
+		fmt.Fprintf(w, "   complexity  %s (%s)\n", t.Complexity, reason)
+		model := t.Model
+		if model == "" {
+			model = "(none)"
+		}
+		fmt.Fprintf(w, "   model       %s (%s), est. %s\n", model, t.ModelWhy, costRange(t.CostLowUSD, t.CostHighUSD))
 		if t.Status != "" {
 			st := t.Status
 			if t.Phase != "" {
@@ -375,6 +402,23 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 			fmt.Fprintf(w, "     - %s\n", a)
 		}
 	}
+	var lo, hi float64
+	unpriced := 0
+	for _, t := range tasks {
+		if t.CostLowUSD == nil {
+			unpriced++
+			continue
+		}
+		lo, hi = lo+*t.CostLowUSD, hi+*t.CostHighUSD
+	}
+	switch {
+	case unpriced == len(tasks):
+		fmt.Fprintln(w, "\nEstimated cost: unknown (no task's model has prices; add [prices] to the config)")
+	case unpriced > 0:
+		fmt.Fprintf(w, "\nEstimated cost: $%.2f–$%.2f, excluding %d task(s) with unknown cost\n", lo, hi, unpriced)
+	default:
+		fmt.Fprintf(w, "\nEstimated cost: $%.2f–$%.2f\n", lo, hi)
+	}
 	if len(warnings) > 0 {
 		fmt.Fprintln(w, "\nWarnings:")
 		for _, x := range warnings {
@@ -385,6 +429,42 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(w, "\nNext: `mill plan edit %s` to change it, or `mill plan approve %s`.\n", g.ID, g.ID)
 	}
 	return ExitOK
+}
+
+// taskCostRange estimates a task's cost on model. Low is one attempt using half its token
+// limit, with a verifier doing the same; high is every attempt (escalating) using its whole
+// limit with its verifier, capped at budget.task.usd when set. ok is false when any model
+// involved has no rates.
+func taskCostRange(cfg config.Config, model, size string) (lo, hi float64, ok bool) {
+	limit := cfg.AttemptBudget(size).Tokens
+	pair := func(m string, tokens int64) (float64, bool) {
+		a, ok1 := price.TokenCost(m, tokens, cfg.Prices)
+		b, ok2 := price.TokenCost(cfg.VerifierModel(m), tokens, cfg.Prices)
+		return a + b, ok1 && ok2
+	}
+	lo, ok = pair(model, limit/2)
+	if !ok {
+		return 0, 0, false
+	}
+	for i := 0; i < cfg.MaxAttempts; i++ {
+		c, ok := pair(cfg.Escalate(model, i), limit)
+		if !ok {
+			return 0, 0, false
+		}
+		hi += c
+	}
+	if cap := cfg.Budget.Task.USD; cap > 0 {
+		hi = min(hi, cap)
+		lo = min(lo, hi)
+	}
+	return lo, hi, true
+}
+
+func costRange(lo, hi *float64) string {
+	if lo == nil || hi == nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("$%.2f–$%.2f", *lo, *hi)
 }
 
 func nz(s []string) []string {
