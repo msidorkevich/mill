@@ -64,6 +64,7 @@ func statsModelsSeed(t *testing.T, root string) {
 }
 
 func TestStatsModelsPrintsOneRowPerGroup(t *testing.T) {
+	t.Parallel()
 	root := statsModelsRepo(t)
 	statsModelsSeed(t, root)
 	r := run(t, root, nil, "stats", "models")
@@ -88,6 +89,7 @@ func TestStatsModelsPrintsOneRowPerGroup(t *testing.T) {
 }
 
 func TestStatsModelsJSONPrintsTheSameData(t *testing.T) {
+	t.Parallel()
 	root := statsModelsRepo(t)
 	statsModelsSeed(t, root)
 	r := run(t, root, nil, "stats", "models", "--json")
@@ -116,6 +118,7 @@ func TestStatsModelsJSONPrintsTheSameData(t *testing.T) {
 }
 
 func TestStatsModelsEmptyStorePrintsMessage(t *testing.T) {
+	t.Parallel()
 	root := statsModelsRepo(t)
 	r := run(t, root, nil, "stats", "models")
 	if r.code != ExitOK || strings.TrimSpace(r.stdout) != "no tasks with attempts yet" {
@@ -128,6 +131,7 @@ func TestStatsModelsEmptyStorePrintsMessage(t *testing.T) {
 }
 
 func TestStatsModelsUnknownOrMissingSubcommandIsUsageError(t *testing.T) {
+	t.Parallel()
 	root := statsModelsRepo(t)
 	for _, args := range [][]string{{"stats"}, {"stats", "nope"}, {"stats", "models", "extra"}, {"stats", "models", "--bogus"}} {
 		if r := run(t, root, nil, args...); r.code != ExitUsage {
@@ -140,6 +144,7 @@ func TestStatsModelsUnknownOrMissingSubcommandIsUsageError(t *testing.T) {
 }
 
 func TestStatsModelsHelpListsStats(t *testing.T) {
+	t.Parallel()
 	r := run(t, t.TempDir(), nil, "help")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "\n  stats ") {
 		t.Fatalf("help: %+v", r)

@@ -30,6 +30,20 @@ const fanInPlan = `{
   ]
 }`
 
+// groupBPoll is the scheduler, task-run join and deadline-poll interval of these tests, so
+// no test waits on a production default (seconds).
+const groupBPoll = 5 * time.Millisecond
+
+// groupBWatchInterval is the --interval given to mill watch in tests.
+const groupBWatchInterval = "5ms"
+
+// groupBRun runs mill in dir like run, with the scheduler and task-run join polling every
+// groupBPoll instead of their production defaults.
+func groupBRun(t *testing.T, dir string, args ...string) result {
+	t.Helper()
+	return runEnv(t, dir, Env{SchedulerPoll: groupBPoll, TaskRunPoll: groupBPoll}, args...)
+}
+
 // taskSteps is a per-task fake script: the implementer writes files, the verifier passes.
 func taskSteps(files string) string {
 	return `{"implementer": [{"output": {"summary": "s", "files_changed": [], "notes": ""}, "files": ` + files + `}],
@@ -86,8 +100,9 @@ func fanInScript(aFiles string) string {
 }
 
 func TestRunGoalFanInVerifiesAllTasks(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
-	r := run(t, root, nil, "run", "g1")
+	r := groupBRun(t, root, "run", "g1")
 	if r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
@@ -126,15 +141,16 @@ func TestRunGoalFanInVerifiesAllTasks(t *testing.T) {
 		t.Errorf("goal = %+v", g)
 	}
 
-	if again := run(t, root, nil, "run", "g1"); again.code != ExitError || !strings.Contains(again.stderr, "already done") {
+	if again := groupBRun(t, root, "run", "g1"); again.code != ExitError || !strings.Contains(again.stderr, "already done") {
 		t.Errorf("run of done goal: %+v", again)
 	}
 }
 
 func TestRunGoalBlockedTaskExitsNotVerified(t *testing.T) {
+	t.Parallel()
 	// a writes the wrong file, so its check fails and it blocks after one attempt.
 	root := goalRepo(t, fanInScript(`{"wrong.txt": "x\n"}`), "")
-	r := run(t, root, nil, "run", "g1")
+	r := groupBRun(t, root, "run", "g1")
 	if r.code != ExitNotVerified {
 		t.Fatalf("run: %+v", r)
 	}
@@ -161,14 +177,16 @@ func TestRunGoalBlockedTaskExitsNotVerified(t *testing.T) {
 }
 
 func TestRunGoalRefusesPublishedStartMode(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), `start_children_on = "published"`)
-	r := run(t, root, nil, "run", "g1")
+	r := groupBRun(t, root, "run", "g1")
 	if r.code != ExitError || !strings.Contains(r.stderr, `start_children_on = "verified"`) {
 		t.Fatalf("run: %+v", r)
 	}
 }
 
 func TestRunGoalRefusedWhileRunLockHeld(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
 	l, err := runlock.Acquire(project.PathsAt(root).RunLock)
 	if err != nil {
@@ -188,15 +206,16 @@ func TestRunGoalRefusedWhileRunLockHeld(t *testing.T) {
 }
 
 func TestRunGoalRefusesDraftAndUsageErrors(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan))
-	if r := run(t, root, nil, "run", "g1"); r.code != ExitError || !strings.Contains(r.stderr, "mill plan approve g1") {
+	if r := groupBRun(t, root, "run", "g1"); r.code != ExitError || !strings.Contains(r.stderr, "mill plan approve g1") {
 		t.Fatalf("draft: %+v", r)
 	}
-	if r := run(t, root, nil, "run", "g1", "g2"); r.code != ExitUsage || !strings.Contains(r.stderr, "mill run [<goal>]") {
+	if r := groupBRun(t, root, "run", "g1", "g2"); r.code != ExitUsage || !strings.Contains(r.stderr, "mill run [<goal>]") {
 		t.Fatalf("two goals: %+v", r)
 	}
-	if r := run(t, root, nil, "run", "g1", "--bogus"); r.code != ExitUsage {
+	if r := groupBRun(t, root, "run", "g1", "--bogus"); r.code != ExitUsage {
 		t.Fatalf("bad flag: %+v", r)
 	}
 }
@@ -214,10 +233,11 @@ func limitedFanInScript(resetsAt time.Time) string {
 }
 
 func TestRunGoalRateLimitBlocksThenWaitOnLimitFinishes(t *testing.T) {
+	t.Parallel()
 	// The limit reset two minutes ago, so --wait-on-limit resumes at once.
 	resets := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
 	root := goalRepo(t, limitedFanInScript(resets), "")
-	r := run(t, root, nil, "run", "g1")
+	r := groupBRun(t, root, "run", "g1")
 	if r.code != ExitNotVerified {
 		t.Fatalf("run: %+v", r)
 	}
@@ -231,7 +251,7 @@ func TestRunGoalRateLimitBlocksThenWaitOnLimitFinishes(t *testing.T) {
 		t.Errorf("g1/c started after the rate limit:\n%s", r.stdout)
 	}
 
-	r = run(t, root, nil, "run", "g1", "--retry-blocked", "--wait-on-limit")
+	r = groupBRun(t, root, "run", "g1", "--retry-blocked", "--wait-on-limit")
 	if r.code != ExitOK {
 		t.Fatalf("run --wait-on-limit: %+v", r)
 	}
@@ -285,8 +305,9 @@ func taskStatuses(t *testing.T, root string, ids ...string) map[string]string {
 }
 
 func TestRunWithoutGoalRunsEveryApprovedGoal(t *testing.T) {
+	t.Parallel()
 	root := twoGoalRepo(t)
-	r := run(t, root, nil, "run")
+	r := groupBRun(t, root, "run")
 	if r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
@@ -307,8 +328,9 @@ func TestRunWithoutGoalRunsEveryApprovedGoal(t *testing.T) {
 }
 
 func TestRunGoalLeavesOtherGoalsPending(t *testing.T) {
+	t.Parallel()
 	root := twoGoalRepo(t)
-	r := run(t, root, nil, "run", "g1")
+	r := groupBRun(t, root, "run", "g1")
 	if r.code != ExitOK {
 		t.Fatalf("run g1: %+v", r)
 	}
@@ -325,15 +347,17 @@ func TestRunGoalLeavesOtherGoalsPending(t *testing.T) {
 }
 
 func TestRunWithNothingReadyPrintsNothingToRun(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	run(t, root, nil, "plan", "--file", writePlan(t, validPlan)) // a draft goal is not ready
-	r := run(t, root, nil, "run")
+	r := groupBRun(t, root, "run")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "Nothing to run: no approved goal or queued task is ready.") {
 		t.Fatalf("run: %+v", r)
 	}
 }
 
 func TestRunRecoversInterruptedTasksWhenItBecomesScheduler(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
 	ctx := context.Background()
 	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
@@ -349,14 +373,14 @@ func TestRunRecoversInterruptedTasksWhenItBecomesScheduler(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r := run(t, root, nil, "run"); r.code != ExitError || strings.Contains(r.stdout, "recovered") {
+	if r := groupBRun(t, root, "run"); r.code != ExitError || strings.Contains(r.stdout, "recovered") {
 		t.Fatalf("run while locked recovered or did not fail: %+v", r)
 	}
 	if err := l.Release(); err != nil {
 		t.Fatal(err)
 	}
 
-	r := run(t, root, nil, "run")
+	r := groupBRun(t, root, "run")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "recovered 1 interrupted task(s)") {
 		t.Fatalf("run: %+v", r)
 	}
@@ -366,6 +390,7 @@ func TestRunRecoversInterruptedTasksWhenItBecomesScheduler(t *testing.T) {
 }
 
 func TestReadOnlyCommandsLeaveInterruptedTasksForRun(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
 	ctx := context.Background()
 	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
@@ -389,13 +414,14 @@ func TestReadOnlyCommandsLeaveInterruptedTasksForRun(t *testing.T) {
 		t.Fatalf("g1/a = %s after read-only commands; want %s", st, store.TaskRunning)
 	}
 
-	r := run(t, root, nil, "run")
+	r := groupBRun(t, root, "run")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "recovered 1 interrupted task(s)") {
 		t.Fatalf("run: %+v", r)
 	}
 }
 
 func TestRunReportsQueuedSingleTaskStatus(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 1)
 	ctx := context.Background()
 	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
@@ -410,7 +436,7 @@ func TestRunReportsQueuedSingleTaskStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
-	r := run(t, root, nil, "run")
+	r := groupBRun(t, root, "run")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "task hello: verified") {
 		t.Fatalf("run: %+v", r)
 	}

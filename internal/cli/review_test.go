@@ -21,13 +21,14 @@ import (
 func verifiedGoal(t *testing.T) string {
 	t.Helper()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
-	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g1"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	return root
 }
 
 func TestReviewListShowsVerifiedAndPublishedTasks(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -68,6 +69,7 @@ func TestReviewListShowsVerifiedAndPublishedTasks(t *testing.T) {
 }
 
 func TestReviewListEmpty(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
 	if r := run(t, root, nil, "review"); r.code != ExitOK || strings.TrimSpace(r.stdout) != "nothing to review" {
 		t.Fatalf("review: %+v", r)
@@ -79,6 +81,7 @@ func TestReviewListEmpty(t *testing.T) {
 }
 
 func TestReviewShowPrintsSpecVerdictGateAndDiff(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	r := run(t, root, nil, "review", "show", "g1/a")
 	if r.code != ExitOK {
@@ -118,6 +121,7 @@ func TestReviewShowPrintsSpecVerdictGateAndDiff(t *testing.T) {
 }
 
 func TestReviewShowIncludesGateEventsOfLastAttempt(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -138,6 +142,7 @@ func TestReviewShowIncludesGateEventsOfLastAttempt(t *testing.T) {
 }
 
 func TestReviewRefusesTasksNotVerifiedOrPublished(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	setStatus(t, root, "g1/a", store.TaskBlocked)
 	for _, args := range [][]string{
@@ -156,6 +161,7 @@ func TestReviewRefusesTasksNotVerifiedOrPublished(t *testing.T) {
 }
 
 func TestReviewChangesRecordsOneOperatorFindingPerParagraph(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -188,6 +194,7 @@ func TestReviewChangesRecordsOneOperatorFindingPerParagraph(t *testing.T) {
 }
 
 func TestReviewChangesFromFileAndPublishedNote(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	setStatus(t, root, "g1/b", store.TaskPublished)
 	p := filepath.Join(t.TempDir(), "notes.txt")
@@ -207,6 +214,7 @@ func TestReviewChangesFromFileAndPublishedNote(t *testing.T) {
 }
 
 func TestReviewChangesOnSingleTaskNamesRetryCommand(t *testing.T) {
+	t.Parallel()
 	root := soloRepo(t, `{"solo.txt": "s\n"}`)
 	setStatus(t, root, "solo", store.TaskVerified)
 	r := run(t, root, nil, "review", "changes", "solo", "-m", "tidy up")
@@ -216,6 +224,7 @@ func TestReviewChangesOnSingleTaskNamesRetryCommand(t *testing.T) {
 }
 
 func TestReviewRejectBlocksTaskAndHoldsNonLandedDescendants(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -236,6 +245,7 @@ func TestReviewRejectBlocksTaskAndHoldsNonLandedDescendants(t *testing.T) {
 }
 
 func TestReviewRejectLeavesLandedDescendantsAlone(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	setStatus(t, root, "g1/c", store.TaskLanded)
 	r := run(t, root, nil, "review", "reject", "g1/a", "-m", "no")
@@ -248,6 +258,7 @@ func TestReviewRejectLeavesLandedDescendantsAlone(t *testing.T) {
 }
 
 func TestReviewChangesReopensDoneGoalAndRunRerunsTask(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -262,7 +273,7 @@ func TestReviewChangesReopensDoneGoalAndRunRerunsTask(t *testing.T) {
 	if g.Status != store.GoalApproved || !strings.Contains(g.Reason, "g1/c") || !strings.Contains(g.Reason, "changes requested") {
 		t.Fatalf("goal after = %+v", g)
 	}
-	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK || !strings.Contains(r.stdout, "g1/c: started") || strings.Contains(r.stdout, "g1/a: started") {
+	if r := groupBRun(t, root, "run", "g1"); r.code != ExitOK || !strings.Contains(r.stdout, "g1/c: started") || strings.Contains(r.stdout, "g1/a: started") {
 		t.Fatalf("rerun: %+v", r)
 	}
 	if tk, _ := s.GetTask(ctx, "g1/c"); tk.Status != store.TaskVerified {
@@ -274,6 +285,7 @@ func TestReviewChangesReopensDoneGoalAndRunRerunsTask(t *testing.T) {
 }
 
 func TestReviewRejectReopensDoneGoal(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -288,7 +300,7 @@ func TestReviewRejectReopensDoneGoal(t *testing.T) {
 	if tk, _ := s.GetTask(ctx, "g1/c"); tk.Status != store.TaskBlocked {
 		t.Fatalf("task = %+v", tk)
 	}
-	if r := run(t, root, nil, "run", "g1", "--retry-blocked"); r.code != ExitOK || !strings.Contains(r.stdout, "g1/c: started") {
+	if r := groupBRun(t, root, "run", "g1", "--retry-blocked"); r.code != ExitOK || !strings.Contains(r.stdout, "g1/c: started") {
 		t.Fatalf("rerun: %+v", r)
 	}
 }
@@ -414,6 +426,7 @@ func snapshotTask(t *testing.T, s *store.Store, id string) taskRows {
 }
 
 func TestReviewCommandsRefuseTaskWithRunningAttempt(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	addRemote(t, root)
 	s := openStore(t, root)
@@ -445,6 +458,7 @@ func TestReviewCommandsRefuseTaskWithRunningAttempt(t *testing.T) {
 }
 
 func TestReviewChangesAndRejectWorkWhileUnrelatedRunHoldsLock(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	s := openStore(t, root)
 	holdRunLock(t, root)

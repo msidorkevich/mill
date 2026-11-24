@@ -26,7 +26,7 @@ func chainPublished(t *testing.T, publish bool) (root, bare string) {
 	if r := run(t, root, nil, "plan", "approve", "g2"); r.code != ExitOK {
 		t.Fatalf("approve plan: %+v", r)
 	}
-	if r := run(t, root, nil, "run", "g2"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g2"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	bare = addRemote(t, root)
@@ -78,6 +78,7 @@ func lastEvent(t *testing.T, s *store.Store, id, kind string) map[string]any {
 }
 
 func TestSyncMergeCommitLandsTaskAndRestacksChildOntoBase(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -159,6 +160,7 @@ func TestSyncMergeCommitLandsTaskAndRestacksChildOntoBase(t *testing.T) {
 }
 
 func TestSyncSquashMergeLandsTaskByPatchAndPrintsJSON(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	f := forge(t, bare)
 	gitC(t, f, "fetch", "-q", "origin")
@@ -199,6 +201,7 @@ func TestSyncSquashMergeLandsTaskByPatchAndPrintsJSON(t *testing.T) {
 }
 
 func TestSyncChangedPatchWithTrailerLandsTaskByTrailer(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	f := forge(t, bare)
 	forgeCommit(t, f, "a.txt", "a, edited on merge\n", "A, edited\n\nMill-Task: g2/a")
@@ -219,6 +222,7 @@ func TestSyncChangedPatchWithTrailerLandsTaskByTrailer(t *testing.T) {
 }
 
 func TestSyncRestacksChildOntoParentsNewHead(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, false)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -246,6 +250,7 @@ func TestSyncRestacksChildOntoParentsNewHead(t *testing.T) {
 }
 
 func TestSyncConflictingRestackBlocksChildAndKeepsBranch(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -282,6 +287,7 @@ func TestSyncConflictingRestackBlocksChildAndKeepsBranch(t *testing.T) {
 }
 
 func TestSyncRedGateAfterRestackBlocksChild(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	pubBefore := remoteRefs(t, bare)["refs/heads/review/g2/b"]
 	f := forge(t, bare)
@@ -317,6 +323,7 @@ func TestSyncRedGateAfterRestackBlocksChild(t *testing.T) {
 }
 
 func TestSyncRestacksFanInTaskWhenDependencyLanded(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	for _, id := range []string{"g1/a", "g1/b"} {
 		if r := run(t, root, nil, "review", "approve", id); r.code != ExitOK {
@@ -367,6 +374,7 @@ func TestSyncRestacksFanInTaskWhenDependencyLanded(t *testing.T) {
 }
 
 func TestSyncBlocksFanInTaskOnRestackConflict(t *testing.T) {
+	t.Parallel()
 	root, _ := publishedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -404,6 +412,7 @@ func TestSyncBlocksFanInTaskOnRestackConflict(t *testing.T) {
 }
 
 func TestSyncNeedsConfiguredRemote(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	r := run(t, root, nil, "sync")
 	if r.code != ExitError || !strings.Contains(r.stderr, `remote "origin" is not configured in git`) {
@@ -415,6 +424,7 @@ func TestSyncNeedsConfiguredRemote(t *testing.T) {
 }
 
 func TestSyncLeavesChildPublishedWhenParentHasUnpublishedChanges(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -486,6 +496,7 @@ func TestSyncLeavesChildPublishedWhenParentHasUnpublishedChanges(t *testing.T) {
 }
 
 func TestSyncLandsVerifiedTaskWhoseBranchWasMergedDirectly(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, false)
 	ctx := context.Background()
 	gitC(t, root, "push", "-q", "origin", "mill/g2/a:refs/heads/feature")
@@ -578,6 +589,7 @@ func assertNoClaims(t *testing.T, root string) {
 }
 
 func TestSyncLandsMergedTaskWhileRunLockIsHeld(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	lock, err := runlock.Acquire(project.PathsAt(root).RunLock)
 	if err != nil {
@@ -598,6 +610,7 @@ func TestSyncLandsMergedTaskWhileRunLockIsHeld(t *testing.T) {
 }
 
 func TestSyncLeavesBusyTaskUnchangedAndExitsOne(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -654,6 +667,7 @@ func TestSyncLeavesBusyTaskUnchangedAndExitsOne(t *testing.T) {
 }
 
 func TestSyncRetriesRestackBlockedPublishedTaskAndRepublishesItOnceConflictIsGone(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, true)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -710,6 +724,7 @@ func TestSyncRetriesRestackBlockedPublishedTaskAndRepublishesItOnceConflictIsGon
 }
 
 func TestSyncLeavesTaskBlockedForOtherReasonUntouched(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, false)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -732,6 +747,7 @@ func TestSyncLeavesTaskBlockedForOtherReasonUntouched(t *testing.T) {
 }
 
 func TestSyncRetriesTaskBlockedByOlderRestackConflictAndRestoresIt(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, false)
 	ctx := context.Background()
 	s := openStore(t, root)

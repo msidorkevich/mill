@@ -79,8 +79,9 @@ func runRun(ctx context.Context, env Env, args []string) int {
 	}
 	sch := &scheduler.Scheduler{Store: s, MaxParallel: cfg.MaxParallel, RunTask: p.Run, Out: out}
 	res, err := sch.Run(ctx, scheduler.RunOptions{
-		Options: scheduler.Options{RetryBlocked: *retry, WaitOnLimit: *waitLimit},
-		Goal:    id,
+		Options:      scheduler.Options{RetryBlocked: *retry, WaitOnLimit: *waitLimit},
+		Goal:         id,
+		PollInterval: env.SchedulerPoll,
 	})
 	if err != nil {
 		return fail(err)

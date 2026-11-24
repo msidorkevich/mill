@@ -79,8 +79,9 @@ const passScript = `{
 }`
 
 func TestTaskRunAndShow(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
-	r := run(t, root, nil, "task", "run", "--file", tf)
+	r := groupBRun(t, root, "task", "run", "--file", tf)
 	if r.code != ExitOK {
 		t.Fatalf("task run: %+v", r)
 	}
@@ -91,10 +92,10 @@ func TestTaskRunAndShow(t *testing.T) {
 	}
 
 	// Running the same task again needs --retry, and a verified task cannot be retried.
-	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitError || !strings.Contains(r.stderr, "already exists") {
+	if r := groupBRun(t, root, "task", "run", "--file", tf); r.code != ExitError || !strings.Contains(r.stderr, "already exists") {
 		t.Fatalf("second run: %+v", r)
 	}
-	if r := run(t, root, nil, "task", "run", "--file", tf, "--retry"); r.code != ExitError || !strings.Contains(r.stderr, "already verified") {
+	if r := groupBRun(t, root, "task", "run", "--file", tf, "--retry"); r.code != ExitError || !strings.Contains(r.stderr, "already verified") {
 		t.Fatalf("retry of verified: %+v", r)
 	}
 
@@ -122,6 +123,7 @@ func TestTaskRunAndShow(t *testing.T) {
 }
 
 func TestTaskRunBlockedThenRetry(t *testing.T) {
+	t.Parallel()
 	script := `{
   "implementer": [
     {"output": {"summary": "s", "files_changed": [], "notes": ""}, "files": {"hello.txt": "bye\n"}},
@@ -130,7 +132,7 @@ func TestTaskRunBlockedThenRetry(t *testing.T) {
   "verifier": [{"output": {"verdict": "pass", "summary": "ok", "findings": []}}]
 }`
 	root, tf := taskRepo(t, script, 1)
-	r := run(t, root, nil, "task", "run", "--file", tf)
+	r := groupBRun(t, root, "task", "run", "--file", tf)
 	if r.code != ExitNotVerified || !strings.Contains(r.stdout, "hello: blocked") {
 		t.Fatalf("first run: %+v", r)
 	}
@@ -143,13 +145,14 @@ func TestTaskRunBlockedThenRetry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "script.json"), []byte(passScript), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r = run(t, root, nil, "task", "run", "--file", tf, "--retry")
+	r = groupBRun(t, root, "task", "run", "--file", tf, "--retry")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "hello a2 implementer") {
 		t.Fatalf("retry: %+v", r)
 	}
 }
 
 func TestTaskRunErrors(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	cases := []struct {
 		args []string
@@ -172,22 +175,24 @@ func TestTaskRunErrors(t *testing.T) {
 	}
 	bad := filepath.Join(t.TempDir(), "bad.json")
 	os.WriteFile(bad, []byte(`{"id":"x","title":"t","kind":"implement","spec":"s"}`), 0o644)
-	if r := run(t, root, nil, "task", "run", "--file", bad); r.code != ExitError || !strings.Contains(r.stderr, "acceptance") {
+	if r := groupBRun(t, root, "task", "run", "--file", bad); r.code != ExitError || !strings.Contains(r.stderr, "acceptance") {
 		t.Fatalf("invalid task: %+v", r)
 	}
 }
 
 func TestTaskRunNotInitialized(t *testing.T) {
+	t.Parallel()
 	root := gitRepo(t)
 	tf := filepath.Join(t.TempDir(), "task.json")
 	os.WriteFile(tf, []byte(taskFile), 0o644)
-	r := run(t, root, nil, "task", "run", "--file", tf)
+	r := groupBRun(t, root, "task", "run", "--file", tf)
 	if r.code != ExitError || !strings.Contains(r.stderr, "mill init") {
 		t.Fatalf("not initialized: %+v", r)
 	}
 }
 
 func TestTaskList(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 
 	r := run(t, root, nil, "task", "list")
@@ -203,7 +208,7 @@ func TestTaskList(t *testing.T) {
 		t.Fatalf("empty --json: %v\n%s", err, r.stdout)
 	}
 
-	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+	if r := groupBRun(t, root, "task", "run", "--file", tf); r.code != ExitOK {
 		t.Fatalf("task run: %+v", r)
 	}
 
@@ -271,6 +276,7 @@ func TestTaskList(t *testing.T) {
 }
 
 func TestTaskShowAcceptsGoalTaskID(t *testing.T) {
+	t.Parallel()
 	root, _ := taskRepo(t, passScript, 3)
 	ctx := context.Background()
 	p := project.PathsAt(root)
@@ -326,7 +332,7 @@ func startTaskRun(t *testing.T, ctx context.Context, root string, args ...string
 	t.Helper()
 	r := &asyncRun{stdout: &syncBuffer{}, stderr: &syncBuffer{}, done: make(chan int, 1)}
 	go func() {
-		r.done <- Run(ctx, Env{Stdout: r.stdout, Stderr: r.stderr, Dir: root, TaskRunPoll: 5 * time.Millisecond}, append([]string{"task", "run"}, args...))
+		r.done <- Run(ctx, Env{Stdout: r.stdout, Stderr: r.stderr, Dir: root, TaskRunPoll: groupBPoll}, append([]string{"task", "run"}, args...))
 	}()
 	return r
 }
@@ -334,12 +340,16 @@ func startTaskRun(t *testing.T, ctx context.Context, root string, args ...string
 // waitFor polls cond until it holds, failing the test after a deadline.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.NewTimer(20 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(groupBPoll)
+	defer tick.Stop()
 	for !cond() {
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatalf("timed out waiting for %s", what)
+		case <-tick.C:
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -395,7 +405,7 @@ func TestTaskRunWaitsForSchedulerHoldingRunLock(t *testing.T) {
 	sch := &scheduler.Scheduler{Store: s, MaxParallel: 1, RunTask: p.Run, Out: &schedOut}
 	schedDone := make(chan error, 1)
 	go func() {
-		_, err := sch.Run(ctx, scheduler.RunOptions{PollInterval: 5 * time.Millisecond})
+		_, err := sch.Run(ctx, scheduler.RunOptions{PollInterval: groupBPoll})
 		schedDone <- err
 	}()
 
@@ -516,6 +526,7 @@ func TestTaskRunWaitingLeavesOtherRunningAttemptsAndStaysQueuedOnInterrupt(t *te
 }
 
 func TestTaskRunRetryRefusedWhileSchedulerRunsTask(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	ctx := context.Background()
 	s := openTestStore(t, root)
@@ -537,7 +548,7 @@ func TestTaskRunRetryRefusedWhileSchedulerRunsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer l.Release()
-	r := run(t, root, nil, "task", "run", "--file", tf, "--retry")
+	r := groupBRun(t, root, "task", "run", "--file", tf, "--retry")
 	if r.code != ExitError || !strings.Contains(r.stderr, "running attempt 2 (implementer)") ||
 		!strings.Contains(r.stderr, strconv.Itoa(os.Getpid())) {
 		t.Fatalf("retry of running task: %+v", r)
@@ -581,6 +592,7 @@ func TestTaskRunRetryUnderSchedulerRequeuesBlockedTask(t *testing.T) {
 }
 
 func TestTaskRunRecoversInterruptedTasks(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
 	ctx := context.Background()
 	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{})
@@ -598,15 +610,16 @@ func TestTaskRunRecoversInterruptedTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
-	r := run(t, root, nil, "task", "run", "--file", tf, "--retry")
+	r := groupBRun(t, root, "task", "run", "--file", tf, "--retry")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "recovered 1 interrupted task") {
 		t.Fatalf("run: %+v", r)
 	}
 }
 
 func TestTaskShowMarksEstimatedCosts(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
-	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+	if r := groupBRun(t, root, "task", "run", "--file", tf); r.code != ExitOK {
 		t.Fatalf("task run: %+v", r)
 	}
 	if r := run(t, root, nil, "task", "show", "hello"); strings.Contains(r.stdout, "~$") || strings.Contains(r.stdout, "estimated") {
@@ -644,16 +657,17 @@ func TestTaskShowMarksEstimatedCosts(t *testing.T) {
 }
 
 func TestRunningPublishedOrLandedTaskIsRefused(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
-	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+	if r := groupBRun(t, root, "task", "run", "--file", tf); r.code != ExitOK {
 		t.Fatalf("task run: %+v", r)
 	}
 	for _, st := range []string{store.TaskPublished, store.TaskLanded} {
 		setStatus(t, root, "hello", st)
-		if r := run(t, root, nil, "task", "run", "--file", tf, "--retry"); r.code != ExitError || !strings.Contains(r.stderr, "already "+st) {
+		if r := groupBRun(t, root, "task", "run", "--file", tf, "--retry"); r.code != ExitError || !strings.Contains(r.stderr, "already "+st) {
 			t.Errorf("retry of %s: %+v", st, r)
 		}
-		if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitError || !strings.Contains(r.stderr, "status "+st) {
+		if r := groupBRun(t, root, "task", "run", "--file", tf); r.code != ExitError || !strings.Contains(r.stderr, "status "+st) {
 			t.Errorf("re-run of %s: %+v", st, r)
 		}
 		if got, _ := openStore(t, root).GetTask(context.Background(), "hello"); got.Status != st {
@@ -663,8 +677,9 @@ func TestRunningPublishedOrLandedTaskIsRefused(t *testing.T) {
 }
 
 func TestTaskShowRunningAttemptShowsLiveUsage(t *testing.T) {
+	t.Parallel()
 	root, tf := taskRepo(t, passScript, 3)
-	if r := run(t, root, nil, "task", "run", "--file", tf); r.code != ExitOK {
+	if r := groupBRun(t, root, "task", "run", "--file", tf); r.code != ExitOK {
 		t.Fatalf("task run: %+v", r)
 	}
 	ctx := context.Background()
@@ -687,12 +702,13 @@ func TestTaskShowRunningAttemptShowsLiveUsage(t *testing.T) {
 }
 
 func TestTaskRunRateLimitedExitsBlockedWithReason(t *testing.T) {
+	t.Parallel()
 	resets := time.Now().Add(2 * time.Hour).Truncate(time.Second)
 	script := `{"implementer": [{"rate_limit": {"type": "five_hour", "resets_at": "` + resets.Format(time.RFC3339) + `"}},
 	                            {"output": {"summary": "s", "files_changed": [], "notes": ""}, "files": {"hello.txt": "hello\n"}}],
 	            "verifier": [{"output": {"verdict": "pass", "summary": "ok", "findings": []}}]}`
 	root, tf := taskRepo(t, script, 3)
-	r := run(t, root, nil, "task", "run", "--file", tf)
+	r := groupBRun(t, root, "task", "run", "--file", tf)
 	if r.code != ExitNotVerified {
 		t.Fatalf("task run: %+v", r)
 	}

@@ -125,6 +125,13 @@ func newTUIDriver(t *testing.T, env Env) *tuiDriver {
 	if env.Home == "" {
 		env.Home = t.TempDir()
 	}
+	// A mill run or task run started from the TUI polls in milliseconds, not seconds.
+	if env.SchedulerPoll == 0 {
+		env.SchedulerPoll = groupBPoll
+	}
+	if env.TaskRunPoll == 0 {
+		env.TaskRunPoll = groupBPoll
+	}
 	d := &tuiDriver{t: t, msgs: make(chan tea.Msg, 64), done: make(chan struct{})}
 	s := openStore(t, root)
 	r := newInProcRunner(t, env)

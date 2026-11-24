@@ -43,6 +43,7 @@ func writeFile(t *testing.T, body string) string {
 }
 
 func TestTaskEditUpdatesGoalTaskRowAndPlanTogether(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "x\n"}`), "")
 	setStatus(t, root, "g1/a", store.TaskBlocked)
 	r := run(t, root, nil, "task", "edit", "g1/a", "--file", writeFile(t, editedSpec))
@@ -129,6 +130,7 @@ func TestTaskEditInvalidEditorResultKeepsFileAndChangesNothing(t *testing.T) {
 }
 
 func TestTaskEditRefusesRunningAndVerified(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "x\n"}`), "")
 	for _, st := range []string{store.TaskRunning, store.TaskVerified} {
 		setStatus(t, root, "g1/a", st)
@@ -140,6 +142,7 @@ func TestTaskEditRefusesRunningAndVerified(t *testing.T) {
 }
 
 func TestTaskEditRefusesChangedIDDependenciesAndMissingChecks(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "x\n"}`), "")
 	setStatus(t, root, "g1/c", store.TaskBlocked)
 	base := `{"id": "c", "title": "C", "kind": "implement", "spec": "x", "acceptance": ["x"], "checks": ["true"], "owns": ["c.txt"], "depends_on": ["a", "b"], "size": "S"}`
@@ -161,6 +164,7 @@ func TestTaskEditRefusesChangedIDDependenciesAndMissingChecks(t *testing.T) {
 }
 
 func TestTaskEditSingleTask(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	one := `{"id": "solo", "title": "Solo", "kind": "docs", "spec": "write docs", "acceptance": [], "checks": [], "owns": ["d.md"], "size": "S"}`
 	s := openStore(t, root)

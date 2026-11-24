@@ -60,7 +60,7 @@ func soloRepo(t *testing.T, soloFiles string) (root string) {
 	root = goalRepo(t, rebaseScript(soloFiles), "")
 	spec := `{"id": "solo", "title": "Solo", "kind": "implement", "spec": "write", "acceptance": ["ok"],
   "checks": ["true"], "owns": [], "depends_on": [], "size": "S"}`
-	if r := run(t, root, nil, "task", "run", "--file", writeFile(t, spec)); r.code != ExitOK {
+	if r := groupBRun(t, root, "task", "run", "--file", writeFile(t, spec)); r.code != ExitOK {
 		t.Fatalf("task run: %+v", r)
 	}
 	setStatus(t, root, "solo", store.TaskBlocked)
@@ -68,6 +68,7 @@ func soloRepo(t *testing.T, soloFiles string) (root string) {
 }
 
 func TestTaskRebaseMovesOwnCommitsOntoMovedBase(t *testing.T) {
+	t.Parallel()
 	root := soloRepo(t, `{"solo.txt": "s\n"}`)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -115,6 +116,7 @@ func TestTaskRebaseMovesOwnCommitsOntoMovedBase(t *testing.T) {
 }
 
 func TestTaskRebaseConflictLeavesBranchUnchanged(t *testing.T) {
+	t.Parallel()
 	root := soloRepo(t, `{"clash.txt": "task\n"}`)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -138,6 +140,7 @@ func TestTaskRebaseConflictLeavesBranchUnchanged(t *testing.T) {
 }
 
 func TestTaskRebaseRefusals(t *testing.T) {
+	t.Parallel()
 	root := soloRepo(t, `{"solo.txt": "s\n"}`)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -169,6 +172,7 @@ func TestTaskRebaseRefusals(t *testing.T) {
 }
 
 func TestTaskRebaseGoalTaskOntoDependencyHead(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
 	if r := run(t, root, nil, "plan", "--file", writePlan(t, chainPlan)); r.code != ExitOK {
 		t.Fatalf("plan: %+v", r)
@@ -176,7 +180,7 @@ func TestTaskRebaseGoalTaskOntoDependencyHead(t *testing.T) {
 	if r := run(t, root, nil, "plan", "approve", "g2"); r.code != ExitOK {
 		t.Fatalf("approve: %+v", r)
 	}
-	if r := run(t, root, nil, "run", "g2"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g2"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	ctx := context.Background()
@@ -209,8 +213,9 @@ func TestTaskRebaseGoalTaskOntoDependencyHead(t *testing.T) {
 }
 
 func TestTaskRebaseRestacksFanInTaskOntoMovedDependencies(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
-	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g1"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	ctx := context.Background()
@@ -261,8 +266,9 @@ func TestTaskRebaseRestacksFanInTaskOntoMovedDependencies(t *testing.T) {
 }
 
 func TestTaskRebaseFanInConflictLeavesBranchUnchanged(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
-	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g1"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	ctx := context.Background()
@@ -294,6 +300,7 @@ func TestTaskRebaseFanInConflictLeavesBranchUnchanged(t *testing.T) {
 }
 
 func TestTaskRebaseAcceptsPublishedDependency(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
 	if r := run(t, root, nil, "plan", "--file", writePlan(t, chainPlan)); r.code != ExitOK {
 		t.Fatalf("plan: %+v", r)
@@ -301,7 +308,7 @@ func TestTaskRebaseAcceptsPublishedDependency(t *testing.T) {
 	if r := run(t, root, nil, "plan", "approve", "g2"); r.code != ExitOK {
 		t.Fatalf("approve: %+v", r)
 	}
-	if r := run(t, root, nil, "run", "g2"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g2"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	setStatus(t, root, "g2/a", store.TaskPublished)
@@ -316,8 +323,9 @@ func TestTaskRebaseAcceptsPublishedDependency(t *testing.T) {
 }
 
 func TestTaskRebaseRefusesTaskWithRunningAttempt(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, rebaseScript(`{"solo.txt": "s\n"}`), "")
-	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g1"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	s := openStore(t, root)
@@ -345,6 +353,7 @@ func TestTaskRebaseRefusesTaskWithRunningAttempt(t *testing.T) {
 }
 
 func TestTaskRebaseWorksWhileUnrelatedRunHoldsLock(t *testing.T) {
+	t.Parallel()
 	root := soloRepo(t, `{"solo.txt": "s\n"}`)
 	holdRunLock(t, root)
 	commitOnMain(t, root, "m.txt", "m\n")
@@ -384,6 +393,7 @@ func addRevertingAttempts(t *testing.T, s *store.Store, task, name string) strin
 }
 
 func TestTaskRebaseReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	t.Parallel()
 	root := soloRepo(t, `{"solo.txt": "s\n"}`)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -410,8 +420,9 @@ func TestTaskRebaseReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
 }
 
 func TestTaskRebaseFanInReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing.T) {
+	t.Parallel()
 	root := goalRepo(t, fanInScript(`{"a.txt": "a\n"}`), "")
-	if r := run(t, root, nil, "run", "g1"); r.code != ExitOK {
+	if r := groupBRun(t, root, "run", "g1"); r.code != ExitOK {
 		t.Fatalf("run: %+v", r)
 	}
 	ctx := context.Background()
@@ -445,6 +456,7 @@ func TestTaskRebaseFanInReplaysNetChangeOfAttemptsThatRevertEachOther(t *testing
 }
 
 func TestTaskRebaseRestoresStatusOfRestackBlockedTask(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, false)
 	ctx := context.Background()
 	s := openStore(t, root)

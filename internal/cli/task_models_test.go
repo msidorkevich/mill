@@ -50,6 +50,7 @@ func taskModelsLine(out, prefix string) string {
 }
 
 func TestTaskShowModelListsRoleModelAndReasonPerAttempt(t *testing.T) {
+	t.Parallel()
 	root := taskModelsRepo(t)
 	r := run(t, root, nil, "task", "show", "solo")
 	if r.code != ExitOK {
@@ -70,6 +71,7 @@ func TestTaskShowModelListsRoleModelAndReasonPerAttempt(t *testing.T) {
 }
 
 func TestTaskShowModelShowsOverrideAndComplexityReason(t *testing.T) {
+	t.Parallel()
 	root := planRepo(t)
 	spec := strings.Replace(taskModelsSpec, `"size": "S"`, `"size": "S", "complexity": "high", "complexity_reason": "touches the store", "model": "opus"`, 1)
 	if err := openStore(t, root).CreateTask(context.Background(), mustSpec(t, spec)); err != nil {
@@ -85,6 +87,7 @@ func TestTaskShowModelShowsOverrideAndComplexityReason(t *testing.T) {
 }
 
 func TestTaskShowModelDashWhenAttemptHasNoModel(t *testing.T) {
+	t.Parallel()
 	root := taskModelsRepo(t)
 	r := run(t, root, nil, "task", "show", "solo")
 	if got := taskModelsLine(r.stdout, "3 "); !strings.HasPrefix(got, "3 verifier - - ") {
@@ -93,6 +96,7 @@ func TestTaskShowModelDashWhenAttemptHasNoModel(t *testing.T) {
 }
 
 func TestTaskShowModelJSONCarriesModelAndReason(t *testing.T) {
+	t.Parallel()
 	root := taskModelsRepo(t)
 	r := run(t, root, nil, "task", "show", "solo", "--json")
 	var v struct {
@@ -114,6 +118,7 @@ func TestTaskShowModelJSONCarriesModelAndReason(t *testing.T) {
 }
 
 func TestTaskEditModelSetsModelAndComplexity(t *testing.T) {
+	t.Parallel()
 	root := taskModelsRepo(t)
 	body := strings.Replace(taskModelsSpec, `"size": "S"`, `"size": "S", "complexity": "high", "complexity_reason": "hard", "model": "opus"`, 1)
 	r := run(t, root, nil, "task", "edit", "solo", "--file", writeFile(t, body))
@@ -130,6 +135,7 @@ func TestTaskEditModelSetsModelAndComplexity(t *testing.T) {
 }
 
 func TestTaskEditModelRefusesInvalidComplexityAndKeepsFile(t *testing.T) {
+	t.Parallel()
 	root := taskModelsRepo(t)
 	body := strings.Replace(taskModelsSpec, `"size": "S"`, `"size": "S", "complexity": "x"`, 1)
 	f := writeFile(t, body)

@@ -29,6 +29,7 @@ func approvedEvents(t *testing.T, root, id string) int {
 }
 
 func TestApproveQueuesChildOfUnpublishedParent(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, false)
 	before := remoteRefs(t, bare)
 
@@ -66,6 +67,7 @@ func TestApproveQueuesChildOfUnpublishedParent(t *testing.T) {
 }
 
 func TestReviewListAndShowQueuedApproval(t *testing.T) {
+	t.Parallel()
 	root, _ := chainPublished(t, false)
 	if r := run(t, root, nil, "review", "approve", "g2/b"); r.code != ExitOK {
 		t.Fatalf("approve child: %+v", r)
@@ -147,6 +149,7 @@ func writeCheckCmd(t *testing.T, root, cmd string) {
 }
 
 func TestApproveGoalPublishesParentsFirstAndQueuesBlockedChild(t *testing.T) {
+	t.Parallel()
 	// g1: c depends on a and b, so c waits for the other dependency to land.
 	root, bare := publishedGoal(t)
 	before := remoteRefs(t, bare)
@@ -171,6 +174,7 @@ func TestApproveGoalPublishesParentsFirstAndQueuesBlockedChild(t *testing.T) {
 }
 
 func TestApproveGoalOnStackPublishesParentBeforeChild(t *testing.T) {
+	t.Parallel()
 	root, bare := chainPublished(t, false)
 	r := run(t, root, nil, "review", "approve", "--goal", "g2")
 	if r.code != ExitOK {
@@ -192,6 +196,7 @@ func TestApproveGoalOnStackPublishesParentBeforeChild(t *testing.T) {
 }
 
 func TestApproveRefusalByGateRecordsNoApproval(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	ctx := context.Background()
 	s := openStore(t, root)
@@ -213,6 +218,7 @@ func TestApproveRefusalByGateRecordsNoApproval(t *testing.T) {
 }
 
 func TestApproveRefusalByConflictRecordsNoApproval(t *testing.T) {
+	t.Parallel()
 	root, _ := publishedGoal(t)
 	commitOnMain(t, root, "a.txt", "other\n")
 	gitC(t, root, "push", "-q", "origin", "main")
@@ -225,6 +231,7 @@ func TestApproveRefusalByConflictRecordsNoApproval(t *testing.T) {
 }
 
 func TestApproveSeveralIdsKeepsGoingAfterStatusRefusal(t *testing.T) {
+	t.Parallel()
 	root, bare := publishedGoal(t)
 	setStatus(t, root, "g1/a", store.TaskPending)
 
@@ -239,6 +246,7 @@ func TestApproveSeveralIdsKeepsGoingAfterStatusRefusal(t *testing.T) {
 }
 
 func TestApproveNeedsExactlyIdsOrGoal(t *testing.T) {
+	t.Parallel()
 	root := verifiedGoal(t)
 	for _, args := range [][]string{
 		{"review", "approve"},

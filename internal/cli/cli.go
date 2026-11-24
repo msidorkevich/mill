@@ -45,6 +45,9 @@ type Env struct {
 	// TaskRunPoll is how often task run reads the store while a running scheduler works on
 	// its task; 0 = 1s.
 	TaskRunPoll time.Duration
+	// SchedulerPoll is how often mill run reads the store for new work; 0 =
+	// scheduler.DefaultPollInterval.
+	SchedulerPoll time.Duration
 	// KeepWait blocks for d or until ctx is done and reports whether the wait completed
 	// (keep --watch between passes); nil = a real timer.
 	KeepWait func(ctx context.Context, d time.Duration) bool
