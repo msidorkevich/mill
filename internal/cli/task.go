@@ -599,6 +599,19 @@ func printTask(env Env, v taskView) {
 		fmt.Fprintf(w, "  reason    %s\n", t.Reason)
 	}
 	fmt.Fprintf(w, "  kind      %s, size %s\n", t.Kind, t.Size)
+	complexity := t.Complexity
+	if complexity == "" {
+		complexity = "medium"
+	}
+	if t.ComplexityReason != "" {
+		complexity += " (" + t.ComplexityReason + ")"
+	}
+	fmt.Fprintf(w, "  complexity  %s\n", complexity)
+	model := t.Model
+	if model == "" {
+		model = "(mapping)"
+	}
+	fmt.Fprintf(w, "  model     %s\n", model)
 	if b := v.Branch; b != nil {
 		fmt.Fprintf(w, "  branch    %s (base %s @%s, head %s)\n", b.Name, b.Base, short(b.BaseSHA), short(b.HeadSHA))
 		fmt.Fprintf(w, "  worktree  %s\n", b.Worktree)
@@ -617,7 +630,7 @@ func printTask(env Env, v taskView) {
 	if len(v.Attempts) > 0 {
 		fmt.Fprintln(w, "\nAttempts:")
 		tw := tabwriter.NewWriter(w, 2, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "  #\trole\tstatus\tin\tout\tcache w/r\tcost\ttime")
+		fmt.Fprintln(tw, "  #\trole\tmodel\treason\tstatus\tin\tout\tcache w/r\tcost\ttime")
 		for _, a := range v.Attempts {
 			dur := "-"
 			if a.EndedAt != nil {
@@ -627,7 +640,7 @@ func printTask(env Env, v taskView) {
 			if a.CostEstimated {
 				mark = "~"
 			}
-			fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s/%s\t%s$%.2f\t%s\n", a.N, a.Role, a.Status,
+			fmt.Fprintf(tw, "  %d\t%s\t%s\t%s\t%s\t%s\t%s\t%s/%s\t%s$%.2f\t%s\n", a.N, a.Role, dash(a.Model), dash(a.ModelReason), a.Status,
 				fmtInt(a.Usage.InputTokens), fmtInt(a.Usage.OutputTokens),
 				fmtInt(a.Usage.CacheWriteTokens), fmtInt(a.Usage.CacheReadTokens), mark, a.Usage.CostUSD, dur)
 		}
@@ -645,6 +658,14 @@ func printTask(env Env, v taskView) {
 			fmt.Fprintf(w, "  - %s\n", strings.ReplaceAll(f.String(), "\n", "\n    "))
 		}
 	}
+}
+
+// dash shows "-" for an empty value, such as a model recorded before models were stored.
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func short(sha string) string {
