@@ -728,8 +728,8 @@ More follow-ups found while landing M5:
       should also run on verified sibling branches before publishing a batch (`review approve
       --goal`), and the planner prompt should tell parallel tasks to give test helpers
       task-specific names.
-- [ ] **Locks block unrelated work** (publish, sync, single tasks): covered by the next goal,
-      one scheduler for all goals.
+- [x] **Locks block unrelated work** (publish, sync, single tasks): short per-task claims landed
+      in `g13` (PRs #44, #45, #49); `mill sync` now runs next to `mill run`.
 
 ## One scheduler for all goals: in progress (goal `g13`)
 
@@ -774,7 +774,7 @@ together: they compile and their packages pass).
 - [ ] **Publish before restarting a run.** I restarted `g13` before publishing its ready tasks,
       so the run's lock blocked publishing again. Goes away with this goal; until then, publish
       first.
-- [ ] **Restacks replay every attempt** (task `restack-net-change`, running). `mill sync`
+- [x] **Restacks replay every attempt** (task `restack-net-change`, PR #51). `mill sync`
       blocked `run-command-one-scheduler` while restacking it onto the base: it replays the
       task's commits one by one, and two of its five attempts edited a sibling's files that
       later attempts reverted. The net change merges cleanly. Fix: a restack applies the task's
@@ -791,6 +791,63 @@ together: they compile and their packages pass).
       planner prompt should say so for test tasks. Part of the fast-gates goal.
 - [ ] **I listed merged PRs as open** three times (#33, #37, #49). Before sending a PR link I
       check the GitHub API for its state, not only that the branch exists.
+
+- [x] **Sync never retried a task it had blocked** (task `sync-retries-restack-blocks`, PR #52,
+      $3.92). Only verified and published tasks were restack candidates, so a task blocked by a
+      restack conflict stayed blocked after the cause was fixed, and the only way out re-ran the
+      implementer on verified, approved work. Now the block records the former status, every
+      sync retries it and restores the status (approval kept) on success, and blocks from before
+      the fix are recognised by sync's message. Proven on `run-command-one-scheduler`: a plain
+      `mill sync` restacked it and brought it back to verified.
+
+## Improvements collected while running `g12` and `g13` (2026-11-24)
+
+Not yet planned into a goal unless noted. Grouped by area; each names what was seen.
+
+### Visibility
+
+- [ ] **Work done by `sync`, `keep` and `review approve` is invisible.** While `mill sync`
+      restacked and re-gated four `g13` tasks for about 20 minutes, the tasks stayed `verified`,
+      `mill task list --status running` printed `no tasks` and `mill watch` printed `nothing
+      running`; only the claim row showed it. Claims should carry what their holder is doing
+      (`sync: restack`, `sync: gate 3m`, `approve: push`), and `mill watch`, `goal show`,
+      `task list` and the TUI Agents view should list claimed tasks next to running ones.
+- [ ] **`mill task list` buries current work.** It lists every task oldest first (80 rows now),
+      so active tasks are at the bottom. Show running and claimed tasks first, then the rest
+      (or newest first, with `--all` for history).
+- [ ] **Skipped tests are found by reading summaries.** The `e2e-one-scheduler` agent correctly
+      left `TestSyncDuringRunReportsRunningChildBusy` skipped with the bug in its reason. mill
+      should detect `t.Skip` added by a task's diff and list it in the review and in `task
+      show`, so it becomes a follow-up without me spotting it.
+
+### Speed of sync and gates
+
+- [ ] **A stack is re-gated one task at a time.** When the bottom of a stack changes, sync
+      restacks and re-gates every task above it in sequence (4 × ~5 minutes in `g13`). Pipeline
+      it: restack the next task while the previous one's gate runs, within `max_parallel`.
+- [ ] **Identical trees are gated again.** A restacked task whose tree equals one that already
+      passed its gate should reuse that result, like the combined check's fingerprint cache.
+- [ ] Fast gates (A, B, E and fast end-to-end tests above) stay the biggest win: `internal/cli`
+      now takes about 290 seconds per gate.
+
+### Robustness of the graph
+
+- [ ] **Conflicts between dependencies at preparation block the task, with no resolver.** In
+      `g13` the end-to-end task could not start because two dependencies collided; restack
+      conflicts go to the resolver agent, preparation conflicts only block. Use the resolver
+      there too (or at least offer it in the block message).
+- [ ] **Re-check what a block records.** Twice a state change that recorded a problem also
+      stopped mill from looking again (a blocked restack never retried; a published goal shown as
+      done). Rule for new code: every blocked or terminal state names what clears it, and the
+      code that can clear it re-checks it.
+
+### Planning and review
+
+- [ ] **My plan review checks ownership, not scope.** Besides overlapping criteria (above), the
+      checklist when I review a plan: every criterion can be met in the task's own files; no
+      task's checks rerun a whole package that `check_cmd` covers; parallel tasks that add tests
+      to the same package use task-specific helper names; docs tasks run last and own only
+      docs.
 
 ## Next: models chosen by task size and complexity (operator decision 2026-11-24)
 
@@ -812,5 +869,6 @@ escalation. Design:
 - **Measurement.** Every verdict records the model that produced it, so the mapping can be
   tuned from first-attempt pass rates.
 
-Order after `g13`: models by size and complexity, then fast gates (A, B, E and fast end-to-end
-tests).
+Order after `g13`: models by size and complexity, then fast gates (A, B, E, fast end-to-end
+tests, pipelined and cached sync gates), then visibility (claims in watch/list/TUI, task list
+order, skipped tests in review).
