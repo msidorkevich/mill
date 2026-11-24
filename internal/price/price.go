@@ -83,3 +83,10 @@ func Estimate(model string, u budget.Usage, overrides map[string]Rates) (usd flo
 		float64(u.CacheReadTokens)*r.CacheRead) / 1e6
 	return usd, true
 }
+
+// TokenCost prices a token count for model as 80% input and 20% output tokens, a rough split
+// for estimating a run before it happens. ok is false when the model has no known rates.
+func TokenCost(model string, tokens int64, overrides map[string]Rates) (usd float64, ok bool) {
+	in := tokens * 8 / 10
+	return Estimate(model, budget.Usage{InputTokens: in, OutputTokens: tokens - in}, overrides)
+}
