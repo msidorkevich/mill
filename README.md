@@ -89,7 +89,8 @@ mill plan approve g1            # create the goal's tasks; the plan can no longe
 mill goal list                  # ID, STATUS, TASKS (verified/total), TOKENS, COST, TITLE (--json)
 mill goal show g1               # tasks in plan order with status, dependencies, attempts, spend (--json)
 mill goal graph g1              # the task graph as lanes, dependencies above dependents (--mermaid for a Mermaid flowchart)
-mill run g1                     # run the approved goal's tasks in dependency order
+mill run                        # one scheduler: run every approved goal and queued single task
+mill run g1                     # same scheduler, only goal g1's tasks, in dependency order
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
 mill run g1 --wait-on-limit     # on a usage limit, wait for the reset and continue instead of stopping
 mill watch [g1|g1/a]            # running attempts: task, attempt, role, elapsed, tokens, cost, latest action; redraws every 2s (--once, --interval 5s)
@@ -154,8 +155,13 @@ was. A fan-in task whose dependencies moved or landed is restacked like `mill ta
 dependencies that have not landed merged again); a conflict blocks it and leaves its branch
 unchanged. A goal whose tasks have all landed becomes `landed`.
 
-`mill run` starts a task once all its dependencies are verified, up to `max_parallel` at a
-time, and never runs two tasks whose `owns` overlap together. Each task gets the branch
+`mill run` with no argument runs every approved goal and every queued single task under one
+scheduler per repository; `mill run <goal>` does the same for one goal only. A running scheduler
+picks up goals approved with `mill plan approve` and tasks queued with `mill task run` while it
+runs; `mill task run` joins the scheduler and waits for its task's result (same exit codes as
+before). If no scheduler is running, `mill task run` starts one for that task. The scheduler
+starts a task once all its dependencies are verified, up to `max_parallel` at a time, and never
+runs two tasks whose `owns` overlap together; both limits apply across all goals. Each task gets the branch
 `mill/<goal>/<task>`, built on its dependencies' branches. When every task is verified the goal
 is `done` (exit 0). When a task blocks or fails, the others continue; the goal then ends
 `blocked` with a reason naming the stopped tasks and the ones waiting on them (exit 4). Ctrl-C
@@ -251,9 +257,20 @@ interruption. `mill task run` ends a rate-limited task blocked (exit 4) with the
 a rate-limited `mill plan "<goal>"` prints the limit and its reset time and creates no goal.
 
 **Interrupted or killed runs.** After Ctrl-C, a crash or `kill -9`, nothing is lost. The next
-`mill run g1` recovers the half-finished tasks and continues where it stopped. Only one
-`mill run` can work on a repository at a time; a second one fails and says so. Wait for the
-first to finish or stop it, then run again.
+`mill run g1` recovers the half-finished tasks and continues where it stopped. Only the
+scheduler runs crash recovery, so other commands never reset a task that is merely slow.
+
+**One scheduler per repository.** A second `mill run` does not start another scheduler: it
+reports that one is running. `mill review approve|changes|reject`, `mill sync`, `mill keep`,
+`mill task rebase` and `mill clean` work during a run. They refuse or skip only a task that is
+being worked on, and name it, for example:
+
+```
+task g1/a is busy: attempt 2 (implementer) running; retry when it finishes
+```
+
+`mill sync`, `mill keep` and `mill clean` leave such tasks alone and list them under
+`Busy (being worked on; run ... again later)`. Run the command again once the task finishes.
 
 ### Reviewing, publishing and syncing
 
@@ -330,9 +347,8 @@ before that, ones sync could not clean (a dirty worktree), or with `clean_on_lan
 mill keep [<goal>] [--watch] [--interval 5m] [--combined] [--json]
 ```
 
-`mill keep` keeps verified and published branches mergeable while main moves. It takes the run
-lock (recovering after a crash, like `mill sync`), so it refuses to start while another `mill`
-command holds it. One pass does the following:
+`mill keep` keeps verified and published branches mergeable while main moves. It works during
+a run and leaves a task that is being worked on alone, naming it as busy. One pass does the following:
 
 - **Fetches and syncs** like `mill sync`: detects merged reviews and marks them landed.
 - **Rebases lazily.** Only branches that would conflict with their base are rebased; the others
