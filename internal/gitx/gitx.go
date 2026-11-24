@@ -461,6 +461,60 @@ func MergeConflicts(ctx context.Context, dir, base, branch string) ([]string, er
 	return files, nil
 }
 
+// ApplyTree applies the change from `from` to `to` onto `onto` without touching any work tree
+// or ref (a three-way merge with `from` as the merge base) and returns the resulting tree. On
+// conflicts it returns no tree and the conflicted paths. When onto is from, the result is
+// to's tree.
+func ApplyTree(ctx context.Context, dir, from, to, onto string) (tree string, conflicts []string, err error) {
+	if from == onto {
+		tree, err := TreeOf(ctx, dir, to)
+		if err != nil {
+			return "", nil, fmt.Errorf("read the tree of %s: %w", to, err)
+		}
+		return tree, nil, nil
+	}
+	out, code, err := runExit(ctx, dir, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", "--merge-base="+from, onto, to)
+	if err != nil {
+		return "", nil, err
+	}
+	parts := strings.Split(out, "\x00")
+	switch code {
+	case 0:
+		if parts[0] == "" {
+			return "", nil, fmt.Errorf("git merge-tree --merge-base=%s %s %s wrote no tree", from, onto, to)
+		}
+		return parts[0], nil, nil
+	case 1:
+		for _, f := range parts[1:] {
+			if f != "" {
+				conflicts = append(conflicts, f)
+			}
+		}
+		if len(conflicts) == 0 {
+			return "", nil, fmt.Errorf("git merge-tree --merge-base=%s %s %s reported a conflict but listed no paths", from, onto, to)
+		}
+		return "", conflicts, nil
+	}
+	return "", nil, fmt.Errorf("git merge-tree --merge-base=%s %s %s failed (exit %d): %s", from, onto, to, code, strings.TrimSpace(out))
+}
+
+// ChangedPaths lists, sorted, the paths that differ between the trees of from and to, without
+// rename detection (a rename is its old and its new path).
+func ChangedPaths(ctx context.Context, dir, from, to string) ([]string, error) {
+	out, err := Run(ctx, dir, "diff", "--name-only", "--no-renames", "--no-color", "--no-ext-diff", "-z", from, to, "--")
+	if err != nil {
+		return nil, err
+	}
+	var files []string
+	for _, f := range strings.Split(out, "\x00") {
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
 // TreeOf returns the tree id of rev.
 func TreeOf(ctx context.Context, dir, rev string) (string, error) {
 	return Run(ctx, dir, "rev-parse", "--verify", "--quiet", rev+"^{tree}")

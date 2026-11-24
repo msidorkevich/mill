@@ -215,3 +215,80 @@ func TestPublishMessageChecksAcceptanceAndTrimsLongSummary(t *testing.T) {
 		})
 	}
 }
+
+// extraPathBuilder builds the published tree as Publish does, then adds the file name to it:
+// a wrong tree, for the path check to catch.
+func extraPathBuilder(name string) func(ctx context.Context, dir, start, head, parent string) (string, []string, error) {
+	return func(ctx context.Context, dir, start, head, parent string) (string, []string, error) {
+		tree, conflicts, err := gitx.ApplyTree(ctx, dir, start, head, parent)
+		if err != nil || len(conflicts) > 0 {
+			return tree, conflicts, err
+		}
+		ls, err := gitx.Run(ctx, dir, "ls-tree", tree)
+		if err != nil {
+			return "", nil, err
+		}
+		blob, err := gitx.RunInput(ctx, dir, "extra\n", "hash-object", "-w", "--stdin")
+		if err != nil {
+			return "", nil, err
+		}
+		tree, err = gitx.RunInput(ctx, dir, ls+"\n100644 blob "+blob+"\t"+name+"\n", "mktree")
+		return tree, nil, err
+	}
+}
+
+func TestPublishRefusesCommitChangingPathsOutsideOwnChange(t *testing.T) {
+	o, bare, _ := fixture(t)
+	ctx := context.Background()
+	t.Cleanup(SetTreeBuilder(extraPathBuilder("extra.txt")))
+
+	_, err := Publish(ctx, o)
+	var re *RefusedError
+	if !errors.As(err, &re) || re.Rule != ruleOwnPaths || !strings.Contains(err.Error(), "extra.txt") || strings.Contains(err.Error(), "x.txt") {
+		t.Fatalf("publish = %v, want a refusal naming extra.txt only", err)
+	}
+	if _, ok := ParentRefusal(err); ok {
+		t.Error("the path refusal is reported as a dependency refusal")
+	}
+	if _, err := gitx.RevParse(ctx, bare, "refs/heads/review/t1"); err == nil {
+		t.Error("refused publish pushed review/t1")
+	}
+	tk, _ := o.Store.GetTask(ctx, "t1")
+	br, _ := o.Store.GetBranch(ctx, "t1")
+	if tk.Status != store.TaskVerified || br.PublishedSHA != "" {
+		t.Errorf("task %s, published %q; want verified and unpublished", tk.Status, br.PublishedSHA)
+	}
+}
+
+func TestPublishAppliesOwnChangeOntoParentTheBranchLacks(t *testing.T) {
+	o, bare, br := fixture(t)
+	ctx := context.Background()
+	root := o.Paths.Root
+	// The base gains other.txt after the task started; the task's branch does not have it,
+	// but its recorded base (the published commit's parent) does.
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("base change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, root, "add", "other.txt")
+	git(t, root, "commit", "-q", "-m", "base gains other.txt")
+	git(t, root, "push", "-q", "origin", "main")
+	tip := git(t, root, "rev-parse", "HEAD")
+	br.BaseSHA = tip
+	if err := o.Store.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Publish(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Parent != tip {
+		t.Fatalf("parent = %s, want %s", res.Parent, tip)
+	}
+	if got := git(t, bare, "diff", "--name-only", res.Parent, res.SHA); got != "x.txt" {
+		t.Errorf("published commit changes %q, want only x.txt", got)
+	}
+	if got := git(t, bare, "show", res.SHA+":other.txt"); got != "base change" {
+		t.Errorf("other.txt in the published commit = %q, want the base's change", got)
+	}
+}

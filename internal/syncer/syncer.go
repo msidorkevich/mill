@@ -977,6 +977,9 @@ func (s *syncer) republish(ctx context.Context, t store.Task) error {
 		if parent == "" {
 			next = "publish its dependencies, then run `mill sync`"
 		}
+		if publish.RestackRefusal(err) {
+			next = "run `mill sync` again to restack it onto " + parent
+		}
 		s.res.NeedsRepublish = append(s.res.NeedsRepublish, NeedsRepublish{TaskID: t.ID, After: parent, Reason: err.Error()})
 		s.logf("%s: not re-published yet: %v; %s", t.ID, err, next)
 		return nil

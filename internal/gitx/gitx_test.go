@@ -931,3 +931,34 @@ func TestSquashOwnWithoutAttemptTrailersNamesOwnCommits(t *testing.T) {
 		t.Fatalf("HEAD = %s after Unsquash, want %s", head, old)
 	}
 }
+
+func TestApplyTreeCarriesOnlyTheChangeOntoTheTarget(t *testing.T) {
+	ctx := context.Background()
+	r := repo(t)
+	base := mustRun(t, ctx, r, "rev-parse", "HEAD")
+	mustRun(t, ctx, r, "branch", "feat")
+	mustRun(t, ctx, r, "branch", "clash")
+	mainTip := commitFile(t, r, "other.txt", "main\n", "main gains other.txt")
+	mustRun(t, ctx, r, "checkout", "-q", "feat")
+	featTip := commitFile(t, r, "feat.txt", "f\n", "feat")
+	mustRun(t, ctx, r, "checkout", "-q", "clash")
+	clashTip := commitFile(t, r, "other.txt", "clash\n", "clash")
+	mustRun(t, ctx, r, "checkout", "-q", "main")
+
+	tree, conflicts, err := ApplyTree(ctx, r, base, featTip, mainTip)
+	if err != nil || conflicts != nil {
+		t.Fatalf("apply = %v, %v", conflicts, err)
+	}
+	if got, err := ChangedPaths(ctx, r, mainTip, tree); err != nil || len(got) != 1 || got[0] != "feat.txt" {
+		t.Errorf("applied tree changes %v (%v), want only feat.txt", got, err)
+	}
+	if got, err := ChangedPaths(ctx, r, featTip, tree); err != nil || len(got) != 1 || got[0] != "other.txt" {
+		t.Errorf("applied tree differs from the head in %v (%v), want only other.txt kept from main", got, err)
+	}
+	if tree, conflicts, err := ApplyTree(ctx, r, base, clashTip, mainTip); err != nil || tree != "" || len(conflicts) != 1 || conflicts[0] != "other.txt" {
+		t.Errorf("conflicting apply = %q, %v, %v; want other.txt", tree, conflicts, err)
+	}
+	if got, _ := RevParse(ctx, r, "HEAD"); got != mainTip {
+		t.Error("HEAD moved")
+	}
+}

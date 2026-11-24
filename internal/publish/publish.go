@@ -50,6 +50,9 @@ type RefusedError struct {
 	Rule   string // short name of the rule
 	Msg    string
 	Parent string // for the dependency rule: the parent that must be published first, if one
+	// Restack is set for the dependency rule when the parent is published but the task's
+	// branch does not hold its head: the task must be restacked onto the parent first.
+	Restack bool
 }
 
 func (e *RefusedError) Error() string { return fmt.Sprintf("refused (%s): %s", e.Rule, e.Msg) }
@@ -65,12 +68,21 @@ func ParentRefusal(err error) (parent string, ok bool) {
 	return "", false
 }
 
+// RestackRefusal reports whether err is a refusal by the dependency rule because the task's
+// branch does not hold its published parent's head: a restack, not a publish of the parent,
+// lets it publish.
+func RestackRefusal(err error) bool {
+	var re *RefusedError
+	return errors.As(err, &re) && re.Rule == ruleParent && re.Restack
+}
+
 const (
 	ruleStatus   = "the task must be verified"
 	ruleGate     = "the gate must be green at the current head"
 	ruleConflict = "no conflict with the base"
 	ruleParent   = "dependencies must be published or landed"
 	ruleRemote   = "a configured remote"
+	ruleOwnPaths = "the published commit changes only the task's own paths"
 )
 
 func refuse(rule, format string, a ...any) error {
@@ -176,8 +188,25 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 		}
 	}
 
-	tree, err := gitx.TreeOf(ctx, root, br.HeadSHA)
+	// The published commit carries the task's own net change (start..head) applied onto its
+	// parent, never the head's whole tree: a branch that lacks something the parent has would
+	// revert it.
+	start := br.StartSHA
+	if start == "" {
+		start = br.BaseSHA
+	}
+	if start == "" {
+		return res, fmt.Errorf("task %s has no recorded starting point, so its own change cannot be told apart; rebase it with `mill task rebase %s`", id, id)
+	}
+	tree, conflicts, err := buildTree(ctx, root, start, br.HeadSHA, st.parentSHA)
 	if err != nil {
+		return res, fmt.Errorf("apply the own change of %s (%s..%s) onto %s: %w", id, short(start), short(br.HeadSHA), short(st.parentSHA), err)
+	}
+	if len(conflicts) > 0 {
+		return res, refuse(ruleConflict, "the own change of %s (%s..%s) conflicts with %s (%s) in %s; run `mill sync` or `mill keep` so it is restacked",
+			id, short(start), short(br.HeadSHA), st.onto, short(st.parentSHA), strings.Join(conflicts, ", "))
+	}
+	if err := checkOwnPaths(ctx, root, id, start, br.HeadSHA, st.parentSHA, tree); err != nil {
 		return res, err
 	}
 	if res.Republish && br.PublishedSHA != "" {
@@ -220,6 +249,62 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 		return res, fmt.Errorf("pushed %s to %s/%s but recording the event failed: %w", short(sha), cfg.Remote, res.Ref, err)
 	}
 	return res, nil
+}
+
+// buildTree builds the published tree: the change from start to head applied onto parent.
+// It returns the conflicted paths when the change does not apply. Tests replace it through
+// SetTreeBuilder to prove the path check stops a wrong tree.
+var buildTree = gitx.ApplyTree
+
+// SetTreeBuilder replaces how the published tree is built and returns a function that
+// restores the default. It exists for tests: they make a publish build a wrong tree and check
+// that the path check refuses it.
+func SetTreeBuilder(f func(ctx context.Context, dir, start, head, parent string) (tree string, conflicts []string, err error)) (restore func()) {
+	prev := buildTree
+	buildTree = f
+	return func() { buildTree = prev }
+}
+
+// checkOwnPaths refuses a published tree whose change relative to parent touches other paths
+// than the task's own net change (start..head).
+func checkOwnPaths(ctx context.Context, root, id, start, head, parent, tree string) error {
+	own, err := gitx.ChangedPaths(ctx, root, start, head)
+	if err != nil {
+		return fmt.Errorf("list the paths %s changes (%s..%s): %w", id, short(start), short(head), err)
+	}
+	pub, err := gitx.ChangedPaths(ctx, root, parent, tree)
+	if err != nil {
+		return fmt.Errorf("list the paths the published commit of %s changes: %w", id, err)
+	}
+	ownSet := map[string]bool{}
+	for _, p := range own {
+		ownSet[p] = true
+	}
+	pubSet := map[string]bool{}
+	var extra, missing []string
+	for _, p := range pub {
+		pubSet[p] = true
+		if !ownSet[p] {
+			extra = append(extra, p)
+		}
+	}
+	for _, p := range own {
+		if !pubSet[p] {
+			missing = append(missing, p)
+		}
+	}
+	if len(extra) == 0 && len(missing) == 0 {
+		return nil
+	}
+	var what []string
+	if len(extra) > 0 {
+		what = append(what, "it would also change "+strings.Join(extra, ", "))
+	}
+	if len(missing) > 0 {
+		what = append(what, "it would not change "+strings.Join(missing, ", "))
+	}
+	return refuse(ruleOwnPaths, "the published commit of %s on %s must change exactly the paths of its own change (%s..%s), but %s; nothing was pushed. Run `mill sync` or `mill keep` so it is restacked, then publish again",
+		id, short(parent), short(start), short(head), strings.Join(what, " and "))
 }
 
 // stackOf checks the dependency rule and decides the published commit's parent.
@@ -300,6 +385,17 @@ func stackOf(ctx context.Context, s *store.Store, cfg config.Config, root string
 			return stack{}, &RefusedError{Rule: ruleParent, Parent: parent, Msg: fmt.Sprintf(
 				"task %s is stacked on %s, which has changes at %s that are not published (published %s); publish the parent first with `mill review approve %s`",
 				t.ID, parent, short(pb.HeadSHA), short(pb.PublishedSHA), parent)}
+		}
+		// A branch that does not hold the parent's head is stacked on an older parent (the
+		// parent was restacked or changed since): it must be restacked before it publishes.
+		in, err := gitx.IsAncestor(ctx, root, pb.HeadSHA, br.HeadSHA)
+		if err != nil {
+			return stack{}, fmt.Errorf("check that %s holds the head of its parent %s: %w", t.ID, parent, err)
+		}
+		if !in {
+			return stack{}, &RefusedError{Rule: ruleParent, Parent: parent, Restack: true, Msg: fmt.Sprintf(
+				"task %s is stacked on %s, but its branch %s does not hold the parent's head %s (the parent moved since); run `mill sync` or `mill keep` so it is restacked",
+				t.ID, parent, br.Name, short(pb.HeadSHA))}
 		}
 		return stack{parentSHA: pb.PublishedSHA, onto: pb.PublishedRef, conflictTo: pb.Name, desc: "on " + pb.PublishedRef}, nil
 	case store.TaskLanded:
