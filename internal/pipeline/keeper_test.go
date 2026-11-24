@@ -24,6 +24,7 @@ func resolverInput() prompt.ResolverInput {
 }
 
 func TestResolveRecordsResolverAttemptWithUsage(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {resolved(budget.Usage{InputTokens: 42, CostUSD: 0.02})},
 	}, nil)
@@ -55,6 +56,7 @@ func TestResolveRecordsResolverAttemptWithUsage(t *testing.T) {
 }
 
 func TestResolveOverAttemptBudgetReturnsStop(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {resolved(budget.Usage{InputTokens: 600}, budget.Usage{InputTokens: 600})},
 	}, func(c *config.Config) {
@@ -76,6 +78,7 @@ func TestResolveOverAttemptBudgetReturnsStop(t *testing.T) {
 }
 
 func TestResolveWithExhaustedTaskBudgetStopsBeforeRunning(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{runner.RoleResolver: {resolved()}}, func(c *config.Config) {
 		c.Budget.Attempt = budget.Limits{USD: 0.5}
 		c.Budget.Size = nil
@@ -92,6 +95,7 @@ func TestResolveWithExhaustedTaskBudgetStopsBeforeRunning(t *testing.T) {
 }
 
 func TestResolveRateLimitedReturnsStop(t *testing.T) {
+	t.Parallel()
 	resets := time.Date(2026, 11, 22, 12, 50, 0, 0, time.Local)
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {{RateLimit: &runner.RateLimit{Type: "five_hour", ResetsAt: resets}}},
@@ -108,6 +112,7 @@ func TestResolveRateLimitedReturnsStop(t *testing.T) {
 }
 
 func TestResolveFailedRunReturnsReasonNotError(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "true", runner.Script{
 		runner.RoleResolver: {{Error: "agent crashed"}, {Output: json.RawMessage(`{"summary":"","resolved":[]}`)}},
 	}, nil)
@@ -130,6 +135,7 @@ func TestResolveFailedRunReturnsReasonNotError(t *testing.T) {
 }
 
 func TestRunAfterResolveStartsAtNextAttemptNumber(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q hello hello.txt", runner.Script{
 		runner.RoleResolver:    {resolved()},
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"})},
@@ -150,6 +156,7 @@ func TestRunAfterResolveStartsAtNextAttemptNumber(t *testing.T) {
 }
 
 func TestVerifyReturnsVerdictAndKeepsTaskStatus(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q hello hello.txt", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("pass"), verdict("fail", "lost the greeting")},
@@ -189,6 +196,7 @@ func TestVerifyReturnsVerdictAndKeepsTaskStatus(t *testing.T) {
 }
 
 func TestVerifyRateLimitedReturnsStop(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q hello hello.txt", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("pass"), {RateLimit: &runner.RateLimit{}}},
@@ -205,6 +213,7 @@ func TestVerifyRateLimitedReturnsStop(t *testing.T) {
 }
 
 func TestRecordGateFailureFindingsReachNextImplementerPrompt(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "grep -q hello hello.txt", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"}), impl(map[string]string{"hello.txt": "hello again\n"})},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},

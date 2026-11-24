@@ -75,6 +75,7 @@ func (e *env) assertNoBaseWorktree(t *testing.T, id string) {
 func checkBase(c *config.Config) { c.GateCheckBase = true }
 
 func TestFlakyGateCommandPassesOnRerunAndVerifierIsTold(t *testing.T) {
+	t.Parallel()
 	cmd := flakyCmd(filepath.Join(t.TempDir(), "count"))
 	e := setup(t, cmd, runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"})},
@@ -106,6 +107,7 @@ func TestFlakyGateCommandPassesOnRerunAndVerifierIsTold(t *testing.T) {
 }
 
 func TestGateFailingOnStartPointBlocksWithoutRetry(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "test ! -f broken", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n"}), impl(map[string]string{"hello.txt": "hello again\n"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -138,6 +140,7 @@ func TestGateFailingOnStartPointBlocksWithoutRetry(t *testing.T) {
 }
 
 func TestGateFailingOnlyWithTaskChangesIsAFinding(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "! grep -q bad hello.txt 2>/dev/null", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "bad\n"}), impl(map[string]string{"hello.txt": "hello\n"})},
 		runner.RoleVerifier:    {verdict("pass")},
@@ -159,6 +162,7 @@ func TestGateFailingOnlyWithTaskChangesIsAFinding(t *testing.T) {
 }
 
 func TestGateFailuresSplitIntoCausedAndPreexisting(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "test ! -f broken", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"hello.txt": "bad\n"})},
 	}, func(c *config.Config) { checkBase(c); c.MaxAttempts = 1 })
@@ -185,6 +189,7 @@ func TestGateFailuresSplitIntoCausedAndPreexisting(t *testing.T) {
 }
 
 func TestGateRerunOffSkipsRerun(t *testing.T) {
+	t.Parallel()
 	counter := filepath.Join(t.TempDir(), "count")
 	e := setup(t, flakyCmd(counter), runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"}), impl(map[string]string{"a": "2"})},
@@ -208,6 +213,7 @@ func TestGateRerunOffSkipsRerun(t *testing.T) {
 }
 
 func TestGateCheckBaseOffSkipsBaseCheck(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "test ! -f broken", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
 	}, func(c *config.Config) { c.GateCheckBase = false; c.MaxAttempts = 1 })
@@ -230,6 +236,7 @@ func TestGateCheckBaseOffSkipsBaseCheck(t *testing.T) {
 }
 
 func TestBaseWorktreeFailureFallsBackToGateFindings(t *testing.T) {
+	t.Parallel()
 	e := setup(t, "test ! -f broken", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
 	}, func(c *config.Config) { checkBase(c); c.MaxAttempts = 1 })
@@ -260,6 +267,7 @@ func TestBaseWorktreeFailureFallsBackToGateFindings(t *testing.T) {
 }
 
 func TestBaseWorktreeCreationWaitsForGitLock(t *testing.T) {
+	t.Parallel()
 	calls := filepath.Join(t.TempDir(), "calls")
 	e := setup(t, "pwd >> '"+calls+"'; test ! -f broken", runner.Script{
 		runner.RoleImplementer: {impl(map[string]string{"a": "1"})},
