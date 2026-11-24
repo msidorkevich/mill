@@ -30,6 +30,7 @@ func newStore(t *testing.T) *Store {
 }
 
 func TestMigrationFourUpgradesSchemaThreeInPlace(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	raw, err := sql.Open("sqlite", "file:"+path)
@@ -65,6 +66,7 @@ func TestMigrationFourUpgradesSchemaThreeInPlace(t *testing.T) {
 }
 
 func TestCreateGoalNumbersNumerically(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	for i := 1; i <= 10; i++ {
@@ -90,6 +92,7 @@ func TestCreateGoalNumbersNumerically(t *testing.T) {
 }
 
 func TestGoalStatusAndNotFound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "t", json.RawMessage(`{"x":1}`))
@@ -113,6 +116,7 @@ func TestGoalStatusAndNotFound(t *testing.T) {
 }
 
 func TestUpdateGoalPlanOnlyWhileDraft(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "t", nil)
@@ -140,6 +144,7 @@ func TestUpdateGoalPlanOnlyWhileDraft(t *testing.T) {
 }
 
 func TestApproveGoalCreatesTasksAndDeps(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "t", nil)
@@ -183,6 +188,7 @@ func TestApproveGoalCreatesTasksAndDeps(t *testing.T) {
 }
 
 func TestApproveGoalFailureLeavesNothingBehind(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "t", nil)
@@ -217,6 +223,7 @@ func TestApproveGoalFailureLeavesNothingBehind(t *testing.T) {
 }
 
 func TestApproveGoalRefusesNonDraft(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "t", nil)
@@ -232,6 +239,7 @@ func TestApproveGoalRefusesNonDraft(t *testing.T) {
 }
 
 func TestGoalUsageSumsAttemptsAcrossTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "t", nil)
@@ -258,6 +266,7 @@ func TestGoalUsageSumsAttemptsAcrossTasks(t *testing.T) {
 }
 
 func TestTaskIDRoundTrip(t *testing.T) {
+	t.Parallel()
 	id := TaskID("g1", "a")
 	if id != "g1/a" {
 		t.Fatalf("id = %s", id)
@@ -271,6 +280,7 @@ func TestTaskIDRoundTrip(t *testing.T) {
 }
 
 func TestBranchStartSHASavedAndLoaded(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -294,6 +304,7 @@ func TestBranchStartSHASavedAndLoaded(t *testing.T) {
 }
 
 func TestResetGoalTasksMatchesStatusAndReason(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, err := s.CreateGoal(ctx, "g", nil)
@@ -339,6 +350,7 @@ func TestResetGoalTasksMatchesStatusAndReason(t *testing.T) {
 }
 
 func TestUpdateGoalTaskSpecChangesRowPlanAndRecordsEvent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "g", nil)

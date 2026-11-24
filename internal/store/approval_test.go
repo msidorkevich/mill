@@ -95,6 +95,7 @@ func assertApproved(t *testing.T, s *Store, id string, attempt int) {
 }
 
 func TestMigrateFromV7AddsApprovalColumnsKeepingRows(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	saved := migrations
@@ -124,6 +125,7 @@ func TestMigrateFromV7AddsApprovalColumnsKeepingRows(t *testing.T) {
 }
 
 func TestApproveVerifiedTaskRecordsApprovalAndEvent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	verifiedTask(t, s, "t1")
@@ -147,6 +149,7 @@ func TestApproveVerifiedTaskRecordsApprovalAndEvent(t *testing.T) {
 }
 
 func TestUnapprovedTaskJSONOmitsApproval(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	verifiedTask(t, s, "t1")
 	got, _ := s.GetTask(context.Background(), "t1")
@@ -157,6 +160,7 @@ func TestUnapprovedTaskJSONOmitsApproval(t *testing.T) {
 }
 
 func TestApproveRefusesPublishedAndPendingTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	verifiedTask(t, s, "pub")
@@ -191,6 +195,7 @@ func TestApproveRefusesPublishedAndPendingTasks(t *testing.T) {
 }
 
 func TestClearApprovalRecordsEventOnlyWhenApproved(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	verifiedTask(t, s, "t1")
@@ -215,6 +220,7 @@ func TestClearApprovalRecordsEventOnlyWhenApproved(t *testing.T) {
 }
 
 func TestNewCodeOrPendingClearsApproval(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	for name, act := range map[string]func(t *testing.T, s *Store, id string){
 		"SetTaskStatus pending": func(t *testing.T, s *Store, id string) {
@@ -262,6 +268,7 @@ func TestNewCodeOrPendingClearsApproval(t *testing.T) {
 }
 
 func TestRejectTaskClearsApprovalOfHeldDescendants(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	for _, id := range []string{"a", "b", "c"} {
@@ -282,6 +289,7 @@ func TestRejectTaskClearsApprovalOfHeldDescendants(t *testing.T) {
 }
 
 func TestResetGoalTasksClearsApproval(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, err := s.CreateGoal(ctx, "g", nil)
@@ -304,6 +312,7 @@ func TestResetGoalTasksClearsApproval(t *testing.T) {
 }
 
 func TestVerifierAttemptAndSaveBranchKeepApproval(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	verifiedTask(t, s, "t1")
@@ -321,6 +330,7 @@ func TestVerifierAttemptAndSaveBranchKeepApproval(t *testing.T) {
 }
 
 func TestApprovedTasksAreVerifiedAndParentsComeFirst(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	// Ids sort children before parents so only the dependency order can put parents first.

@@ -9,6 +9,7 @@ import (
 )
 
 func TestResolverPromptHasHunksSpecAndBaseCommitsOnly(t *testing.T) {
+	t.Parallel()
 	task := taskspec.Spec{ID: "g/greet", Title: "Greet", Kind: "implement", Spec: "make greet say hello",
 		Acceptance: []string{"greet prints hello"}, Owns: []string{"greet.go"}}
 	hunk := "<<<<<<< HEAD\n\treturn \"hi there\"\n=======\n\treturn \"hello\"\n>>>>>>> mill: g/greet attempt 1\n"
@@ -40,6 +41,7 @@ func TestResolverPromptHasHunksSpecAndBaseCommitsOnly(t *testing.T) {
 }
 
 func TestResolverPromptOmitsOtherTasksSpecs(t *testing.T) {
+	t.Parallel()
 	p := Resolver(ResolverInput{
 		Task:        taskspec.Spec{ID: "g/a", Title: "A", Kind: "implement", Spec: "spec of a"},
 		Conflicts:   []ConflictFile{{Path: "x.go", Hunks: "<<<<<<< HEAD\nb\n=======\na\n>>>>>>> a\n"}},
@@ -51,6 +53,7 @@ func TestResolverPromptOmitsOtherTasksSpecs(t *testing.T) {
 }
 
 func TestParseResolver(t *testing.T) {
+	t.Parallel()
 	o, err := ParseResolver(json.RawMessage(`{"summary":"kept both","resolved":["a.go"]}`))
 	if err != nil || o.Summary != "kept both" || len(o.Resolved) != 1 || o.Resolved[0] != "a.go" {
 		t.Fatalf("got %+v, %v", o, err)

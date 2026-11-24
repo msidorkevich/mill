@@ -53,6 +53,7 @@ func saveBranch(t *testing.T, s *store.Store, worktree string) {
 }
 
 func TestOpenInHerdrSplitsPane(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	saveBranch(t, s, "/wt/b")
 	m, herdr, shell := openModel(t, s, map[string]string{"HERDR_ENV": "1"}, true)
@@ -66,6 +67,7 @@ func TestOpenInHerdrSplitsPane(t *testing.T) {
 }
 
 func TestOpenInHerdrFailureShowsStderr(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	saveBranch(t, s, "/wt/b")
 	m, _, _ := openModel(t, s, map[string]string{"HERDR_ENV": "1"}, true)
@@ -79,6 +81,7 @@ func TestOpenInHerdrFailureShowsStderr(t *testing.T) {
 }
 
 func TestOpenOutsideHerdrRunsShellInWorktree(t *testing.T) {
+	t.Parallel()
 	for name, tc := range map[string]struct{ env, want string }{
 		"shell set":   {"/bin/zsh", "/bin/zsh"},
 		"shell unset": {"", "/bin/sh"},
@@ -100,6 +103,7 @@ func TestOpenOutsideHerdrRunsShellInWorktree(t *testing.T) {
 }
 
 func TestOpenWithoutWorktreeReportsAndRunsNothing(t *testing.T) {
+	t.Parallel()
 	s := seed(t)
 	for name, wt := range map[string]string{"no branch": "", "cleaned": "-"} {
 		t.Run(name, func(t *testing.T) {

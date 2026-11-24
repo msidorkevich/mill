@@ -26,6 +26,7 @@ func gitInit(t *testing.T) string {
 }
 
 func TestFindFromSubdirectory(t *testing.T) {
+	t.Parallel()
 	root := gitInit(t)
 	p := PathsAt(root)
 	if err := os.MkdirAll(p.MillDir, 0o755); err != nil {
@@ -48,6 +49,7 @@ func TestFindFromSubdirectory(t *testing.T) {
 }
 
 func TestFindNotInitialized(t *testing.T) {
+	t.Parallel()
 	root := gitInit(t)
 	p, err := Find(root)
 	if !errors.Is(err, ErrNotInitialized) {
@@ -59,6 +61,8 @@ func TestFindNotInitialized(t *testing.T) {
 }
 
 func TestFindNotGitRepo(t *testing.T) {
+	// Serial: project.Find runs git with the process environment (no injected env), so
+	// GIT_CEILING_DIRECTORIES is set with t.Setenv.
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}

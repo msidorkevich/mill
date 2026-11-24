@@ -89,6 +89,7 @@ func firstDiffLine(t *testing.T, m *Model) string {
 }
 
 func TestDetailShowsTaskReviewAndDiffFromCLI(t *testing.T) {
+	t.Parallel()
 	m, _ := openDetail(t, seedReview(t))
 	v := screen(m)
 	for _, want := range []string{
@@ -111,6 +112,7 @@ func TestDetailShowsTaskReviewAndDiffFromCLI(t *testing.T) {
 }
 
 func TestDetailDiffScrolls(t *testing.T) {
+	t.Parallel()
 	m, _ := openDetail(t, seedReview(t))
 	if got := firstDiffLine(t, m); got != "+diff line 001" {
 		t.Fatalf("first diff line = %q, want +diff line 001", got)
@@ -135,6 +137,7 @@ func TestDetailDiffScrolls(t *testing.T) {
 }
 
 func TestDetailFailedCaptureShowsStderr(t *testing.T) {
+	t.Parallel()
 	m, f := newModel(t, seedReview(t))
 	f.Script(FakeResult{Stderr: "mill task show: task g1/z: database is locked\n", Code: 1}, "task", "show", "g1/z", "--json")
 	f.Script(FakeResult{Stderr: "mill review show: g1/z has no branch\n", Code: 1}, "review", "show", "g1/z", "--json")
@@ -157,6 +160,7 @@ func TestDetailFailedCaptureShowsStderr(t *testing.T) {
 }
 
 func TestDetailRefreshesOnEnterAndAfterAnAction(t *testing.T) {
+	t.Parallel()
 	m, f := openDetail(t, seedReview(t))
 	shows := func() int {
 		n := 0
@@ -181,6 +185,7 @@ func TestDetailRefreshesOnEnterAndAfterAnAction(t *testing.T) {
 }
 
 func TestDetailLogTailsLatestAttemptActions(t *testing.T) {
+	t.Parallel()
 	s := seedReview(t)
 	ctx := context.Background()
 	dir := t.TempDir()

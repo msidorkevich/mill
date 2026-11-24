@@ -12,6 +12,7 @@ import (
 )
 
 func TestFakePlaysStepsInOrderPerRole(t *testing.T) {
+	t.Parallel()
 	f := NewFake(Script{
 		RoleImplementer: {
 			{Output: []byte(`{"summary":"first"}`)},
@@ -40,6 +41,7 @@ func TestFakePlaysStepsInOrderPerRole(t *testing.T) {
 }
 
 func TestFakeReportsUsageIncrements(t *testing.T) {
+	t.Parallel()
 	f := NewFake(Script{RoleImplementer: {{
 		Usage: []budget.Usage{{InputTokens: 100, CostUSD: 0.1}, {OutputTokens: 50, CostUSD: 0.2}},
 	}}})
@@ -64,6 +66,7 @@ func TestFakeReportsUsageIncrements(t *testing.T) {
 
 // A caller enforcing a budget cancels the context from OnUsage; the fake stops at once.
 func TestFakeStopsWhenCancelledMidRun(t *testing.T) {
+	t.Parallel()
 	f := NewFake(Script{RoleImplementer: {{
 		Usage: []budget.Usage{{InputTokens: 300}, {InputTokens: 300}, {InputTokens: 300}},
 	}}})
@@ -92,6 +95,7 @@ func TestFakeStopsWhenCancelledMidRun(t *testing.T) {
 }
 
 func TestFakeScriptedError(t *testing.T) {
+	t.Parallel()
 	f := NewFake(Script{RoleImplementer: {{Error: "model refused"}}})
 	res, err := f.Run(context.Background(), Request{Role: RoleImplementer})
 	if err != nil || res.Status != StatusError || res.Error != "model refused" {
@@ -100,6 +104,7 @@ func TestFakeScriptedError(t *testing.T) {
 }
 
 func TestFakeWritesFiles(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	f := NewFake(Script{RoleImplementer: {{Files: map[string]string{"pkg/a.go": "package pkg\n"}}}})
 	if _, err := f.Run(context.Background(), Request{Role: RoleImplementer, Dir: dir}); err != nil {
@@ -112,6 +117,7 @@ func TestFakeWritesFiles(t *testing.T) {
 }
 
 func TestFakeRefusesPathsOutsideDir(t *testing.T) {
+	t.Parallel()
 	for _, p := range []string{"../escape.txt", "/etc/passwd", "a/../../b"} {
 		f := NewFake(Script{RoleImplementer: {{Files: map[string]string{p: "x"}}}})
 		if _, err := f.Run(context.Background(), Request{Role: RoleImplementer, Dir: t.TempDir()}); err == nil {
@@ -121,6 +127,7 @@ func TestFakeRefusesPathsOutsideDir(t *testing.T) {
 }
 
 func TestLoadFakeScript(t *testing.T) {
+	t.Parallel()
 	p := filepath.Join(t.TempDir(), "script.json")
 	data := `{"implementer":[{"output":{"summary":"ok"},"usage":[{"input_tokens":5,"cost_usd":0.01}]}]}`
 	if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
@@ -143,6 +150,7 @@ func TestLoadFakeScript(t *testing.T) {
 }
 
 func TestLoadFakeScriptTasksKey(t *testing.T) {
+	t.Parallel()
 	p := filepath.Join(t.TempDir(), "script.json")
 	data := `{"implementer":[{"output":{"summary":"role"}}],"tasks":{"g/a":{"implementer":[{"output":{"summary":"a"}}]}}}`
 	if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
@@ -167,6 +175,7 @@ func TestLoadFakeScriptTasksKey(t *testing.T) {
 }
 
 func TestFakeDelayHonoursCancellation(t *testing.T) {
+	t.Parallel()
 	f := NewFake(Script{RoleImplementer: {{DelayMS: 60000}, {DelayMS: 20}}})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

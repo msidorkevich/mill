@@ -48,6 +48,7 @@ func statsModelsTask(t *testing.T, s *Store, id, size, complexity, status string
 func statsModelsNear(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 func TestModelStatsGroupsBySizeComplexityAndFirstAttemptModel(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	impl, ver := RoleImplementer, "verifier"
@@ -93,6 +94,7 @@ func TestModelStatsGroupsBySizeComplexityAndFirstAttemptModel(t *testing.T) {
 }
 
 func TestModelStatsOrdersComplexityLowMediumHighAndModels(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	impl := RoleImplementer
@@ -120,6 +122,7 @@ func TestModelStatsOrdersComplexityLowMediumHighAndModels(t *testing.T) {
 }
 
 func TestModelStatsEmptyStoreReturnsNoRows(t *testing.T) {
+	t.Parallel()
 	got, err := newStore(t).ModelStats(context.Background())
 	if err != nil || len(got) != 0 {
 		t.Fatalf("stats = %+v, %v", got, err)

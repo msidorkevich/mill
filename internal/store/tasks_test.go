@@ -19,6 +19,7 @@ func spec(id string) taskspec.Spec {
 }
 
 func TestTaskLifecycle(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 
@@ -60,6 +61,7 @@ func TestTaskLifecycle(t *testing.T) {
 }
 
 func TestAttemptsAndUsage(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -107,6 +109,7 @@ func TestAttemptsAndUsage(t *testing.T) {
 }
 
 func TestBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -131,6 +134,7 @@ func TestBranches(t *testing.T) {
 
 // A database at schema v1 upgrades in place to the latest version.
 func TestMigrateFromV1(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	saved := migrations
@@ -159,6 +163,7 @@ func TestMigrateFromV1(t *testing.T) {
 }
 
 func TestUpdateTaskSpec(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -180,6 +185,7 @@ func TestUpdateTaskSpec(t *testing.T) {
 }
 
 func TestTaskSummaries(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 
@@ -238,6 +244,7 @@ func TestTaskSummaries(t *testing.T) {
 }
 
 func TestTimestampsFixedWidthAndOrdered(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 
@@ -275,6 +282,7 @@ func TestTimestampsFixedWidthAndOrdered(t *testing.T) {
 }
 
 func TestMigrateV2NormalizesTimestamps(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	saved := migrations
@@ -357,6 +365,7 @@ func TestMigrateV2NormalizesTimestamps(t *testing.T) {
 }
 
 func TestRecoverInterruptedResetsOnlyRunningWork(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	for _, id := range []string{"run1", "run2", "done", "idle"} {
@@ -415,6 +424,7 @@ func TestRecoverInterruptedResetsOnlyRunningWork(t *testing.T) {
 }
 
 func TestAttemptProcessRecordedAndListed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -441,6 +451,7 @@ func TestAttemptProcessRecordedAndListed(t *testing.T) {
 }
 
 func TestMigrateV4AddsAttemptProcessColumns(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	saved := migrations
@@ -476,6 +487,7 @@ func TestMigrateV4AddsAttemptProcessColumns(t *testing.T) {
 }
 
 func TestFinishAttemptRecordsCostEstimated(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -497,6 +509,7 @@ func TestFinishAttemptRecordsCostEstimated(t *testing.T) {
 
 // A database at schema v5 upgrades and gains attempts.cost_estimated.
 func TestMigrateFromV5AddsCostEstimated(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	saved := migrations
@@ -526,6 +539,7 @@ func TestMigrateFromV5AddsCostEstimated(t *testing.T) {
 }
 
 func TestRecoverInterruptedRecordsUsageOfAbandonedAttempts(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	g, _ := s.CreateGoal(ctx, "t", nil)
@@ -562,6 +576,7 @@ func TestRecoverInterruptedRecordsUsageOfAbandonedAttempts(t *testing.T) {
 }
 
 func TestBranchRoundTripsPublishedAndGateSHA(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -586,6 +601,7 @@ func TestBranchRoundTripsPublishedAndGateSHA(t *testing.T) {
 }
 
 func TestMarkTaskCleanedClearsWorktreeKeepsRowAndRecordsEvent(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -612,6 +628,7 @@ func TestMarkTaskCleanedClearsWorktreeKeepsRowAndRecordsEvent(t *testing.T) {
 
 // A database at schema v6 upgrades; existing branches gain empty published_sha and gate_sha.
 func TestMigrateFromV6AddsBranchPublishAndGateSHA(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "mill.db")
 	saved := migrations
@@ -651,6 +668,7 @@ func TestMigrateFromV6AddsBranchPublishAndGateSHA(t *testing.T) {
 }
 
 func TestDoneMeansVerifiedPublishedOrLanded(t *testing.T) {
+	t.Parallel()
 	for _, st := range TaskStatuses {
 		want := st == TaskVerified || st == TaskPublished || st == TaskLanded
 		if Done(st) != want {
@@ -660,6 +678,7 @@ func TestDoneMeansVerifiedPublishedOrLanded(t *testing.T) {
 }
 
 func TestTaskDescendantsAreTransitiveAndRejectHoldsNonLanded(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	for _, id := range []string{"g/a", "g/b", "g/c", "g/d", "g/x"} {
@@ -691,6 +710,7 @@ func TestTaskDescendantsAreTransitiveAndRejectHoldsNonLanded(t *testing.T) {
 }
 
 func TestUpdateAttemptUsageOnlyWhileRunning(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -722,6 +742,7 @@ func TestUpdateAttemptUsageOnlyWhileRunning(t *testing.T) {
 }
 
 func TestSetTaskReasonKeepsStatusAndPhase(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -746,6 +767,7 @@ func TestSetTaskReasonKeepsStatusAndPhase(t *testing.T) {
 }
 
 func TestRunningStagesListsRunningTasksWithoutRunningAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	for _, id := range []string{"gating", "coding", "idle"} {
@@ -779,6 +801,7 @@ func TestRunningStagesListsRunningTasksWithoutRunningAttempt(t *testing.T) {
 }
 
 func TestBlockRestackRecordsFormerStatusUntilTheNextStatusChange(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	if err := s.CreateTask(ctx, spec("t1")); err != nil {
@@ -813,6 +836,7 @@ func TestBlockRestackRecordsFormerStatusUntilTheNextStatusChange(t *testing.T) {
 }
 
 func TestTaskBlockedByOlderRestackConflictCountsAsRestackBlocked(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
 	for _, id := range []string{"v", "p", "k", "other"} {

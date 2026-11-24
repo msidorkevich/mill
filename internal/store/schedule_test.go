@@ -7,6 +7,7 @@ import (
 )
 
 func TestScheduleCandidatesListsRunnableGoalsAndPendingSingleTasks(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := newStore(t)
 	goal := func(status string, verified ...string) string {

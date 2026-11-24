@@ -30,15 +30,16 @@ type taskActions struct {
 	cmds      *commands
 	getenv    func(string) string
 	edit      EditFunc
+	tempDir   string // where comment and spec files go; "" = os.TempDir()
 	input     textinput.Model
 	rejecting string // the task whose reject reason is being typed
 }
 
-func newTaskActions(cmds *commands, getenv func(string) string, edit EditFunc) *taskActions {
+func newTaskActions(cmds *commands, getenv func(string) string, edit EditFunc, tempDir string) *taskActions {
 	in := textinput.New()
 	in.Placeholder = "why is it rejected?"
 	in.Prompt = "reject reason: "
-	return &taskActions{cmds: cmds, getenv: getenv, edit: edit, input: in}
+	return &taskActions{cmds: cmds, getenv: getenv, edit: edit, tempDir: tempDir, input: in}
 }
 
 func (a *taskActions) capturing() bool { return a.rejecting != "" }
@@ -73,7 +74,7 @@ func (a *taskActions) changes(id string) tea.Cmd {
 		a.cmds.note("✗ changes: $EDITOR is not set; set it to your editor and press c again (nothing was run)")
 		return nil
 	}
-	f, err := os.CreateTemp("", "mill-changes-*.md")
+	f, err := os.CreateTemp(a.tempDir, "mill-changes-*.md")
 	if err != nil {
 		a.cmds.note("✗ changes: could not create the comment file: %v", err)
 		return nil
@@ -110,7 +111,7 @@ func (a *taskActions) retry(id string) tea.Cmd {
 		if err != nil {
 			return retryReadyMsg{task: id, err: fmt.Sprintf("encode the spec of %s: %v", id, err)}
 		}
-		f, err := os.CreateTemp("", "mill-retry-*.json")
+		f, err := os.CreateTemp(a.tempDir, "mill-retry-*.json")
 		if err != nil {
 			return retryReadyMsg{task: id, err: fmt.Sprintf("create the spec file: %v", err)}
 		}

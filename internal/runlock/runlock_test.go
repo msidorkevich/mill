@@ -14,6 +14,7 @@ import (
 )
 
 func TestAcquireIsExclusiveAndReleasable(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 	l, err := Acquire(path)
 	if err != nil {
@@ -37,6 +38,7 @@ func TestAcquireIsExclusiveAndReleasable(t *testing.T) {
 
 // TestHelperHoldLock is run as a child process by TestKilledHolderFreesLock.
 func TestHelperHoldLock(t *testing.T) {
+	t.Parallel()
 	path := os.Getenv("RUNLOCK_TEST_PATH")
 	if path == "" {
 		t.Skip("helper process only")
@@ -50,6 +52,7 @@ func TestHelperHoldLock(t *testing.T) {
 }
 
 func TestKilledHolderFreesLock(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLock$")
 	cmd.Env = append(os.Environ(), "RUNLOCK_TEST_PATH="+path)
@@ -82,6 +85,7 @@ func TestKilledHolderFreesLock(t *testing.T) {
 }
 
 func TestSecondAcquireInSameProcessFailsAndKeepsLock(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 	l, err := Acquire(path)
 	if err != nil {
@@ -102,6 +106,7 @@ func TestSecondAcquireInSameProcessFailsAndKeepsLock(t *testing.T) {
 
 // TestHelperHoldLockWithChild locks, starts a long-running child, then waits to be killed.
 func TestHelperHoldLockWithChild(t *testing.T) {
+	t.Parallel()
 	path := os.Getenv("RUNLOCK_TEST_PATH")
 	if path == "" {
 		t.Skip("helper process only")
@@ -120,6 +125,7 @@ func TestHelperHoldLockWithChild(t *testing.T) {
 }
 
 func TestChildOfKilledHolderDoesNotKeepLock(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLockWithChild$")
 	cmd.Env = append(os.Environ(), "RUNLOCK_TEST_PATH="+path)
@@ -152,6 +158,7 @@ func TestChildOfKilledHolderDoesNotKeepLock(t *testing.T) {
 }
 
 func TestHeldFalseForMissingOrUnlockedFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if pid, held, err := Held(filepath.Join(dir, "missing.lock")); err != nil || held || pid != 0 {
 		t.Fatalf("Held(missing) = %d, %v, %v; want 0, false, nil", pid, held, err)
@@ -170,6 +177,7 @@ func TestHeldFalseForMissingOrUnlockedFile(t *testing.T) {
 }
 
 func TestHeldReportsOwnProcessAndKeepsLock(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 	l, err := Acquire(path)
 	if err != nil {
@@ -186,6 +194,7 @@ func TestHeldReportsOwnProcessAndKeepsLock(t *testing.T) {
 }
 
 func TestHeldReportsChildHolder(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "run.lock")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldLock$")
 	cmd.Env = append(os.Environ(), "RUNLOCK_TEST_PATH="+path)
@@ -211,6 +220,7 @@ func TestHeldReportsChildHolder(t *testing.T) {
 }
 
 func TestHeldErrorsOnUnreadablePath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "plain")
 	if err := os.WriteFile(file, nil, 0o644); err != nil {

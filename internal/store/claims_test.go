@@ -50,6 +50,7 @@ func wantBusy(t *testing.T, err error, task, doing string) {
 }
 
 func TestClaimTasksOnIdleTasksListsThemAsClaimed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := claimStore(t, nil, "a", "b")
 	c := Claimer{Owner: "o1", PID: 101, Command: "run", Executable: "mill"}
@@ -72,6 +73,7 @@ func TestClaimTasksOnIdleTasksListsThemAsClaimed(t *testing.T) {
 }
 
 func TestClaimTasksRefusesTaskWithRunningAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := claimStore(t, nil, "a")
 	if err := s.SetTaskStatus(ctx, "a", TaskRunning, PhaseImplement, ""); err != nil {
@@ -85,6 +87,7 @@ func TestClaimTasksRefusesTaskWithRunningAttempt(t *testing.T) {
 }
 
 func TestClaimTasksRefusesRunningTaskWithoutAttempt(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := claimStore(t, nil, "a")
 	if err := s.SetTaskStatus(ctx, "a", TaskRunning, PhaseGate, ""); err != nil {
@@ -95,6 +98,7 @@ func TestClaimTasksRefusesRunningTaskWithoutAttempt(t *testing.T) {
 }
 
 func TestClaimTasksRefusesSecondOwnerInSameProcessUntilReleased(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := claimStore(t, nil, "a")
 	first, second := NewClaimer("run"), NewClaimer("task run")
@@ -127,6 +131,7 @@ func TestClaimTasksRefusesSecondOwnerInSameProcessUntilReleased(t *testing.T) {
 }
 
 func TestClaimTasksClaimsNoneWhenOneIsBusy(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := claimStore(t, nil, "a", "b", "c")
 	if err := s.SetTaskStatus(ctx, "b", TaskRunning, PhaseVerify, ""); err != nil {
@@ -141,6 +146,7 @@ func TestClaimTasksClaimsNoneWhenOneIsBusy(t *testing.T) {
 }
 
 func TestClaimTasksTakesOverClaimOfDeadProcess(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := claimStore(t, map[int]bool{200: true}, "a")
 	if err := s.ClaimTasks(ctx, Claimer{Owner: "dead", PID: 200, Command: "run"}, []string{"a"}); err != nil {
@@ -159,6 +165,7 @@ func TestClaimTasksTakesOverClaimOfDeadProcess(t *testing.T) {
 }
 
 func TestRecoverInterruptedRemovesDeadClaimsAndKeepsLiveOnes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	s := claimStore(t, map[int]bool{200: true}, "a", "b")
 	if err := s.ClaimTasks(ctx, Claimer{Owner: "dead", PID: 200}, []string{"a"}); err != nil {
@@ -189,6 +196,7 @@ func TestRecoverInterruptedRemovesDeadClaimsAndKeepsLiveOnes(t *testing.T) {
 }
 
 func TestClaimTasksTakesOverClaimWhosePidNoLongerRunsMill(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	// The default liveness check: a live process that is not the claiming command.
 	s := newStore(t)
@@ -221,6 +229,7 @@ func TestClaimTasksTakesOverClaimWhosePidNoLongerRunsMill(t *testing.T) {
 }
 
 func TestRunsClaimerMatchesExecutableAndCommand(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		cmdline, exe, command string
 		want                  bool

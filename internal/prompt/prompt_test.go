@@ -18,6 +18,7 @@ var task = taskspec.Spec{
 }
 
 func TestSchemasAreValidJSON(t *testing.T) {
+	t.Parallel()
 	for name, s := range map[string]json.RawMessage{"implementer": ImplementerSchema, "verifier": VerifierSchema} {
 		var v map[string]any
 		if err := json.Unmarshal(s, &v); err != nil {
@@ -27,6 +28,7 @@ func TestSchemasAreValidJSON(t *testing.T) {
 }
 
 func TestImplementerPrompt(t *testing.T) {
+	t.Parallel()
 	p := Implementer(ImplementerInput{Task: task, GateCmds: []string{"go test ./..."}, Attempt: 1, MaxAttempts: 3})
 	for _, want := range []string{"Attempt 1 of 3", "Add func Reverse", "handles UTF-8", "reverse.go", "`go test ./...`", "mill commits"} {
 		if !strings.Contains(p, want) {
@@ -49,6 +51,7 @@ func TestImplementerPrompt(t *testing.T) {
 }
 
 func TestVerifierPrompt(t *testing.T) {
+	t.Parallel()
 	g := gate.Result{Passed: true, Commands: []gate.CmdResult{{Cmd: "go test ./...", Exit: 0}}}
 	p := Verifier(VerifierInput{Task: task, BaseSHA: "0123456789abcdef0123", Diff: "+func Reverse", DiffStat: "reverse.go | 1 +", Gate: g})
 	for _, want := range []string{"independent reviewer", "1. Reverse", "2. handles UTF-8", "`go test ./...`: passed", "0123456789ab", "+func Reverse"} {
@@ -65,6 +68,7 @@ func TestVerifierPrompt(t *testing.T) {
 }
 
 func TestParseImplementer(t *testing.T) {
+	t.Parallel()
 	if _, err := ParseImplementer([]byte(`{"summary":"did it","files_changed":["a.go"],"notes":""}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +81,7 @@ func TestParseImplementer(t *testing.T) {
 }
 
 func TestParseVerifier(t *testing.T) {
+	t.Parallel()
 	o, err := ParseVerifier([]byte(`{"verdict":"fail","summary":"s","findings":[{"file":"a.go","line":3,"issue":"bug"}]}`))
 	if err != nil || o.Findings[0].Source != "verifier" {
 		t.Fatalf("ParseVerifier = %+v, %v", o, err)
@@ -99,6 +104,7 @@ func TestParseVerifier(t *testing.T) {
 }
 
 func TestFindingString(t *testing.T) {
+	t.Parallel()
 	cases := map[Finding]string{
 		{Source: "verifier", File: "a.go", Line: 3, Issue: "x"}: "[verifier] a.go:3: x",
 		{Source: "verifier", File: "a.go", Issue: "x"}:          "[verifier] a.go: x",
@@ -112,6 +118,7 @@ func TestFindingString(t *testing.T) {
 }
 
 func TestVerifierPromptListsFilesOutsideOwns(t *testing.T) {
+	t.Parallel()
 	in := VerifierInput{Task: taskspec.Spec{ID: "t", Title: "T", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
 	if p := Verifier(in); strings.Contains(p, "outside the files the task owns") {
 		t.Fatal("heading shown without outside files")
@@ -126,6 +133,7 @@ func TestVerifierPromptListsFilesOutsideOwns(t *testing.T) {
 }
 
 func TestVerifierPromptNamesFlakyCommands(t *testing.T) {
+	t.Parallel()
 	in := VerifierInput{Task: taskspec.Spec{ID: "t", Title: "T", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
 	if p := Verifier(in); strings.Contains(p, "Flaky") {
 		t.Fatal("flaky section shown without flaky commands")

@@ -41,6 +41,8 @@ type Options struct {
 	Herdr func(ctx context.Context, args []string) (stdout, stderr string, code int, err error)
 	// ShellCmd builds the interactive shell command for o outside herdr; defaults to exec.Command.
 	ShellCmd func(shell, dir string) *exec.Cmd
+	// TempDir holds the comment and spec files the review actions write; "" = os.TempDir().
+	TempDir string
 }
 
 // Indexes of the views the model switches to itself.
@@ -96,7 +98,7 @@ func New(opts Options) *Model {
 		}
 	}
 	cmds := &commands{runner: opts.Runner}
-	acts := newTaskActions(cmds, opts.Getenv, opts.Edit)
+	acts := newTaskActions(cmds, opts.Getenv, opts.Edit, opts.TempDir)
 	detail := newDetailView(acts, opts.Store)
 	return &Model{
 		opts:   opts,

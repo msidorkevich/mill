@@ -18,6 +18,7 @@ const valid = `{
 }`
 
 func TestParseValid(t *testing.T) {
+	t.Parallel()
 	s, err := Parse([]byte(valid))
 	if err != nil {
 		t.Fatal(err)
@@ -28,6 +29,7 @@ func TestParseValid(t *testing.T) {
 }
 
 func TestDefaultsForOptionalLists(t *testing.T) {
+	t.Parallel()
 	s, err := Parse([]byte(`{"id":"d","title":"Docs","kind":"docs","spec":"write docs"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -38,6 +40,7 @@ func TestDefaultsForOptionalLists(t *testing.T) {
 }
 
 func TestValidationErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct{ name, json, want string }{
 		{"bad id", `{"id":"Bad_ID","title":"t","kind":"docs","spec":"s"}`, "lowercase slug"},
 		{"no title", `{"id":"a","title":" ","kind":"docs","spec":"s"}`, "title"},
@@ -63,6 +66,7 @@ func TestValidationErrors(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
+	t.Parallel()
 	p := filepath.Join(t.TempDir(), "task.json")
 	if err := os.WriteFile(p, []byte(valid), 0o644); err != nil {
 		t.Fatal(err)
@@ -73,6 +77,7 @@ func TestLoad(t *testing.T) {
 }
 
 func TestComplexityDefaultsToMedium(t *testing.T) {
+	t.Parallel()
 	s, err := Parse([]byte(`{"id":"a","title":"t","kind":"docs","spec":"s"}`))
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +88,7 @@ func TestComplexityDefaultsToMedium(t *testing.T) {
 }
 
 func TestComplexityRejectsUnknownValue(t *testing.T) {
+	t.Parallel()
 	_, err := Parse([]byte(`{"id":"a","title":"t","kind":"docs","spec":"s","complexity":"extreme"}`))
 	if err == nil || !strings.Contains(err.Error(), "[low medium high]") || !strings.Contains(err.Error(), `"extreme"`) {
 		t.Fatalf("want error naming allowed values and got value, got %v", err)
@@ -90,6 +96,7 @@ func TestComplexityRejectsUnknownValue(t *testing.T) {
 }
 
 func TestComplexityReasonRejectsMultilineAndOverlong(t *testing.T) {
+	t.Parallel()
 	for name, r := range map[string]string{"newline": "a\nb", "long": strings.Repeat("x", 121)} {
 		s := Spec{ID: "a", Title: "t", Kind: "docs", Spec: "s", Size: "S", Complexity: "low", ComplexityReason: r}
 		if err := s.ValidateFields(); err == nil || !strings.Contains(err.Error(), "complexity_reason") {
@@ -103,6 +110,7 @@ func TestComplexityReasonRejectsMultilineAndOverlong(t *testing.T) {
 }
 
 func TestModelOverrideRejectsWhitespaceAndAcceptsEmpty(t *testing.T) {
+	t.Parallel()
 	base := Spec{ID: "a", Title: "t", Kind: "docs", Spec: "s", Size: "S", Complexity: "low"}
 	for _, m := range []string{"a b", "a\tb", strings.Repeat("m", 101)} {
 		s := base
