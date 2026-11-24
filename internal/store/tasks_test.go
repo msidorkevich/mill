@@ -451,7 +451,9 @@ func TestMigrateV4AddsAttemptProcessColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+	// CreateTask writes columns this old schema lacks: insert the row the way it was then.
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO tasks (id, title, kind, spec, status, created_at, updated_at)
+		VALUES ('t1', 'T', 'implement', 's', 'pending', '2026-01-01T00:00:00.000000000Z', '2026-01-01T00:00:00.000000000Z')`); err != nil {
 		t.Fatal(err)
 	}
 	old, err := s.StartAttempt(ctx, "t1", 1, "verifier")
@@ -620,7 +622,9 @@ func TestMigrateFromV6AddsBranchPublishAndGateSHA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+	// CreateTask writes columns this old schema lacks: insert the row the way it was then.
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO tasks (id, title, kind, spec, status, created_at, updated_at)
+		VALUES ('t1', 'T', 'implement', 's', 'pending', '2026-01-01T00:00:00.000000000Z', '2026-01-01T00:00:00.000000000Z')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB().ExecContext(ctx, `INSERT INTO branches (task_id, name, base, base_sha, head_sha, updated_at)

@@ -258,10 +258,11 @@ func (s *Store) ApproveGoal(ctx context.Context, id string, p plan.Plan) error {
 		chk, _ := json.Marshal(t.Checks)
 		own, _ := json.Marshal(t.Owns)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO tasks
-			(id, goal_id, title, kind, spec, acceptance, checks, owns, size, status, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(id, goal_id, title, kind, spec, acceptance, checks, owns, size, complexity, complexity_reason,
+			model, status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			full, id, t.Title, t.Kind, t.Spec, string(acc), string(chk), string(own), t.Size,
-			TaskPending, now, now); err != nil {
+			t.Complexity, t.ComplexityReason, t.Model, TaskPending, now, now); err != nil {
 			return fmt.Errorf("create task %s: %w", full, err)
 		}
 		if err := s.appendEventTx(ctx, tx, "task-created", id, full, map[string]string{"title": t.Title}); err != nil {
@@ -447,8 +448,9 @@ func (s *Store) UpdateGoalTaskSpec(ctx context.Context, taskID string, spec task
 	chk, _ := json.Marshal(spec.Checks)
 	own, _ := json.Marshal(spec.Owns)
 	res, err := tx.ExecContext(ctx, `UPDATE tasks SET title = ?, kind = ?, spec = ?, acceptance = ?,
-		checks = ?, owns = ?, size = ?, updated_at = ? WHERE id = ?`,
-		spec.Title, spec.Kind, spec.Spec, string(acc), string(chk), string(own), spec.Size, now, taskID)
+		checks = ?, owns = ?, size = ?, complexity = ?, complexity_reason = ?, model = ?, updated_at = ? WHERE id = ?`,
+		spec.Title, spec.Kind, spec.Spec, string(acc), string(chk), string(own), spec.Size,
+		spec.Complexity, spec.ComplexityReason, spec.Model, now, taskID)
 	if err != nil {
 		return err
 	}

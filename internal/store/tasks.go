@@ -73,10 +73,11 @@ func (s *Store) CreateTask(ctx context.Context, spec taskspec.Spec) error {
 	own, _ := json.Marshal(spec.Owns)
 	now := s.ts()
 	_, err := s.db.ExecContext(ctx, `INSERT INTO tasks
-		(id, title, kind, spec, acceptance, checks, owns, size, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(id, title, kind, spec, acceptance, checks, owns, size, complexity, complexity_reason, model,
+		status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		spec.ID, spec.Title, spec.Kind, spec.Spec, string(acc), string(chk), string(own), spec.Size,
-		TaskPending, now, now)
+		spec.Complexity, spec.ComplexityReason, spec.Model, TaskPending, now, now)
 	if err != nil {
 		return fmt.Errorf("create task %s: %w", spec.ID, err)
 	}
@@ -91,9 +92,11 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 	var approvedAttempt sql.NullInt64
 	var acc, chk, own, created, updated string
 	err := s.db.QueryRowContext(ctx, `SELECT id, goal_id, title, kind, spec, acceptance, checks, owns,
-		size, status, phase, reason, created_at, updated_at, approved_at, approved_attempt FROM tasks WHERE id = ?`, id).
-		Scan(&t.ID, &goal, &t.Title, &t.Kind, &t.Spec.Spec, &acc, &chk, &own, &t.Size, &t.Status,
-			&t.Phase, &t.Reason, &created, &updated, &approvedAt, &approvedAttempt)
+		size, complexity, complexity_reason, model, status, phase, reason, created_at, updated_at, approved_at,
+		approved_attempt FROM tasks WHERE id = ?`, id).
+		Scan(&t.ID, &goal, &t.Title, &t.Kind, &t.Spec.Spec, &acc, &chk, &own, &t.Size, &t.Complexity,
+			&t.ComplexityReason, &t.Model, &t.Status, &t.Phase, &t.Reason, &created, &updated, &approvedAt,
+			&approvedAttempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, fmt.Errorf("task %s: %w", id, ErrNotFound)
 	}
@@ -101,6 +104,10 @@ func (s *Store) GetTask(ctx context.Context, id string) (Task, error) {
 		return Task{}, err
 	}
 	t.GoalID = goal.String
+	if t.Complexity == "" {
+		// Tasks stored before complexity existed count as medium.
+		t.Complexity = "medium"
+	}
 	t.Approved = approvedAt.Valid
 	t.ApprovedAt = approvedAt.String
 	t.ApprovedAttempt = int(approvedAttempt.Int64)
@@ -411,6 +418,9 @@ type Attempt struct {
 	Command    string       `json:"command"`
 	// CostEstimated is true when Usage.CostUSD was estimated from tokens.
 	CostEstimated bool `json:"cost_estimated"`
+	// Model is the model the attempt ran with and ModelReason why it was chosen.
+	Model       string `json:"model,omitempty"`
+	ModelReason string `json:"model_reason,omitempty"`
 }
 
 // Attempt statuses.
@@ -496,6 +506,23 @@ func (s *Store) SetAttemptProcess(ctx context.Context, id int64, pid int, comman
 	return nil
 }
 
+// SetAttemptModel records the model an attempt runs with and why it was chosen.
+func (s *Store) SetAttemptModel(ctx context.Context, attemptID int64, model, reason string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE attempts SET model = ?, model_reason = ? WHERE id = ?`,
+		model, reason, attemptID)
+	if err != nil {
+		return fmt.Errorf("record model of attempt %d: %w", attemptID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("record model of attempt %d: %w", attemptID, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("record model of attempt %d: attempt %d: %w", attemptID, attemptID, ErrNotFound)
+	}
+	return nil
+}
+
 // RunningAttempts lists attempts whose status is running.
 func (s *Store) RunningAttempts(ctx context.Context) ([]Attempt, error) {
 	return s.queryAttempts(ctx, `WHERE status = ?`, AttemptRunning)
@@ -542,7 +569,7 @@ func (s *Store) Attempts(ctx context.Context, taskID string) ([]Attempt, error) 
 func (s *Store) queryAttempts(ctx context.Context, where string, arg any) ([]Attempt, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, n, role, status, started_at, ended_at,
 		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, output_path, log_path,
-		pid, command, cost_estimated FROM attempts `+where+` ORDER BY id`, arg)
+		pid, command, cost_estimated, model, model_reason FROM attempts `+where+` ORDER BY id`, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +581,8 @@ func (s *Store) queryAttempts(ctx context.Context, where string, arg any) ([]Att
 		var ended sql.NullString
 		if err := rows.Scan(&a.ID, &a.TaskID, &a.N, &a.Role, &a.Status, &started, &ended,
 			&a.Usage.InputTokens, &a.Usage.OutputTokens, &a.Usage.CacheWriteTokens, &a.Usage.CacheReadTokens,
-			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath, &a.PID, &a.Command, &a.CostEstimated); err != nil {
+			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath, &a.PID, &a.Command, &a.CostEstimated,
+			&a.Model, &a.ModelReason); err != nil {
 			return nil, err
 		}
 		a.StartedAt, _ = parseTime(started)
@@ -693,8 +721,9 @@ func (s *Store) UpdateTaskSpec(ctx context.Context, spec taskspec.Spec) error {
 	chk, _ := json.Marshal(spec.Checks)
 	own, _ := json.Marshal(spec.Owns)
 	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET title = ?, kind = ?, spec = ?, acceptance = ?,
-		checks = ?, owns = ?, size = ?, updated_at = ? WHERE id = ?`,
-		spec.Title, spec.Kind, spec.Spec, string(acc), string(chk), string(own), spec.Size, s.ts(), spec.ID)
+		checks = ?, owns = ?, size = ?, complexity = ?, complexity_reason = ?, model = ?, updated_at = ? WHERE id = ?`,
+		spec.Title, spec.Kind, spec.Spec, string(acc), string(chk), string(own), spec.Size,
+		spec.Complexity, spec.ComplexityReason, spec.Model, s.ts(), spec.ID)
 	if err != nil {
 		return err
 	}
