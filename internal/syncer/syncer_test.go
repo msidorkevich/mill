@@ -487,3 +487,134 @@ func TestSyncRetriesRestackBlockedTaskOnlyWhileStillConflicting(t *testing.T) {
 		t.Fatalf("task = %s %q", tk.Status, tk.Reason)
 	}
 }
+
+// landStackedParent merges g1/a of stackedGoal into main on the remote.
+func landStackedParent(t *testing.T, o Options, bare string) {
+	t.Helper()
+	git(t, o.Paths.Root, "push", "-q", bare, "mill/g1/a:main")
+}
+
+func stackedForClean(t *testing.T, childStatus string) (Options, string, string) {
+	t.Helper()
+	o := stackedGoal(t, false)
+	o.Cfg.CheckCmd = "true"
+	o.Cfg.CleanOnLand = "all"
+	bare := git(t, o.Paths.Root, "remote", "get-url", "origin")
+	if err := o.Store.SetTaskStatus(context.Background(), "g1/b", childStatus, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	aWT, err := o.Store.GetBranch(context.Background(), "g1/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o, bare, aWT.Worktree
+}
+
+func TestSyncReportsRunningChildOfLandedParentBusyAndKeepsParentBranch(t *testing.T) {
+	o, bare, aWT := stackedForClean(t, store.TaskRunning)
+	ctx := context.Background()
+	landStackedParent(t, o, bare)
+
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Busy) != 1 || res.Busy[0].TaskID != "g1/b" || !strings.Contains(res.Busy[0].Doing, "running") {
+		t.Fatalf("busy = %+v, want g1/b running", res.Busy)
+	}
+	if len(res.Cleaned) != 0 || !gitx.BranchExists(ctx, o.Paths.Root, "mill/g1/a") {
+		t.Errorf("parent branch removed under a running child: cleaned = %+v", res.Cleaned)
+	}
+	if _, err := os.Stat(aWT); err != nil {
+		t.Errorf("parent worktree removed: %v", err)
+	}
+	found := false
+	for _, n := range res.NotCleaned {
+		found = found || (n.TaskID == "g1/a" && strings.Contains(n.Reason, "kept for running dependents: g1/b"))
+	}
+	if !found {
+		t.Errorf("not_cleaned = %+v, want a kept-for-dependents reason naming g1/b", res.NotCleaned)
+	}
+	if tk, _ := o.Store.GetTask(ctx, "g1/b"); tk.Status != store.TaskRunning {
+		t.Errorf("child status = %s, want still running", tk.Status)
+	}
+}
+
+func TestSyncCleansLandedParentOnLaterSyncOnceChildIsRestacked(t *testing.T) {
+	o, bare, aWT := stackedForClean(t, store.TaskRunning)
+	ctx := context.Background()
+	landStackedParent(t, o, bare)
+	if _, err := Sync(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	if err := o.Store.SetTaskStatus(ctx, "g1/b", store.TaskVerified, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Restacked) != 1 || res.Restacked[0].TaskID != "g1/b" {
+		t.Fatalf("restacked = %+v", res.Restacked)
+	}
+	if len(res.Cleaned) != 1 || res.Cleaned[0].TaskID != "g1/a" {
+		t.Fatalf("cleaned = %+v, want g1/a", res.Cleaned)
+	}
+	if gitx.BranchExists(ctx, o.Paths.Root, "mill/g1/a") {
+		t.Errorf("parent branch still exists after the child was restacked")
+	}
+	if _, err := os.Stat(aWT); !os.IsNotExist(err) {
+		t.Errorf("parent worktree still exists: %v", err)
+	}
+}
+
+func TestSyncCleansKeptLandedParentOnceChildLandsToo(t *testing.T) {
+	o, bare, aWT := stackedForClean(t, store.TaskRunning)
+	ctx := context.Background()
+	landStackedParent(t, o, bare)
+	if _, err := Sync(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	if !gitx.BranchExists(ctx, o.Paths.Root, "mill/g1/a") {
+		t.Fatal("parent branch should be kept while the child runs")
+	}
+	if err := o.Store.SetTaskStatus(ctx, "g1/b", store.TaskLanded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range res.Cleaned {
+		found = found || c.TaskID == "g1/a"
+	}
+	if !found {
+		t.Fatalf("cleaned = %+v, want g1/a", res.Cleaned)
+	}
+	if gitx.BranchExists(ctx, o.Paths.Root, "mill/g1/a") {
+		t.Errorf("parent branch still exists after the child landed")
+	}
+	if _, err := os.Stat(aWT); !os.IsNotExist(err) {
+		t.Errorf("parent worktree still exists: %v", err)
+	}
+}
+
+func TestSyncCleanKeepsLandedParentWhileChildStillBasedOnItsBranch(t *testing.T) {
+	o, bare, _ := stackedForClean(t, store.TaskBlocked) // blocked, not by a restack: not restacked
+	ctx := context.Background()
+	landStackedParent(t, o, bare)
+
+	res, err := Sync(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Cleaned) != 0 || !gitx.BranchExists(ctx, o.Paths.Root, "mill/g1/a") {
+		t.Fatalf("parent cleaned while g1/b is still based on it: %+v", res.Cleaned)
+	}
+	if len(res.NotCleaned) == 0 || !strings.Contains(res.NotCleaned[0].Reason, "kept for running dependents: g1/b") {
+		t.Errorf("not_cleaned = %+v", res.NotCleaned)
+	}
+}
