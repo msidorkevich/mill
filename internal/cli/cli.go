@@ -54,7 +54,7 @@ func init() {
 		{"task", "run or show a single task (run, show)", runTask},
 		{"plan", "create, review and approve a plan (show, edit, approve)", runPlan},
 		{"goal", "list or show goals (list, show)", runGoal},
-		{"run", "run an approved goal's tasks in dependency order (--retry-blocked)", runRun},
+		{"run", "run every approved goal and queued task as the repository's scheduler, or one goal (--retry-blocked)", runRun},
 		{"review", "list tasks awaiting review; show, changes, reject, approve (--goal)", runReview},
 		{"sync", "detect merged reviews, mark them landed, restack and re-publish children (--json)", runSync},
 		{"keep", "keep branches mergeable: sync, rebase, fix, re-publish, combined check (--watch, --interval, --combined, --json)", runKeep},
