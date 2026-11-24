@@ -47,8 +47,12 @@ func (p *Pipeline) Resolve(ctx context.Context, taskID string, in prompt.Resolve
 		return AgentOutcome{}, err
 	}
 	n := prev + 1
+	model, why := p.Cfg.TaskModel(t.Size, t.Complexity, t.Model)
+	if model == "" {
+		return AgentOutcome{Attempt: n, Stop: why}, nil
+	}
 	logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
-	ar, err := p.agent(ctx, t, n, runner.RoleResolver, prompt.Resolver(in), prompt.ResolverSchema, ImplementerTools, limits, dir, logDir)
+	ar, err := p.agent(ctx, t, n, runner.RoleResolver, model, why, prompt.Resolver(in), prompt.ResolverSchema, ImplementerTools, limits, dir, logDir)
 	out := AgentOutcome{Attempt: n, Status: string(ar.res.Status), Usage: ar.res.Usage,
 		Stop: ar.stop, RateLimited: ar.rateLimited, ResetsAt: ar.res.ResetsAt}
 	if err != nil || out.Stop != "" {
@@ -97,6 +101,21 @@ func (p *Pipeline) Verify(ctx context.Context, taskID string) (prompt.VerifierOu
 		return prompt.VerifierOutput{}, "", err
 	}
 	n := prev + 1
+	impl, err := p.latestImplementerModel(ctx, t.ID)
+	if err != nil {
+		return prompt.VerifierOutput{}, "", err
+	}
+	if impl == "" {
+		// No implementer attempt recorded a model: use what the implementer would run on.
+		var why string
+		if impl, why, err = p.implementerModel(ctx, t, n); err != nil {
+			return prompt.VerifierOutput{}, "", err
+		}
+		if impl == "" {
+			return prompt.VerifierOutput{}, why, nil
+		}
+	}
+	verModel, verWhy := p.verifierModel(impl)
 	logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
 
 	diff, err := gitx.Diff(ctx, br.Worktree, startSHA)
@@ -120,7 +139,7 @@ func (p *Pipeline) Verify(ctx context.Context, taskID string) (prompt.VerifierOu
 	}
 	g := gate.Result{Reason: "mill runs the gate separately on this head; review the change itself"}
 	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside})
-	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
+	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
 	if err != nil {
 		return prompt.VerifierOutput{}, "", err
 	}
