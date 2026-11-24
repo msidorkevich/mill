@@ -17,7 +17,9 @@
       "checks": ["go test ./internal/store/..."],
       "owns": ["internal/store/db.go", "internal/store/migrations/**", "go.mod", "go.sum"],
       "depends_on": [],
-      "size": "S"
+      "size": "S",
+      "complexity": "medium",
+      "complexity_reason": "New DB layer and embedded migrations"
     },
     {
       "id": "config",
@@ -31,7 +33,9 @@
       "checks": ["go test ./internal/config/..."],
       "owns": ["internal/config/**"],
       "depends_on": [],
-      "size": "S"
+      "size": "S",
+      "complexity": "low",
+      "complexity_reason": "One env var with a default"
     },
     {
       "id": "todo-repo",
@@ -45,7 +49,9 @@
       "checks": ["go test ./internal/store/..."],
       "owns": ["internal/store/todos.go", "internal/store/todos_test.go"],
       "depends_on": ["db-migrations"],
-      "size": "M"
+      "size": "M",
+      "complexity": "medium",
+      "complexity_reason": "CRUD with error mapping"
     },
     {
       "id": "http-handlers",
@@ -59,7 +65,9 @@
       "checks": ["go test ./internal/http/..."],
       "owns": ["internal/http/todos.go", "internal/http/todos_test.go", "internal/http/router.go", "cmd/server/main.go"],
       "depends_on": ["todo-repo", "config"],
-      "size": "M"
+      "size": "M",
+      "complexity": "high",
+      "complexity_reason": "Many routes and wiring into router and main"
     },
     {
       "id": "pagination",
@@ -73,7 +81,9 @@
       "checks": ["go test ./internal/http/... ./internal/store/..."],
       "owns": ["internal/http/todos.go", "internal/http/todos_test.go", "internal/store/todos.go"],
       "depends_on": ["http-handlers"],
-      "size": "S"
+      "size": "S",
+      "complexity": "medium",
+      "complexity_reason": "Touches repo and handlers"
     },
     {
       "id": "api-docs",
@@ -86,7 +96,9 @@
       "checks": [],
       "owns": ["docs/api/todos.md"],
       "depends_on": ["http-handlers"],
-      "size": "S"
+      "size": "S",
+      "complexity": "low",
+      "complexity_reason": "Documentation only"
     }
   ]
 }

@@ -11,7 +11,7 @@ import (
 
 func task(id string, deps ...string) taskspec.Spec {
 	return taskspec.Spec{ID: id, Title: id, Kind: "implement", Spec: "do " + id,
-		Acceptance: []string{"works"}, Checks: []string{"true"}, Owns: []string{}, DependsOn: deps, Size: "S"}
+		Acceptance: []string{"works"}, Checks: []string{"true"}, Owns: []string{}, DependsOn: deps, Size: "S", Complexity: "medium"}
 }
 
 func mk(ts ...taskspec.Spec) Plan { return Plan{Goal: "g", Tasks: ts} }
@@ -248,5 +248,39 @@ func TestOutsideOwnsKeepsInputOrder(t *testing.T) {
 	}
 	if got := OutsideOwns(nil, []string{"z.go"}); got != nil {
 		t.Fatalf("empty owns restricted: %v", got)
+	}
+}
+
+func TestComplexityMissingInStoredPlanParsesAsMedium(t *testing.T) {
+	p, err := Parse([]byte(`{"goal":"g","tasks":[{"id":"a","title":"t","kind":"docs","spec":"s"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Tasks[0].Complexity != "medium" {
+		t.Fatalf("complexity = %q, want medium", p.Tasks[0].Complexity)
+	}
+	if err := p.Validate(Options{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestComplexityInvalidValueNamesTask(t *testing.T) {
+	p, err := Parse([]byte(`{"goal":"g","tasks":[{"id":"big-one","title":"t","kind":"docs","spec":"s","complexity":"extreme"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = p.Validate(Options{})
+	if err == nil || !strings.Contains(err.Error(), "big-one") || !strings.Contains(err.Error(), "extreme") {
+		t.Fatalf("want error naming task and value, got %v", err)
+	}
+}
+
+func TestComplexityExampleCarriesComplexityOnEveryTask(t *testing.T) {
+	data, err := os.ReadFile("../../docs/examples/plan-todos.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(data), `"complexity":`); n != strings.Count(string(data), `"size":`) {
+		t.Fatalf("complexity on %d tasks, size on %d", n, strings.Count(string(data), `"size":`))
 	}
 }
