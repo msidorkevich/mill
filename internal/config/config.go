@@ -26,7 +26,10 @@ type Config struct {
 	BaseBranch  string `toml:"base_branch"`
 	Remote      string `toml:"remote"`
 	MaxParallel int    `toml:"max_parallel"`
-	MaxAttempts int    `toml:"max_attempts"`
+	// MaxParallelGates bounds the gates running at the same time across every mill
+	// process on the repository.
+	MaxParallelGates int `toml:"max_parallel_gates"`
+	MaxAttempts      int `toml:"max_attempts"`
 	// OwnsPolicy says what happens to changes outside a task's owns: "warn", "enforce" or "off".
 	OwnsPolicy      string `toml:"owns_policy"`
 	StartChildrenOn string `toml:"start_children_on"`
@@ -135,19 +138,20 @@ var (
 // Default returns the built-in defaults. DefaultTOML documents the same values.
 func Default() Config {
 	return Config{
-		CheckCmd:        "",
-		BaseBranch:      "main",
-		Remote:          "origin",
-		MaxParallel:     2,
-		MaxAttempts:     3,
-		OwnsPolicy:      "warn",
-		StartChildrenOn: "verified",
-		CleanOnLand:     "all",
-		WorktreeRoot:    "",
-		GateTimeout:     Duration{20 * time.Minute},
-		GateRerun:       true,
-		GateCheckBase:   true,
-		EnvAllow:        []string{},
+		CheckCmd:         "",
+		BaseBranch:       "main",
+		Remote:           "origin",
+		MaxParallel:      2,
+		MaxParallelGates: 1,
+		MaxAttempts:      3,
+		OwnsPolicy:       "warn",
+		StartChildrenOn:  "verified",
+		CleanOnLand:      "all",
+		WorktreeRoot:     "",
+		GateTimeout:      Duration{20 * time.Minute},
+		GateRerun:        true,
+		GateCheckBase:    true,
+		EnvAllow:         []string{},
 		Runner: RunnerConfig{
 			Kind:           "claude",
 			ClaudeBin:      "claude",
@@ -182,6 +186,7 @@ check_cmd = ""
 base_branch = "main"
 remote = "origin"
 max_parallel = 2          # tasks running at the same time
+max_parallel_gates = 1    # gates running at the same time, across all mill processes
 max_attempts = 3          # implement attempts per task before it is blocked
 start_children_on = "verified"   # or "published"
 owns_policy = "warn"      # changes outside a task's owns: "warn" (verifier must justify them), "enforce" (finding, no gate) or "off"
@@ -311,6 +316,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxParallel < 1 {
 		add("max_parallel must be >= 1, got %d", c.MaxParallel)
+	}
+	if c.MaxParallelGates < 1 {
+		add("max_parallel_gates must be >= 1, got %d", c.MaxParallelGates)
 	}
 	if c.MaxAttempts < 1 {
 		add("max_attempts must be >= 1, got %d", c.MaxAttempts)

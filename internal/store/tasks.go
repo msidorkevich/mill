@@ -39,6 +39,7 @@ const (
 	PhasePrepare   = "prepare"
 	PhaseImplement = "implement"
 	PhaseGate      = "gate"
+	PhaseGateWait  = "waiting for gate"
 	PhaseVerify    = "verify"
 )
 
