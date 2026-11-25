@@ -1,10 +1,12 @@
 package project
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/msidorkevich/mill/internal/gitx"
@@ -63,8 +65,8 @@ func TestFindNotInitialized(t *testing.T) {
 }
 
 func TestFindNotGitRepo(t *testing.T) {
-	// Serial: project.Find runs git with the process environment (no injected env), so
-	// GIT_CEILING_DIRECTORIES is set with t.Setenv.
+	// Serial: it sets GIT_CEILING_DIRECTORIES with t.Setenv. gitx drops GIT_* variables from
+	// the environment of the git it runs, so this only holds for git run directly.
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -73,5 +75,46 @@ func TestFindNotGitRepo(t *testing.T) {
 	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
 	if _, err := Find(dir); !errors.Is(err, ErrNotGitRepo) {
 		t.Fatalf("err = %v, want ErrNotGitRepo", err)
+	}
+}
+
+func TestGitRootOutsideRepositoryIsErrNotGitRepoAndNotCached(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := GitRoot(dir); !errors.Is(err, ErrNotGitRepo) {
+		t.Fatalf("GitRoot: err = %v, want ErrNotGitRepo", err)
+	}
+	ctx := gitx.WithCache(context.Background(), gitx.NewCache())
+	if _, err := GitRootContext(ctx, dir); !errors.Is(err, ErrNotGitRepo) {
+		t.Fatalf("GitRootContext: err = %v, want ErrNotGitRepo", err)
+	}
+	// The failure is not remembered: once dir is a repository, the same cache finds it.
+	if out, err := exec.Command(gitx.Bin(), "init", "-q", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if root, err := GitRootContext(ctx, dir); err != nil || root != dir {
+		t.Fatalf("GitRootContext after init = %q, %v; want %q", root, err, dir)
+	}
+}
+
+func TestGitRootContextReusesCachedAnswer(t *testing.T) {
+	t.Parallel()
+	root := gitInit(t)
+	var n atomic.Int64
+	ctx := gitx.WithCounter(gitx.WithCache(context.Background(), gitx.NewCache()), &n)
+	for i := 0; i < 3; i++ {
+		got, err := GitRootContext(ctx, root)
+		if err != nil || got != root {
+			t.Fatalf("GitRootContext = %q, %v; want %q", got, err, root)
+		}
+	}
+	if n.Load() != 1 {
+		t.Errorf("git started %d times for three lookups, want 1", n.Load())
 	}
 }

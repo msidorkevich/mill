@@ -2,13 +2,11 @@
 package project
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/msidorkevich/mill/internal/gitx"
 )
@@ -47,30 +45,37 @@ func PathsAt(root string) Paths {
 	}
 }
 
-// GitRoot returns the git top level for dir, with symlinks resolved.
+// GitRoot returns the git top level for dir, with symlinks resolved. It is GitRootContext
+// without a context, so its answer is never cached.
 func GitRoot(dir string) (string, error) {
-	cmd := exec.Command(gitx.Bin(), "rev-parse", "--show-toplevel")
-	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	return GitRootContext(context.Background(), dir)
+}
+
+// GitRootContext returns the git top level for dir, with symlinks resolved, through
+// gitx.TopLevel: the answer is reused when ctx carries a gitx cache. Outside a git work tree
+// the error is ErrNotGitRepo.
+func GitRootContext(ctx context.Context, dir string) (string, error) {
+	root, err := gitx.TopLevel(ctx, dir)
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && strings.Contains(stderr.String(), "not a git repository") {
+		var nr *gitx.NotRepositoryError
+		if errors.As(err, &nr) {
 			return "", ErrNotGitRepo
 		}
-		return "", fmt.Errorf("git rev-parse --show-toplevel: %w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	root := strings.TrimSpace(string(out))
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
+		return "", fmt.Errorf("find the repository of %s: %w", dir, err)
 	}
 	return root, nil
 }
 
-// Find returns the paths of the initialized repository containing dir.
+// Find returns the paths of the initialized repository containing dir. It is FindContext
+// without a context.
 func Find(dir string) (Paths, error) {
-	root, err := GitRoot(dir)
+	return FindContext(context.Background(), dir)
+}
+
+// FindContext returns the paths of the initialized repository containing dir, looking the
+// repository up through GitRootContext.
+func FindContext(ctx context.Context, dir string) (Paths, error) {
+	root, err := GitRootContext(ctx, dir)
 	if err != nil {
 		return Paths{}, err
 	}

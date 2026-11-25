@@ -147,7 +147,7 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 	if cfg.Remote == "" {
 		return res, refuse(ruleRemote, "no remote is set; set `remote` in %s", o.Paths.Config)
 	}
-	if _, err := gitx.Run(ctx, root, "remote", "get-url", "--", cfg.Remote); err != nil {
+	if _, err := gitx.RemoteURL(ctx, root, cfg.Remote); err != nil {
 		return res, refuse(ruleRemote, "remote %q is not configured in git; add it with `git remote add %s <url>` or set `remote` in %s to an existing remote",
 			cfg.Remote, cfg.Remote, o.Paths.Config)
 	}
