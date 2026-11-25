@@ -356,6 +356,7 @@ func TestCommitTreeAndTreeOf(t *testing.T) {
 	// Serial: gitx reads the process environment (no injected env), so HOME and XDG_CONFIG_HOME are set with t.Setenv.
 	t.Setenv("HOME", t.TempDir()) // no global identity
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_TEMPLATE_DIR", t.TempDir()) // empty template: git creates no .git/hooks
 	ctx := context.Background()
 	r := repo(t)
 	parent, _ := RevParse(ctx, r, "main")
@@ -371,6 +372,10 @@ func TestCommitTreeAndTreeOf(t *testing.T) {
 		t.Fatalf("TreeOf = %s, want %s", tree, want)
 	}
 	// No identity in the repository: mill's own is used; hooks never run.
+	// The hooks directory comes from git's template, which may be absent: create it first.
+	if err := os.MkdirAll(filepath.Join(r, ".git", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(r, ".git", "hooks", "commit-msg"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
