@@ -509,7 +509,7 @@ func (k *keeper) settle(ctx context.Context, t store.Task, old, br store.Branch,
 	if err := k.Store.SaveBranch(ctx, br); err != nil {
 		return fail("recording the new head", nil, err.Error())
 	}
-	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: t.ID}
+	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: t.ID, Out: k.Out}
 	if r.agent {
 		// The agent changed code: the gate and the verifier both check it.
 		g, err := publish.GateAtHead(ctx, po, t, br, "keeper")
