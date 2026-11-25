@@ -1064,7 +1064,9 @@ temporary directory, where it found no templates and created repositories withou
       and treat a command whose failures differ as the task's failure. I fixed the task with
       `mill task edit` (it now also owns `internal/cli/cli_test.go`, where the fake lives; the
       planner had missed that file).
-- [ ] **Flaky herdr host tests: `Wait: operation not permitted`.**
+- [ ] **Flaky herdr host tests: `Wait: operation not permitted`.** (Task `killgroup-eperm`
+      running; likely cause: on macOS, killing a process group whose members are all zombies
+      fails with EPERM instead of ESRCH.)
       `TestHerdrKillStopsProcessGroupAndClosesPane` (`herdr_unix_test.go:202`) and
       `TestHerdrContextCancelKills` (`herdr_unix_test.go:222`) each failed once in a full
       `make check` with `Wait: operation not permitted`. Find why waiting for the killed
@@ -1074,3 +1076,37 @@ temporary directory, where it found no templates and created repositories withou
       refuses any change to `depends_on`. Owning the file without the dependency works but
       risks a conflict between the two branches. Allow adding a dependency on a task of the
       same goal while the task is not yet running (and rebase it onto the new parent).
+
+## Fast git calls: done (goal `g17` landed 2026-11-25, $6.82)
+
+Seven tasks (PRs #98–#104). mill now starts the real git: `gitx.Bin()` resolves it once per
+process and, when `PATH` gives Apple's `/usr/bin/git` shim, asks `xcrun --find git`; a git found
+earlier on `PATH` (Homebrew) is used as is. Every place that starts git, test helpers included,
+goes through it, and `mill doctor` prints the path (`git 2.56.1 (>= 2.38.0) at
+/opt/homebrew/bin/git`). Each command (and each `keep --watch` pass) caches the lookups that do
+not change during it: work tree root, common dir, remote URL, identity; a failed git command
+drops the remote and identity answers for its directory.
+
+Whole `go test ./...` with only `/usr/bin/git` on `PATH` (no Homebrew git):
+
+| | Run 1 | Run 2 | `internal/cli` |
+|---|---|---|---|
+| before `g17` (every call through the shim) | 153s | 182s | 151s / 180s |
+| after `g17` (mill finds the real git) | 99s | 110s | 95s / 108s |
+| real git first on `PATH` (Homebrew, or measured before `g17`) | 85–94s | | 83–92s |
+
+The suite target (under 2 minutes) is met; `internal/cli` is at 95–108s against 90s. The same
+3× cheaper git call applies to every real `sync`, `keep`, publish and pipeline step.
+
+What went wrong:
+
+- **I set a wrong target.** The goal asked the lookup cache for 30% fewer git processes per
+  sync. I took the repeated lookups from a profile of a whole test, including its setup
+  (`plan`, `run`, `approve`); one sync alone saves 3 of about 49 processes. `wire-lookup-cache`
+  spent three attempts on it; the agent lowered the threshold and the verifier refused that,
+  correctly. I rewrote the criterion with `mill task edit` (fewer processes, each cached lookup
+  at most once, nothing about refs, heads or trees cached) and it passed: 5 attempts, $5.05 of
+  the goal's $6.82. Targets in a goal must come from measuring the operation the task changes.
+- **The planner missed a file.** `doctor-git-path` broke three doctor tests in `internal/cli`
+  whose fake lives in `cli_test.go`, which the task did not own; triage then blamed the base
+  (see "Triage compares commands, not failing tests" above). Fixed by `mill task edit`.
