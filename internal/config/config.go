@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -112,11 +113,14 @@ type RolesConfig struct {
 
 // Budget holds the spending limits (BG1, BG2, BG6).
 type Budget struct {
-	Count   budget.Count          `toml:"count"`
-	Attempt budget.Limits         `toml:"attempt"`
-	Size    map[string]SizeBudget `toml:"size"`
-	Task    budget.Limits         `toml:"task"`
-	Goal    budget.Limits         `toml:"goal"`
+	Count budget.Count `toml:"count"`
+	// VerifierShare is the share of a task size's attempt limits reserved before the verifier
+	// runs (0 < share <= 1).
+	VerifierShare float64               `toml:"verifier_share"`
+	Attempt       budget.Limits         `toml:"attempt"`
+	Size          map[string]SizeBudget `toml:"size"`
+	Task          budget.Limits         `toml:"task"`
+	Goal          budget.Limits         `toml:"goal"`
 }
 
 // SizeBudget overrides the attempt limits for one task size.
@@ -165,8 +169,9 @@ func Default() Config {
 		ModelTiers: []string{"haiku", "sonnet", "opus"},
 		Roles:      RolesConfig{Planner: "opus", VerifierMin: "sonnet"},
 		Budget: Budget{
-			Count:   budget.CountBillable,
-			Attempt: budget.Limits{USD: 2, Tokens: 400_000},
+			Count:         budget.CountBillable,
+			VerifierShare: 0.25,
+			Attempt:       budget.Limits{USD: 2, Tokens: 400_000},
 			Size: map[string]SizeBudget{
 				"S": {Attempt: budget.Limits{USD: 1, Tokens: 200_000}},
 				"M": {Attempt: budget.Limits{USD: 3, Tokens: 600_000}},
@@ -225,6 +230,7 @@ verifier_min = "sonnet"   # verifiers run on the implementer's model or this, wh
 
 [budget]
 count = "billable"        # tokens counted against limits: "billable" or "all" (adds cache reads)
+verifier_share = 0.25   # share of a task size's attempt limits reserved before the verifier runs (0 < share <= 1)
 
 [budget.attempt]          # per attempt; 0 or absent = no limit in that unit
 usd = 2.0
@@ -405,6 +411,9 @@ func (c Config) Validate() error {
 	if !c.Budget.Count.Valid() {
 		add("budget.count must be %q or %q, got %q", budget.CountBillable, budget.CountAll, c.Budget.Count)
 	}
+	if s := c.Budget.VerifierShare; !(s > 0 && s <= 1) {
+		add("budget.verifier_share must be > 0 and <= 1, got %v", s)
+	}
 	check := func(name string, l budget.Limits) {
 		if err := l.Validate(); err != nil {
 			add("budget.%s: %v", name, err)
@@ -426,6 +435,20 @@ func (c Config) Validate() error {
 // attempt limits with that size's non-zero values on top.
 func (c Config) AttemptBudget(size string) budget.Limits {
 	return c.Budget.Attempt.Override(c.Budget.Size[size].Attempt)
+}
+
+// VerifierBudget returns the limits reserved for the verifier of a task of the given size: each
+// non-zero unit of AttemptBudget(size) times Budget.VerifierShare. Tokens round up; a zero
+// (unlimited) unit stays zero.
+func (c Config) VerifierBudget(size string) budget.Limits {
+	l := c.AttemptBudget(size)
+	if l.USD != 0 {
+		l.USD *= c.Budget.VerifierShare
+	}
+	if l.Tokens != 0 {
+		l.Tokens = int64(math.Ceil(float64(l.Tokens) * c.Budget.VerifierShare))
+	}
+	return l
 }
 
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
