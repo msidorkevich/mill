@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/msidorkevich/mill/internal/gitx"
 )
 
 // Dir is the name of mill's directory at the repository root.
@@ -47,7 +49,7 @@ func PathsAt(root string) Paths {
 
 // GitRoot returns the git top level for dir, with symlinks resolved.
 func GitRoot(dir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd := exec.Command(gitx.Bin(), "rev-parse", "--show-toplevel")
 	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

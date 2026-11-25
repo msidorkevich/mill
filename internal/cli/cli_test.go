@@ -13,6 +13,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/doctor"
+	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 )
@@ -51,7 +52,7 @@ func gitRepo(t *testing.T) string {
 		t.Skip("git not installed")
 	}
 	dir := t.TempDir()
-	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+	if out, err := exec.Command(gitx.Bin(), "init", "-q", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 	resolved, err := filepath.EvalSymlinks(dir)
@@ -176,7 +177,7 @@ func TestInitGitignoreKeepsStateOutOfGit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(p.Runs, "log.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := exec.Command("git", "-C", root, "status", "--porcelain", "--untracked-files=all").Output()
+	out, err := exec.Command(gitx.Bin(), "-C", root, "status", "--porcelain", "--untracked-files=all").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestInitGitignoreKeepsStateOutOfGit(t *testing.T) {
 
 func gitBranch(t *testing.T, root string) string {
 	t.Helper()
-	out, err := exec.Command("git", "-C", root, "symbolic-ref", "--short", "HEAD").Output()
+	out, err := exec.Command(gitx.Bin(), "-C", root, "symbolic-ref", "--short", "HEAD").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +203,7 @@ func TestInitWritesCurrentBranchAsBase(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"master", "main", "trunk"} {
 		root := gitRepo(t) // no commits: unborn branch
-		if out, err := exec.Command("git", "-C", root, "symbolic-ref", "HEAD", "refs/heads/"+name).CombinedOutput(); err != nil {
+		if out, err := exec.Command(gitx.Bin(), "-C", root, "symbolic-ref", "HEAD", "refs/heads/"+name).CombinedOutput(); err != nil {
 			t.Fatalf("symbolic-ref: %v: %s", err, out)
 		}
 		r := run(t, root, nil, "init")
@@ -225,7 +226,7 @@ func TestInitDetachedHeadKeepsMainAndAsksToCheck(t *testing.T) {
 	git := func(args ...string) {
 		t.Helper()
 		a := append([]string{"-C", root, "-c", "user.name=t", "-c", "user.email=t@example.com"}, args...)
-		if out, err := exec.Command("git", a...).CombinedOutput(); err != nil {
+		if out, err := exec.Command(gitx.Bin(), a...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
