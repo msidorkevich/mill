@@ -466,6 +466,62 @@ func TestMaxParallelGatesDefaultsToOne(t *testing.T) {
 	}
 }
 
+func TestVerifierShareDefaultsToQuarter(t *testing.T) {
+	t.Parallel()
+	if got := Default().Budget.VerifierShare; got != 0.25 {
+		t.Fatalf("default verifier_share = %v, want 0.25", got)
+	}
+}
+
+func TestVerifierBudgetScalesAttemptLimits(t *testing.T) {
+	t.Parallel()
+	cfg := Default()
+	if got := cfg.VerifierBudget("M"); got != (budget.Limits{USD: 0.75, Tokens: 150_000}) {
+		t.Fatalf("VerifierBudget(M) = %+v, want {USD: 0.75, Tokens: 150000}", got)
+	}
+}
+
+func TestVerifierBudgetKeepsUnlimitedUnitZeroAndRoundsTokensUp(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("[budget.attempt]\nusd = 0\ntokens = 1001\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Size L has no entry, so it uses the attempt limits: no USD limit, 1001 tokens.
+	if got := cfg.VerifierBudget("L"); got != (budget.Limits{USD: 0, Tokens: 251}) {
+		t.Fatalf("VerifierBudget(L) = %+v, want {USD: 0, Tokens: 251} (250.25 rounded up)", got)
+	}
+}
+
+func TestVerifierShareOutsideZeroToOneIsRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{"0", "-0.1", "1.5"} {
+		_, err := Parse("[budget]\nverifier_share = " + v + "\n")
+		if err == nil || !strings.Contains(err.Error(), "budget.verifier_share") || !strings.Contains(err.Error(), v) {
+			t.Errorf("verifier_share = %s: err = %v, want a budget.verifier_share error naming the value", v, err)
+		}
+	}
+}
+
+func TestVerifierShareOneIsAccepted(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("[budget]\nverifier_share = 1\n")
+	if err != nil || cfg.Budget.VerifierShare != 1 {
+		t.Fatalf("verifier_share = 1: share %v, err %v", cfg.Budget.VerifierShare, err)
+	}
+}
+
+func TestDefaultTOMLDocumentsVerifierShareUnderBudget(t *testing.T) {
+	t.Parallel()
+	line := "verifier_share = 0.25   # share of a task size's attempt limits reserved before the verifier runs (0 < share <= 1)"
+	budgetAt := strings.Index(DefaultTOML, "\n[budget]\n")
+	lineAt := strings.Index(DefaultTOML, line)
+	nextAt := strings.Index(DefaultTOML, "\n[budget.attempt]")
+	if budgetAt < 0 || lineAt < budgetAt || lineAt > nextAt {
+		t.Fatalf("DefaultTOML lacks %q under [budget]", line)
+	}
+}
+
 func TestMaxParallelGatesBelowOneIsRejected(t *testing.T) {
 	t.Parallel()
 	for _, v := range []string{"0", "-1"} {
