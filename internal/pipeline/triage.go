@@ -24,7 +24,9 @@ type triageResult struct {
 
 // triage decides what a failed gate means: a flaky command passes on a re-run (gate_rerun);
 // a command that also fails on the task's starting point is not the task's fault
-// (gate_check_base). The caller checks ctx afterwards: an interrupted triage is meaningless.
+// (gate_check_base). It runs inside the gate slot the caller holds for the gate, so its
+// re-runs take turns with other gates too. The caller checks ctx afterwards: an interrupted
+// triage is meaningless.
 func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA string, opts gate.Options, g gate.Result) (triageResult, error) {
 	tr := triageResult{gate: g}
 	var failed []int // indexes into tr.gate.Commands

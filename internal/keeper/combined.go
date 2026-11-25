@@ -13,6 +13,7 @@ import (
 	"github.com/msidorkevich/mill/internal/gate"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/pipeline"
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/publish"
 	"github.com/msidorkevich/mill/internal/store"
@@ -274,10 +275,13 @@ func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResu
 		}
 		cmds = append(cmds, b.task.Checks...)
 	}
-	g := gate.Run(ctx, gate.Options{
+	g, err := c.gateInSlot(ctx, gate.Options{
 		Host: c.host, Dir: c.dir, Cmds: cmds, LogDir: filepath.Join(c.logDir, fmt.Sprintf("probe-%d", c.res.Probes)),
 		Env: c.env, Timeout: c.Cfg.GateTimeout.Duration,
 	})
+	if err != nil {
+		return probeResult{}, err
+	}
 	if ctx.Err() != nil {
 		return probeResult{}, fmt.Errorf("combined check interrupted: %w", ctx.Err())
 	}
@@ -291,6 +295,35 @@ func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResu
 	failed := publish.FailedCommands(g)
 	c.logf("combined check: probe %d [%s]: red\n%s", c.res.Probes, strings.Join(ids, " "), failed)
 	return probeResult{red: true, failed: failed}, nil
+}
+
+// combinedGateHolder is the gate slot holder name of a combined check probe.
+const combinedGateHolder = "combined check"
+
+// gateInSlot runs one probe's gate inside a gate slot (max_parallel_gates), waiting for a free
+// slot first; the slot is released on every path.
+func (c *combined) gateInSlot(ctx context.Context, o gate.Options) (g gate.Result, err error) {
+	h := store.GateHolder{TaskID: combinedGateHolder, Attempt: c.res.Probes, PID: os.Getpid()}
+	onWait := func() { c.logf("combined check: probe %d waits for a free gate slot", c.res.Probes) }
+	var release func() error
+	if c.Pipeline != nil {
+		release, err = c.Pipeline.AcquireGateSlot(ctx, h, onWait)
+	} else {
+		max := c.Cfg.MaxParallelGates
+		if max < 1 {
+			max = 1
+		}
+		release, err = c.Store.AcquireGateSlot(ctx, h, max, pipeline.DefaultGateSlotPoll, onWait)
+	}
+	if err != nil {
+		return g, fmt.Errorf("combined check: %w", err)
+	}
+	defer func() {
+		if rerr := release(); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("combined check: %w", rerr))
+		}
+	}()
+	return gate.Run(ctx, o), nil
 }
 
 // cannotRun reports why a gate result is not a verdict on the code: no commands, or a command

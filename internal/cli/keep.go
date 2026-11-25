@@ -122,6 +122,7 @@ func keepOnce(ctx context.Context, env Env, o keepOpts) (code int, busy bool) {
 	if err != nil {
 		return fail(err)
 	}
+	p.MaxParallelGates = cfg.MaxParallelGates
 	ko := keeper.Options{Store: s, Cfg: cfg, Paths: paths, Host: p.Host, Pipeline: p, Goal: o.goal, Out: out, Force: o.combined}
 
 	var kres *keeper.Result
