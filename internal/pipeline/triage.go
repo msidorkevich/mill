@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/gate"
@@ -87,27 +88,48 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 	}
 
 	var causedHere, alsoOnBase []string
+	tests := map[string]any{} // per command compared by failing tests: head, base, head_only
 	for k, i := range failed {
 		c := tr.gate.Commands[i]
-		if base.Commands[k].Passed() {
+		b := base.Commands[k]
+		if b.Passed() {
 			causedHere = append(causedHere, c.Cmd)
 			f := cmdFinding(c)
 			f.Issue += fmt.Sprintf("\nIt passes on the task's starting point %s, so the task's changes cause it.", short(startSHA))
 			tr.findings = append(tr.findings, f)
-		} else {
-			alsoOnBase = append(alsoOnBase, c.Cmd)
+			continue
 		}
+		cmp, ok := compareGoTests(c.LogPath, b.LogPath)
+		if !ok {
+			alsoOnBase = append(alsoOnBase, c.Cmd)
+			continue
+		}
+		tests[c.Cmd] = map[string]any{"head": cmp.head, "base": cmp.base, "head_only": cmp.headOnly}
+		if len(cmp.headOnly) == 0 {
+			alsoOnBase = append(alsoOnBase, c.Cmd)
+			continue
+		}
+		causedHere = append(causedHere, c.Cmd)
+		tr.findings = append(tr.findings, goTestFinding(c, cmp, startSHA))
 	}
 	for _, c := range alsoOnBase {
 		tr.findings = append(tr.findings, prompt.Finding{Source: "gate", Issue: fmt.Sprintf(
 			"`%s` fails on the task's starting point %s too, so it is not caused by this task; do not try to fix it", c, short(startSHA))})
 	}
 	if len(causedHere) == 0 {
-		if _, err := p.Store.AppendEvent(ctx, "gate-base-failing", "", t.ID, map[string]any{"attempt": n, "start": startSHA, "commands": alsoOnBase}); err != nil {
+		data := map[string]any{"attempt": n, "start": startSHA, "commands": alsoOnBase}
+		if len(tests) > 0 {
+			data["tests"] = tests
+		}
+		if _, err := p.Store.AppendEvent(ctx, "gate-base-failing", "", t.ID, data); err != nil {
 			return tr, err
 		}
 		tr.blocked = fmt.Sprintf("gate command(s) %s fail on the task's starting point %s too, so this task did not cause them; fix them on the base branch, run `mill task rebase %s`, then retry",
 			quoteCmds(alsoOnBase), short(startSHA), t.ID)
+	} else if len(tests) > 0 {
+		if _, err := p.Store.AppendEvent(ctx, "gate-base-compared", "", t.ID, map[string]any{"attempt": n, "start": startSHA, "tests": tests}); err != nil {
+			return tr, err
+		}
 	}
 	return tr, nil
 }
@@ -159,6 +181,63 @@ func (p *Pipeline) runOnBase(ctx context.Context, t store.Task, startSHA string,
 		}
 	}
 	return res, nil
+}
+
+// goTestExcerptLines caps the log excerpt in a finding about tests failing only on the head.
+const goTestExcerptLines = 60
+
+// goTestComparison is the failing tests of one gate command on the task's head and on its
+// starting point.
+type goTestComparison struct {
+	head, base         []string
+	headOnly, baseOnly []string
+	shared             []string
+}
+
+// compareGoTests reads the failing tests from the head and base logs of one command. ok is
+// false when either log cannot be read or is not go test output; the caller then compares
+// the whole command.
+func compareGoTests(headLog, baseLog string) (goTestComparison, bool) {
+	head, hok, herr := gate.GoTestFailuresFromLog(headLog)
+	base, bok, berr := gate.GoTestFailuresFromLog(baseLog)
+	if herr != nil || berr != nil || !hok || !bok {
+		return goTestComparison{}, false
+	}
+	cmp := goTestComparison{head: head, base: base, headOnly: []string{}, baseOnly: []string{}, shared: []string{}}
+	for _, h := range head {
+		if slices.Contains(base, h) {
+			cmp.shared = append(cmp.shared, h)
+		} else {
+			cmp.headOnly = append(cmp.headOnly, h)
+		}
+	}
+	for _, b := range base {
+		if !slices.Contains(head, b) {
+			cmp.baseOnly = append(cmp.baseOnly, b)
+		}
+	}
+	return cmp, true
+}
+
+// goTestFinding describes a command whose head-only failing tests the task caused, with an
+// excerpt of their output and the tests that fail on the starting point too.
+func goTestFinding(c gate.CmdResult, cmp goTestComparison, startSHA string) prompt.Finding {
+	issue := fmt.Sprintf("`%s` failed with these tests failing only on the task's head: %s. They pass on the task's starting point %s, so the task's changes cause them.",
+		c.Cmd, strings.Join(cmp.headOnly, ", "), short(startSHA))
+	excerpt := ""
+	if b, err := os.ReadFile(c.LogPath); err == nil {
+		excerpt = gate.GoTestExcerpt(string(b), cmp.headOnly, goTestExcerptLines)
+	}
+	if excerpt != "" {
+		issue += " Output of those tests:\n" + indent(excerpt)
+	} else if c.Tail != "" {
+		issue += " Output (last lines):\n" + indent(c.Tail)
+	}
+	if pre := append(append([]string(nil), cmp.shared...), cmp.baseOnly...); len(pre) > 0 {
+		slices.Sort(pre)
+		issue += fmt.Sprintf("\nAlso failing on the starting point %s, not your fault; do not try to fix them: %s.", short(startSHA), strings.Join(pre, ", "))
+	}
+	return prompt.Finding{Source: "gate", Issue: issue}
 }
 
 func cmdsAt(g gate.Result, idx []int) []string {
