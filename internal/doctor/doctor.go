@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
@@ -48,12 +49,16 @@ var MinGit = [3]int{2, 38, 0}
 // Options configure Run. Zero values use the real environment.
 type Options struct {
 	Dir      string                                            // directory to check from
+	GitBin   func() string                                     // git binary mill runs; defaults to gitx.Bin
 	LookPath func(string) (string, error)                      // defaults to exec.LookPath
 	Output   func(name string, args ...string) (string, error) // runs a command, returns stdout
 	Getenv   func(string) string                               // defaults to os.Getenv
 }
 
 func (o *Options) defaults() {
+	if o.GitBin == nil {
+		o.GitBin = gitx.Bin
+	}
 	if o.LookPath == nil {
 		o.LookPath = exec.LookPath
 	}
@@ -78,16 +83,17 @@ func Run(ctx context.Context, opts Options) Report {
 
 	// git
 	gitOK := false
-	if _, err := opts.LookPath("git"); err != nil {
-		add("git", Fail, "git not found on PATH")
-	} else if out, err := opts.Output("git", "--version"); err != nil {
-		add("git", Fail, "git --version failed: %v", err)
+	gitBin := opts.GitBin()
+	if _, err := opts.LookPath(gitBin); err != nil {
+		add("git", Fail, "git not found at %s: install git or put it on PATH", gitBin)
+	} else if out, err := opts.Output(gitBin, "--version"); err != nil {
+		add("git", Fail, "git --version failed at %s: %v", gitBin, err)
 	} else if v, err := ParseGitVersion(out); err != nil {
-		add("git", Fail, "%v", err)
+		add("git", Fail, "%v (from %s)", err, gitBin)
 	} else if !atLeast(v, MinGit) {
-		add("git", Fail, "git %s is too old; need >= %s", fmtVer(v), fmtVer(MinGit))
+		add("git", Fail, "git %s at %s is too old; need >= %s", fmtVer(v), gitBin, fmtVer(MinGit))
 	} else {
-		add("git", OK, "git %s (>= %s)", fmtVer(v), fmtVer(MinGit))
+		add("git", OK, "git %s (>= %s) at %s", fmtVer(v), fmtVer(MinGit), gitBin)
 		gitOK = true
 	}
 
