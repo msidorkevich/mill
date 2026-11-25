@@ -103,12 +103,3 @@ func (h *execHandle) Wait() (Exit, error) {
 }
 
 func (h *execHandle) Kill() error { return KillGroup(h.cmd.Process.Pid) }
-
-// KillGroup sends SIGKILL to the whole process group. A group that is already gone is not
-// an error.
-func KillGroup(pgid int) error {
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
-	}
-	return nil
-}
