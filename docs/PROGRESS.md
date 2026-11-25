@@ -760,7 +760,8 @@ together: they compile and their packages pass).
       parallel. The implementer then did the sibling's work in the sibling's files, and the two
       branches collided. The verifier prompt should list the other tasks of the goal with their
       files and summaries, and treat findings in another task's scope as out of scope.
-- [ ] **An edit to another task's files is only a warning.** The owns check recorded
+- [x] **An edit to another task's files is only a warning.** (Fixed in `g16`, task
+      `owns-sibling-finding`.) The owns check recorded
       `owns-outside` for five files that belonged to a sibling task and let the attempt pass.
       When a file is owned by another task of the same goal, the owns check should fail the
       attempt (revert hint included), not warn.
@@ -956,12 +957,14 @@ All 11 tasks landed (PRs #73–#78, #80–#84), $21.02 in total. What changed fo
 
 Findings from running it:
 
-- [ ] **The budget check blocks a task that only needs a verifier.** `pipelined-restacks`
+- [x] **The budget check blocks a task that only needs a verifier.** (Fixed in `g16`:
+      `[budget] verifier_share`, default 0.25 of an attempt.) `pipelined-restacks`
       passed its gate on attempt 2 with $5.51 of its $8 task budget spent, and was blocked
       because "an attempt may use $3.00". Only a verifier run (about $0.55) was left. The check
       should reserve what the next step costs (the verifier after a passed gate, a whole attempt
       only before an implementer). It was unblocked by raising the task budget for one run.
-- [ ] **`--retry-blocked` on a task blocked in `verify` reruns the implementer.** The
+- [x] **`--retry-blocked` on a task blocked in `verify` reruns the implementer.** (Fixed in
+      `g16`, task `resume-at-verifier`.) The
       implementer found nothing to do ($0.40, 8 minutes) before the verifier ran. A task
       blocked after a passed gate should resume at the verifier.
 - [ ] **Background re-publishes fetch while the next task is restacked.** Since pipelined
@@ -1012,6 +1015,40 @@ cache warm. Seven settings, two rounds, the settings alternating so heat and bac
   goroutine timing (task 3 is either blocked or skipped, both correct). Fixed by the task
   `flaky-pipelined-keep-test`.
 
-- [ ] **Find the slowest `internal/cli` tests** (`go test -json`, per-test elapsed time) and
+- [x] **Find the slowest `internal/cli` tests** (done; see "The macOS git shim" below) (`go test -json`, per-test elapsed time) and
       speed them up or split the package, so that `internal/cli` stops being the gate's
       critical path. The next step toward a 90-second gate.
+
+## Budget, retry and owns fixes: done (goal `g16` landed 2026-11-25, $3.43)
+
+Eight tasks (PRs #88–#95), every one verified on its first attempt; the planner estimated
+$12–53. Before the verifier, the budget check now reserves `verifier_share` (default 0.25) of an
+attempt instead of a whole one. A task blocked in `verify` after a passed gate resumes at the
+verifier on `--retry-blocked` ("resuming at the verifier"), only when the head and worktree are
+unchanged and the passed gate is recorded. An edit to a file owned by a sibling task that has
+not landed fails the attempt under `warn` too, and `mill review` names the owner. The approval
+queue in `mill keep` published the goal in three waves (two parents, then the fan-in task and its
+chain, then the README) with one combined check over all five ready branches.
+
+## The macOS git shim: the biggest cost in tests and in mill
+
+Profiling `internal/cli` alone: 77s for 212 tests whose times add up to 589s; no single test
+dominates (the slowest takes 15s; 84 take 3–10s). One slow sync test runs 182 git commands. On
+macOS `/usr/bin/git` is Apple's `xcrun` shim, which finds the developer directory and then starts
+the real git: `git rev-parse HEAD` takes 18.7 ms median through it and 5.9 ms when the real
+binary (`/Library/Developer/CommandLineTools/usr/bin/git`) is started directly.
+
+| Whole `go test ./...` | Run 1 | Run 2 | `internal/cli` |
+|---|---|---|---|
+| `/usr/bin/git` (the shim) | 153s | 182s | 151s / 180s |
+| real git first on PATH | 94s | 88s | 92s / 86s |
+| real git, confirmation run | 85s | | 83s |
+
+So most of the test time was the shim, and every real `mill sync`, `keep`, publish and pipeline
+step pays the same per git call. The same test also repeats lookups whose answers do not change
+during a command (`config user.email` 12 times, `rev-parse --show-toplevel` 11 times,
+`remote get-url` 7 times). Planned as goal `g17`: mill resolves the real git once (asking
+`xcrun --find git` when `PATH` gives the shim), caches per-command lookups, and `mill doctor`
+shows the git it uses. (The two failing runs above failed only because I linked git into a
+temporary directory, where it found no templates and created repositories without
+`.git/hooks`; one test assumed that directory, and `g17` fixes that too.)
