@@ -198,6 +198,16 @@ task's `owns` (a task with empty `owns` is never restricted):
   for that attempt.
 - `"off"`: no check.
 
+**Files owned by a sibling.** Under `warn` and `enforce`, a changed file that another unlanded task
+of the same goal owns is treated as a sibling-owned file. Under both `warn` and `enforce` the
+attempt fails at once, without running the gate or the verifier, and each such file becomes a
+finding for the next attempt. The finding names the owning task and the revert command, for example
+`changed a file owned by task g1/b; revert it with git restore --source <sha> -- a.go (delete it
+instead if the task created it), or edit the task to widen its owns`. A file owned by a task that
+already landed, or by no task, is an ordinary outside-owns file. `mill review show g1/a` lists each
+`owns-outside` file with its owner, as `owns-outside: a.go (owned by g1/b)`, so you can see which
+task the change belongs to. Under `off` there is no check and no owner is shown.
+
 When gate commands fail, mill triages them before handing them to the implementer (not when no
 checks are configured, and not when the run was interrupted):
 
@@ -336,6 +346,21 @@ until the reset time plus one minute (15 minutes when the reset time is unknown)
 rate-limited tasks back to pending and continues; Ctrl-C during the wait stops like any other
 interruption. `mill task run` ends a rate-limited task blocked (exit 4) with the same reason, and
 a rate-limited `mill plan "<goal>"` prints the limit and its reset time and creates no goal.
+
+**Verifier budget.** `verifier_share` in the `[budget]` section of `.mill/config.toml` (default
+`0.25`, must be above 0 and at most 1) is the share of a task size's attempt limits that mill
+reserves for the verifier. Before the verifier runs, mill checks the task and goal budgets against
+that share instead of a whole attempt, so a task whose budget covers the verifier but not another
+attempt still gets its verdict. When the budget does not cover it, the task is blocked in verify
+with a reason such as `task budget cannot cover the verifier: spent $0.90 of $1.00, the verifier
+may use $0.25`.
+
+**Resuming at the verifier.** A task blocked in verify (for example by the verifier budget above)
+after its gate passed resumes there when you retry it: `mill run g1 --retry-blocked` or
+`mill task run --file <file> --retry` logs `resuming at the verifier (gate passed at <sha>)` and
+runs only the verifier, with no implementer attempt and no gate run. This applies only when the
+task's branch head is still the head its gate passed at, and the worktree is clean. Otherwise the
+retry starts a new implementer attempt as before.
 
 **Interrupted or killed runs.** After Ctrl-C, a crash or `kill -9`, nothing is lost. The next
 `mill run g1` recovers the half-finished tasks and continues where it stopped. Only the
