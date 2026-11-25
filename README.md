@@ -113,6 +113,17 @@ mill clean                      # remove worktrees and local branches of landed 
 mill stats models               # first-pass rate, avg attempts and avg $ by size, complexity and first-attempt model (--json)
 ```
 
+`mill watch` shows each running attempt's stage. A task being run (`mill run`, `mill task run`)
+that is waiting for a gate slot (see `max_parallel_gates` below) shows the stage
+`waiting for gate` with no detail; once its gate starts, the stage is `gate` and the detail is
+the newest gate log's last line. Gates that `mill sync` and `mill keep` re-run after restacks
+are not listed there.
+
+`mill plan` and `mill plan show` warn when a task's `checks` contain a whole-package `go test`
+without `-run` while `check_cmd` already runs `go test ./...` (or `make check`): the gate runs
+those tests anyway, so the task check should be narrow, for example
+`go test -run 'TestName' ./pkg/`. The warning does not stop the plan from being created.
+
 `mill goal graph g1` draws one row per task in dependency order, with ASCII lines from each
 task to its dependencies, the status mark (landed ✓, published ↑, verified ●, running ▶,
 pending ○, blocked/failed ✗), the task id, its status and its direct dependencies after `←`, then
@@ -170,7 +181,8 @@ picks up goals approved with `mill plan approve` and tasks queued with `mill tas
 runs; `mill task run` joins the scheduler and waits for its task's result (same exit codes as
 before). If no scheduler is running, `mill task run` starts one for that task. The scheduler
 starts a task once all its dependencies are verified, up to `max_parallel` at a time, and never
-runs two tasks whose `owns` overlap together; both limits apply across all goals. Each task gets the branch
+runs two tasks whose `owns` overlap together; both limits apply across all goals. Gates are
+limited separately by `max_parallel_gates` (see gate slots below). Each task gets the branch
 `mill/<goal>/<task>`, built on its dependencies' branches. When every task is verified the goal
 is `done` (exit 0). When a task blocks or fails, the others continue; the goal then ends
 `blocked` with a reason naming the stopped tasks and the ones waiting on them (exit 4). Ctrl-C
@@ -206,6 +218,21 @@ checks are configured, and not when the run was interrupted):
      and uses the plain gate findings.
 
 Set either setting to `false` to skip that step.
+
+**Gate slots.** `max_parallel_gates` in `.mill/config.toml` (default `1`, at least `1`) sets how
+many gates run at the same time across all mill processes. It is separate from `max_parallel`:
+agents still run in parallel (up to `max_parallel`), while their gates take turns in the gate
+slots. A task being run (`mill run`, `mill task run`) that is waiting for a slot is shown as
+`waiting for gate` by `mill watch`. The same slots bound the gates that `mill keep` and
+`mill sync` re-run after restacks; there a wait is not shown by `mill watch`, and the command
+prints `<task>: waiting for a free gate slot (max_parallel_gates = N)` instead.
+
+**Gate reuse.** Before a gate runs, mill checks whether the same tree already passed the same
+`check_cmd` and the same task checks. If it did, the gate is not run again and no slot is taken:
+mill prints `gate reused (tree <sha>)` and records the attempt's gate as reused. Only passing
+gates are reused; a failure always runs again, and so does a gate that passed only after a triage
+re-run. A change to `check_cmd` or to the task's checks changes the fingerprint, so the gate
+runs again.
 
 If an `$EDITOR` result is invalid, mill prints the problems and keeps the edited file; fix it and
 run `mill plan edit g1 --file <path>`.
@@ -367,6 +394,8 @@ a fan-in task waits for its other dependencies to land. Approving again force-pu
 `ancestor` (merge commit), `patch` (squash or rebase merge with the same patch) or `trailer`
 (the `Mill-Task` trailer survived an edited merge). Children of a landed task are restacked
 onto `<remote>/<base_branch>`, re-gated and re-published, so their review branches track main.
+In a goal, `mill sync` pipelines these restacks: a child is restacked while its parent's gate is
+still running, and the gates take turns in `max_parallel_gates` slots.
 When every task of a goal has landed, the goal becomes `landed`.
 
 **Cleaning on land.** At the end of each sync (so also during `mill keep`), after the children
@@ -407,6 +436,9 @@ a run and leaves a task that is being worked on alone, naming it as busy. One pa
 - **Fetches and syncs** like `mill sync`: detects merged reviews and marks them landed.
 - **Rebases lazily.** Only branches that would conflict with their base are rebased; the others
   are left alone. Fan-in tasks are restacked onto their moved dependencies.
+- **Pipelines restacks**, as `mill sync` does. In a goal, a child is restacked while its
+  parent's gate is still running; the gates take turns in `max_parallel_gates` slots. A
+  restacked tree that already passed the same gate is reused (see gate reuse above).
 - **Reuses recorded resolutions (rerere).** Conflicts that were resolved before are replayed.
 - **Asks the resolver agent** for the conflicts rerere does not know.
 - **Fixes red gates.** When a restacked branch's gate turns red, the fixer agent runs.
