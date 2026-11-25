@@ -125,7 +125,12 @@ func init() {
 }
 
 // Run executes the command line args (without the program name) and returns an exit code.
+// Each call answers repeated git lookups (work tree root, common dir, remote URLs, identity)
+// from a cache of its own, unless ctx already carries one or opts out with gitx.WithoutCache.
 func Run(ctx context.Context, env Env, args []string) int {
+	if gitx.CacheFrom(ctx) == nil {
+		ctx = gitx.WithCache(ctx, gitx.NewCache()) // no-op when ctx opted out
+	}
 	if len(args) == 0 {
 		usage(env.Stderr)
 		return ExitUsage
@@ -192,7 +197,7 @@ func runInit(ctx context.Context, env Env, args []string) int {
 	if code, ok := parse(fs, args); !ok {
 		return code
 	}
-	root, err := project.GitRoot(env.Dir)
+	root, err := project.GitRootContext(ctx, env.Dir)
 	if err != nil {
 		fmt.Fprintf(env.Stderr, "mill init: %v\n", err)
 		return ExitError

@@ -60,7 +60,8 @@ func runKeep(ctx context.Context, env Env, args []string) int {
 	}
 	o := keepOpts{goal: goal, combined: *combined, asJSON: *asJSON}
 	for {
-		code, busy := keepOnce(ctx, env, o)
+		// Each pass looks git up afresh: remotes and identities may change between passes.
+		code, busy := keepOnce(gitx.WithCache(ctx, gitx.NewCache()), env, o)
 		if code != ExitOK {
 			if *watch && ctx.Err() != nil {
 				return ExitOK

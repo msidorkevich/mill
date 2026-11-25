@@ -64,7 +64,7 @@ func runTask(ctx context.Context, env Env, args []string) int {
 
 // openProject finds the repository, loads its config and opens its store.
 func openProject(ctx context.Context, env Env) (project.Paths, config.Config, *store.Store, error) {
-	paths, err := project.Find(env.Dir)
+	paths, err := project.FindContext(ctx, env.Dir)
 	if err != nil {
 		return paths, config.Config{}, nil, err
 	}

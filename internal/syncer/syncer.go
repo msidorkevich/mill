@@ -427,7 +427,7 @@ func Sync(ctx context.Context, o Options) (Result, error) {
 	if o.Cfg.Remote == "" {
 		return res, fmt.Errorf("no remote is set; set `remote` in %s", o.Paths.Config)
 	}
-	if _, err := gitx.Run(ctx, root, "remote", "get-url", "--", o.Cfg.Remote); err != nil {
+	if _, err := gitx.RemoteURL(ctx, root, o.Cfg.Remote); err != nil {
 		return res, fmt.Errorf("remote %q is not configured in git; add it with `git remote add %s <url>` or set `remote` in %s to an existing remote",
 			o.Cfg.Remote, o.Cfg.Remote, o.Paths.Config)
 	}

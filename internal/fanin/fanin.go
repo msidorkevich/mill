@@ -272,7 +272,7 @@ func deepestUnlanded(pl plan.Plan, id string, unlanded func(string) bool) string
 // failure is returned as a warning; it fails only when there is no remote-tracking branch.
 func baseTip(ctx context.Context, cfg config.Config, root string) (ref, tip, warning string, err error) {
 	if cfg.Remote != "" {
-		if _, err := gitx.Run(ctx, root, "remote", "get-url", "--", cfg.Remote); err == nil {
+		if _, err := gitx.RemoteURL(ctx, root, cfg.Remote); err == nil {
 			ref = cfg.Remote + "/" + cfg.BaseBranch
 			fetchErr := gitx.Fetch(ctx, root, cfg.Remote)
 			tip, err := gitx.RevParse(ctx, root, "refs/remotes/"+ref)
