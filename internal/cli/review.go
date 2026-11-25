@@ -121,6 +121,24 @@ func encodeJSON(env Env, name string, v any) int {
 type reviewEvent struct {
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data"`
+	// lines is the text rendering of an owns-outside event, one line per file; unexported so
+	// --json keeps Data as it is.
+	lines []string
+}
+
+// ownsOutsideLines renders the files of an owns-outside event: "owns-outside: <file> (owned
+// by <ids>)" for a file a sibling task owns, "owns-outside: <file>" otherwise. Events written
+// before owners were recorded have no owners and render as unowned.
+func ownsOutsideLines(files []string, owners map[string][]string) []string {
+	lines := make([]string, 0, len(files))
+	for _, f := range files {
+		line := "owns-outside: " + f
+		if ids := owners[f]; len(ids) > 0 {
+			line += " (owned by " + strings.Join(ids, ", ") + ")"
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 type reviewView struct {
@@ -221,13 +239,19 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 		switch e.Kind {
 		case "gate-flaky", "owns-outside", "gate-base-failing":
 			var d struct {
-				Attempt int `json:"attempt"`
+				Attempt int                 `json:"attempt"`
+				Files   []string            `json:"files"`
+				Owners  map[string][]string `json:"owners"`
 			}
 			if err := json.Unmarshal(e.Data, &d); err != nil {
 				return fail(fmt.Errorf("corrupt %s event %d: %w", e.Kind, e.Seq, err))
 			}
 			if d.Attempt == v.Attempts {
-				v.Events = append(v.Events, reviewEvent{e.Kind, e.Data})
+				ev := reviewEvent{Kind: e.Kind, Data: e.Data}
+				if e.Kind == "owns-outside" {
+					ev.lines = ownsOutsideLines(d.Files, d.Owners)
+				}
+				v.Events = append(v.Events, ev)
 			}
 		}
 	}
@@ -304,6 +328,12 @@ func printReview(env Env, v reviewView) {
 	if len(v.Events) > 0 {
 		fmt.Fprintf(w, "\nNotes from attempt %d:\n", v.Attempts)
 		for _, e := range v.Events {
+			if e.Kind == "owns-outside" {
+				for _, l := range e.lines {
+					fmt.Fprintf(w, "  %s\n", l)
+				}
+				continue
+			}
 			fmt.Fprintf(w, "  %s: %s\n", e.Kind, string(e.Data))
 		}
 	}
