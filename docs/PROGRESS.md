@@ -1064,9 +1064,11 @@ temporary directory, where it found no templates and created repositories withou
       and treat a command whose failures differ as the task's failure. I fixed the task with
       `mill task edit` (it now also owns `internal/cli/cli_test.go`, where the fake lives; the
       planner had missed that file).
-- [ ] **Flaky herdr host tests: `Wait: operation not permitted`.** (Task `killgroup-eperm`
-      running; likely cause: on macOS, killing a process group whose members are all zombies
-      fails with EPERM instead of ESRCH.)
+- [x] **Flaky herdr host tests: `Wait: operation not permitted`.** (Fixed by task
+      `killgroup-eperm`, PR #106. Cause confirmed with a probe: on macOS, killing a process group
+      whose members are all unreaped zombies fails with EPERM instead of ESRCH; all 373 EPERM
+      results in a stress loop had only zombie members. `KillGroup` now checks the members with
+      `ps` on EPERM and fails only when one is still alive.)
       `TestHerdrKillStopsProcessGroupAndClosesPane` (`herdr_unix_test.go:202`) and
       `TestHerdrContextCancelKills` (`herdr_unix_test.go:222`) each failed once in a full
       `make check` with `Wait: operation not permitted`. Find why waiting for the killed
