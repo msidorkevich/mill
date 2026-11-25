@@ -926,15 +926,16 @@ almost all creating git repositories and starting git processes. On 8 cores that
 process startup and file-system work instead of speeding up. The goal's target (`internal/cli`
 under 90s) is not met yet.
 
-- [ ] **Measure fairly** on an idle machine: the whole suite with default flags, then with
+- [x] **Measure fairly** on an idle machine: the whole suite with default flags, then with
       `-p 4`, `-parallel 4`, `-p 2 -parallel 4` and similar combinations, each twice; compare
-      with the serial baseline (`-parallel 1`).
-- [ ] **Set the best combination** in the `Makefile` (`GOTESTFLAGS`, so `check_cmd` uses it) in
-      a small PR, with the measured numbers in its description.
-- [ ] **If no setting beats the serial run,** say so here; the rest of `g15` (gate limit, reused
+      with the serial baseline (`-parallel 1`). (Done; see "Fair measurement" below.)
+- [x] **Set the best combination** in the `Makefile` (`GOTESTFLAGS`, so `check_cmd` uses it) in
+      a small PR, with the measured numbers in its description. (Not needed: the default flags
+      won, so the `Makefile` stays as it is.)
+- [x] **If no setting beats the serial run,** say so here; the rest of `g15` (gate limit, reused
       gate results, pipelined restacks) then carries the speed-up by saving whole gate runs,
       and test speed needs another approach (fewer git processes per test, shared fixture
-      repositories).
+      repositories). (Every setting beat the serial run.)
 - [x] Review the remaining `g15` tasks with this in mind: `max_parallel_gates = 1` matters more
       than expected, because parallel test runs compete for the same cores. (Reviewed; the
       default stays 1.)
@@ -985,3 +986,32 @@ measurement above was slower than the serial run. Also seen eating CPU next to m
   by the fair measurement, not by the core count.
 - [ ] Consider running gates under `nice`, so agents and the terminal stay responsive while a
       gate runs.
+
+### Fair measurement: parallel tests are 1.8× faster
+
+`go test -count=1 ./...` on master `acc3b73` (all of `g15`), on power, no mill run, the build
+cache warm. Seven settings, two rounds, the settings alternating so heat and background load
+(AirBuddy, `fseventsd`, Spotlight) hit every setting alike. Wall seconds:
+
+| Settings | Round 1 | Round 2 | `internal/cli` |
+|---|---|---|---|
+| `-parallel 1` (tests serial, as before `g15`) | 247 | 238 | 246 / 235 |
+| **default (`-p 8 -parallel 8`)** | **136** | **129** | 133 / 127 |
+| `-p 4` | 140 | 141 | 138 / 139 |
+| `-parallel 4` | 147 | 152 | 145 / 151 |
+| `-p 4 -parallel 4` | 141 | 171 | 140 / 169 |
+| `-p 2 -parallel 4` | 149 | 139 | 132 / 122 |
+| `-p 4 -parallel 2` | 179 | 153 | 178 / 151 |
+
+- The default flags are fastest, so the `Makefile` keeps them. The slowdown in the first
+  measurement came from the agent running next to it, not from oversubscription.
+- `internal/cli` is the critical path: the whole run takes as long as that one package. It went
+  from about 240s to 130s; the goal's target of 90s is not met. The whole suite went from about
+  4 minutes to about 2m10s (target: under 2 minutes). Gates now take 2m10s–2m30s.
+- One run of 14 failed: `TestPipelinedRestackKeepParentGateFailureBlocksChild` depends on
+  goroutine timing (task 3 is either blocked or skipped, both correct). Fixed by the task
+  `flaky-pipelined-keep-test`.
+
+- [ ] **Find the slowest `internal/cli` tests** (`go test -json`, per-test elapsed time) and
+      speed them up or split the package, so that `internal/cli` stops being the gate's
+      critical path. The next step toward a 90-second gate.
