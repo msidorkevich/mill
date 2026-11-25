@@ -75,7 +75,8 @@ func (k *keeper) publishQueued(ctx context.Context, id string) error {
 		k.logf("%s: approval cleared: %s", t.ID, reason)
 		return nil
 	}
-	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: t.ID}
+	po := k.publishOptions(t.ID)
+	po.Out = nil
 	pr, err := publish.Publish(ctx, po)
 	if _, ok := publish.ParentRefusal(err); ok {
 		k.res.Queue.Waiting = append(k.res.Queue.Waiting, QueueWaiting{TaskID: t.ID, Reason: err.Error()})

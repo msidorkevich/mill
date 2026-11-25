@@ -8,6 +8,7 @@
 package syncer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/cleanup"
 	"github.com/msidorkevich/mill/internal/config"
@@ -56,6 +59,12 @@ type Options struct {
 	// Claimer claims each task before the sync changes it; the zero value means
 	// store.NewClaimer("sync").
 	Claimer store.Claimer
+	// MaxParallelGates bounds the gates re-run after restacks at the same time (and across
+	// every mill process); zero means Cfg.MaxParallelGates.
+	MaxParallelGates int
+	// GateSlotPoll is how often a gate waiting for a slot checks again; zero means
+	// publish.DefaultGateSlotPoll.
+	GateSlotPoll time.Duration
 }
 
 // Busy is a task the sync would have changed but left alone because it is being worked on.
@@ -159,6 +168,202 @@ type syncer struct {
 	Options
 	upstream string // <remote>/<base_branch>
 	res      *Result
+	step     *Step[*Result] // the task being restacked in a pipelined goal; nil runs inline
+}
+
+// add appends the lists of o to r.
+func (r *Result) add(o *Result) {
+	r.Landed = append(r.Landed, o.Landed...)
+	r.Restacked = append(r.Restacked, o.Restacked...)
+	r.Republished = append(r.Republished, o.Republished...)
+	r.NeedsRepublish = append(r.NeedsRepublish, o.NeedsRepublish...)
+	r.Blocked = append(r.Blocked, o.Blocked...)
+	r.Restored = append(r.Restored, o.Restored...)
+	r.GoalsLanded = append(r.GoalsLanded, o.GoalsLanded...)
+	r.GateRed = append(r.GateRed, o.GateRed...)
+	r.Cleaned = append(r.Cleaned, o.Cleaned...)
+	r.NotCleaned = append(r.NotCleaned, o.NotCleaned...)
+	r.Busy = append(r.Busy, o.Busy...)
+}
+
+// publishOptions are the publish options for task id.
+func (s *syncer) publishOptions(id string) publish.Options {
+	return publish.Options{Store: s.Store, Cfg: s.Cfg, Paths: s.Paths, Host: s.Host, TaskID: id, Out: s.Out,
+		MaxParallelGates: s.MaxParallelGates, GateSlotPoll: s.GateSlotPoll}
+}
+
+// Stack pipelines the restacks of a goal's tasks (sync and the keeper): restacking a child
+// needs only its parent's new head, so each task is restacked in stack order while the gate
+// and publish of the tasks restacked before it run in their own goroutines (bounded by the gate
+// slots). A step whose parent failed is told so and its gate is cancelled. Results and
+// progress are kept per step and handed back in stack order.
+type Stack[R any] struct {
+	steps []*Step[R]
+	byID  map[string]*Step[R]
+	next  int        // first step not yet drained
+	pub   sync.Mutex // one publish at a time: they fetch and push in the shared repository
+}
+
+// NewStack is an empty stack.
+func NewStack[R any]() *Stack[R] { return &Stack[R]{byID: map[string]*Step[R]{}} }
+
+// Step is one task of a Stack.
+type Step[R any] struct {
+	TaskID  string
+	Res     R            // what the step did; written only by the step
+	Out     bytes.Buffer // its progress lines
+	st      *Stack[R]
+	parents []*Step[R]
+	job     func(ctx, gctx context.Context) (ok bool, err error)
+	started bool
+	done    chan struct{}
+	ok      bool // set before done closes: children may go on
+	stale   bool // set by the job: restacked onto a parent head that moved since; restack again
+	err     error
+}
+
+// Add appends the step of task id, whose dependencies are deps, with result res.
+func (st *Stack[R]) Add(id string, deps []string, res R) *Step[R] {
+	p := &Step[R]{TaskID: id, Res: res, st: st, done: make(chan struct{})}
+	for _, d := range deps {
+		if q, ok := st.byID[d]; ok {
+			p.parents = append(p.parents, q)
+		}
+	}
+	st.steps = append(st.steps, p)
+	st.byID[id] = p
+	return p
+}
+
+// Defer sets the work to run in the background once the restack is done (the gate and
+// publish). gctx is cancelled when a parent fails; ok false tells the children to stop.
+func (p *Step[R]) Defer(job func(ctx, gctx context.Context) (ok bool, err error)) { p.job = job }
+
+// Pending reports whether deferred work waits to be started.
+func (p *Step[R]) Pending() bool { return p.job != nil && !p.started }
+
+// Drop discards deferred work that will not run.
+func (p *Step[R]) Drop() { p.job = nil }
+
+// Start runs the deferred work in a goroutine; release runs once it is done, on every path.
+func (p *Step[R]) Start(ctx context.Context, release func() error) {
+	p.started = true
+	go func() {
+		gctx, cancel := context.WithCancel(ctx)
+		stop := make(chan struct{})
+		go func() {
+			for _, q := range p.parents {
+				select {
+				case <-q.done:
+					if !q.ok {
+						cancel()
+						return
+					}
+				case <-stop:
+					return
+				}
+			}
+		}()
+		ok, err := p.job(ctx, gctx)
+		close(stop)
+		cancel()
+		if rerr := release(); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
+		p.ok, p.err = ok && err == nil, err
+		close(p.done)
+	}()
+}
+
+// Finish ends a step whose work did not go to the background. It does nothing once started.
+func (p *Step[R]) Finish() {
+	if p.started {
+		return
+	}
+	p.started = true
+	p.ok = true
+	close(p.done)
+}
+
+// WaitParents waits until the step's parents in the stack are done and returns the first
+// that failed, "" when none did. A stale parent does not count as failed (see StaleParent).
+func (p *Step[R]) WaitParents(ctx context.Context) (string, error) {
+	for _, q := range p.parents {
+		select {
+		case <-q.done:
+			if !q.ok && !q.stale {
+				return q.TaskID, nil
+			}
+		case <-ctx.Done():
+			return "", fmt.Errorf("wait for %s: %w", q.TaskID, ctx.Err())
+		}
+	}
+	return "", nil
+}
+
+// StaleParent is the first parent marked stale, "" when none is. Call it after WaitParents.
+func (p *Step[R]) StaleParent() string {
+	for _, q := range p.parents {
+		if q.stale {
+			return q.TaskID
+		}
+	}
+	return ""
+}
+
+// ParentIDs are the tasks of the step's parents in the stack.
+func (p *Step[R]) ParentIDs() []string {
+	ids := make([]string, 0, len(p.parents))
+	for _, q := range p.parents {
+		ids = append(ids, q.TaskID)
+	}
+	return ids
+}
+
+// MarkStale records, from the step's deferred work, that the task was restacked onto a parent
+// head that has moved since: it is neither gated nor published and must be restacked again.
+// Its children count as stale too.
+func (p *Step[R]) MarkStale() { p.stale = true }
+
+// Stale lists the tasks of the drained steps marked stale, in stack order.
+func (st *Stack[R]) Stale() []string {
+	var ids []string
+	for _, p := range st.steps[:st.next] {
+		if p.stale {
+			ids = append(ids, p.TaskID)
+		}
+	}
+	return ids
+}
+
+// Serialize runs fn while no other step of the stack runs a serialized fn.
+func (p *Step[R]) Serialize(fn func()) {
+	p.st.pub.Lock()
+	defer p.st.pub.Unlock()
+	fn()
+}
+
+// Drain hands the finished steps not handed yet to emit, in stack order, stopping at the
+// first one still running; with wait it waits for every step. It returns the errors of the
+// steps it handed.
+func (st *Stack[R]) Drain(wait bool, emit func(*Step[R])) error {
+	var errs []error
+	for st.next < len(st.steps) {
+		p := st.steps[st.next]
+		if wait {
+			<-p.done
+		} else {
+			select {
+			case <-p.done:
+			default:
+				return errors.Join(errs...)
+			}
+		}
+		emit(p)
+		errs = append(errs, p.err)
+		st.next++
+	}
+	return errors.Join(errs...)
 }
 
 func (s *syncer) logf(format string, a ...any) {
@@ -188,7 +393,16 @@ func (s *syncer) withClaim(ctx context.Context, id, status string, fn func() err
 		}
 		return fn()
 	}()
-	if rerr := s.Store.ReleaseClaims(context.WithoutCancel(ctx), s.Claimer, []string{id}); rerr != nil {
+	release := func() error { return s.Store.ReleaseClaims(context.WithoutCancel(ctx), s.Claimer, []string{id}) }
+	if s.step != nil && s.step.Pending() {
+		if ferr == nil {
+			// The gate and publish go on in the background; they keep the claim.
+			s.step.Start(ctx, release)
+			return nil
+		}
+		s.step.Drop()
+	}
+	if rerr := release(); rerr != nil {
 		return errors.Join(ferr, rerr)
 	}
 	return ferr
@@ -601,23 +815,48 @@ func (s *syncer) restackGoal(ctx context.Context, g store.Goal) error {
 			order = append(order, store.TaskID(g.ID, l))
 		}
 	}
+	// Each task is restacked in order; its gate and publish run in the background while the
+	// next one is restacked. Results and progress are handed back in stack order.
+	st := NewStack[*Result]()
+	emit := func(p *Step[*Result]) {
+		s.res.add(p.Res)
+		if s.Out != nil && p.Out.Len() > 0 {
+			s.Out.Write(p.Out.Bytes())
+		}
+	}
+	err = s.restackSteps(ctx, order, st, emit)
+	return errors.Join(err, st.Drain(true, emit))
+}
+
+// restackSteps restacks the tasks in order, one step of st each.
+func (s *syncer) restackSteps(ctx context.Context, order []string, st *Stack[*Result], emit func(*Step[*Result])) error {
 	for _, id := range order {
+		if err := st.Drain(false, emit); err != nil {
+			return err
+		}
 		// Reload: an earlier step may have changed it.
 		t, err := s.Store.GetTask(ctx, id)
 		if err != nil {
 			return err
 		}
 		// A task blocked by a restack conflict is retried: the cause may be gone.
+		if t.Status != store.TaskRunning && t.Status != store.TaskVerified && t.Status != store.TaskPublished && !restackBlocked(t) {
+			continue
+		}
+		deps, err := s.Store.TaskDeps(ctx, id)
+		if err != nil {
+			return err
+		}
+		p := st.Add(id, deps, &Result{})
+		ts := &syncer{Options: s.Options, upstream: s.upstream, res: p.Res, step: p}
+		ts.Out = &p.Out
 		if t.Status == store.TaskRunning {
-			if err := s.noteBusyRestack(ctx, t); err != nil {
-				return err
-			}
-			continue
+			err = ts.noteBusyRestack(ctx, t)
+		} else {
+			err = ts.restack(ctx, t)
 		}
-		if t.Status != store.TaskVerified && t.Status != store.TaskPublished && !restackBlocked(t) {
-			continue
-		}
-		if err := s.restack(ctx, t); err != nil {
+		p.Finish()
+		if err != nil {
 			return err
 		}
 	}
@@ -714,7 +953,18 @@ func (s *syncer) restack(ctx context.Context, t store.Task) error {
 				return s.withClaim(ctx, t.ID, t.Status, func() error { return s.settle(ctx, t, br, db.Name) })
 			}
 			// Already on the dependency's head; a published task restacked earlier may
-			// still wait for its re-publish.
+			// still wait for its re-publish, which needs the dependency's own re-publish.
+			if s.step != nil {
+				if _, err := s.step.WaitParents(ctx); err != nil {
+					return err
+				}
+				if dt, err = s.Store.GetTask(ctx, dep); err != nil {
+					return err
+				}
+				if db, err = s.Store.GetBranch(ctx, dep); err != nil {
+					return fmt.Errorf("dependency %s of %s has no branch: %w", dep, t.ID, err)
+				}
+			}
 			return s.republishIfStale(ctx, t, br, dt, db)
 		}
 		onto, ontoSHA = db.Name, db.HeadSHA
@@ -899,7 +1149,6 @@ func (s *syncer) finish(ctx context.Context, t store.Task, old, br store.Branch,
 // settle checks a restacked task t at br's head: a task blocked by an earlier restack gets
 // back the status it had, the gate is re-run and a published task is re-published.
 func (s *syncer) settle(ctx context.Context, t store.Task, br store.Branch, onto string) error {
-	newHead := br.HeadSHA
 	if restackBlocked(t) {
 		from := t.RestackBlockedFrom
 		if err := s.Store.SetTaskStatus(ctx, t.ID, from, "", ""); err != nil {
@@ -910,29 +1159,59 @@ func (s *syncer) settle(ctx context.Context, t store.Task, br store.Branch, onto
 		s.logf("%s: restack succeeded; %s again", t.ID, from)
 	}
 
+	if s.step != nil {
+		s.step.Defer(func(ctx, gctx context.Context) (bool, error) { return s.gateAndPublish(ctx, gctx, t, br, onto) })
+		return nil
+	}
+	_, err := s.gateAndPublish(ctx, ctx, t, br, onto)
+	return err
+}
+
+// failedParent waits for the parents restacked in the same goal and returns the first whose
+// gate failed, "" when none did (or the task is not pipelined).
+func (s *syncer) failedParent(ctx context.Context) (string, error) {
+	if s.step == nil {
+		return "", nil
+	}
+	return s.step.WaitParents(ctx)
+}
+
+// gateAndPublish re-runs the gate of restacked task t at br's head (with gctx, cancelled when
+// a parent's gate fails) and re-publishes a published task. ok reports whether the gate
+// passed, so that its children may be published. A task whose parent's gate failed is
+// neither gated nor published: it is blocked for later syncs to retry.
+func (s *syncer) gateAndPublish(ctx, gctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
+	newHead := br.HeadSHA
 	// KP3: the gate is re-run, the verifier is not.
-	po := publish.Options{Store: s.Store, Cfg: s.Cfg, Paths: s.Paths, Host: s.Host, TaskID: t.ID, Out: s.Out}
-	g, err := publish.GateAtHead(ctx, po, t, br, "sync")
+	g, err := publish.GateAtHead(gctx, s.publishOptions(t.ID), t, br, "sync")
+	parent, perr := s.failedParent(ctx)
+	if perr != nil {
+		return false, errors.Join(perr, err)
+	}
+	if parent != "" {
+		return false, s.blockRestack(ctx, t, fmt.Sprintf("sync: not gated or re-published after restacking onto %s because the gate of its parent %s failed; every sync retries it once %s is green again",
+			onto, parent, parent))
+	}
 	if err != nil {
-		return s.block(ctx, t.ID, fmt.Sprintf("sync: the gate could not be re-run after the restack: %v", err))
+		return false, s.block(ctx, t.ID, fmt.Sprintf("sync: the gate could not be re-run after the restack: %v", err))
 	}
 	if !g.Passed {
 		if s.ReportRedGate {
 			s.res.GateRed = append(s.res.GateRed, GateRed{TaskID: t.ID, Gate: g})
 			s.logf("%s: the gate failed after restacking onto %s; left for the fixer", t.ID, onto)
-			return nil
+			return false, nil
 		}
-		return s.block(ctx, t.ID, fmt.Sprintf("sync: the gate failed after restacking onto %s:\n%s", onto, publish.FailedCommands(g)))
+		return false, s.block(ctx, t.ID, fmt.Sprintf("sync: the gate failed after restacking onto %s:\n%s", onto, publish.FailedCommands(g)))
 	}
 	br.GateSHA = newHead
 	if err := s.Store.SaveBranch(ctx, br); err != nil {
-		return fmt.Errorf("record the gate result of %s at %s: %w", t.ID, short(newHead), err)
+		return false, fmt.Errorf("record the gate result of %s at %s: %w", t.ID, short(newHead), err)
 	}
 
 	if t.Status != store.TaskPublished {
-		return nil
+		return true, nil
 	}
-	return s.republish(ctx, t)
+	return true, s.republish(ctx, t)
 }
 
 // republishIfStale re-publishes a published task whose published commit no longer matches its
@@ -970,8 +1249,16 @@ func (s *syncer) republishIfStale(ctx context.Context, t store.Task, br store.Br
 // republish pushes a published task again. A refusal by the dependency rule leaves it
 // published and reports it as waiting for its parent; any other failure blocks it.
 func (s *syncer) republish(ctx context.Context, t store.Task) error {
-	po := publish.Options{Store: s.Store, Cfg: s.Cfg, Paths: s.Paths, Host: s.Host, TaskID: t.ID}
-	pr, err := publish.Publish(ctx, po)
+	po := s.publishOptions(t.ID)
+	po.Out = nil
+	var pr publish.Result
+	var err error
+	publishIt := func() { pr, err = publish.Publish(ctx, po) }
+	if s.step != nil {
+		s.step.Serialize(publishIt)
+	} else {
+		publishIt()
+	}
 	if parent, ok := publish.ParentRefusal(err); ok {
 		next := fmt.Sprintf("publish %s with `mill review approve %s`, then run `mill sync`", parent, parent)
 		if parent == "" {
