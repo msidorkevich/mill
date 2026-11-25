@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/msidorkevich/mill/internal/gitx"
 )
 
 func gitInit(t *testing.T) string {
@@ -14,7 +16,7 @@ func gitInit(t *testing.T) string {
 		t.Skip("git not installed")
 	}
 	dir := t.TempDir()
-	cmd := exec.Command("git", "init", "-q", dir)
+	cmd := exec.Command(gitx.Bin(), "init", "-q", dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
