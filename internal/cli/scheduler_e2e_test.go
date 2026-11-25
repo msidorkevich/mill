@@ -92,7 +92,8 @@ func schedScript(files map[string]string) string {
 }
 
 // schedRepo makes an initialized repo with a commit on main, the fake script and the given
-// max_parallel, without goals.
+// max_parallel (also as max_parallel_gates, so tasks can be held in their gates together),
+// without goals.
 func schedRepo(t *testing.T, script string, maxParallel int) string {
 	t.Helper()
 	root := gitRepo(t)
@@ -106,6 +107,7 @@ func schedRepo(t *testing.T, script string, maxParallel int) string {
 	cfg := `check_cmd = "true"
 max_attempts = 1
 max_parallel = ` + itoa(maxParallel) + `
+max_parallel_gates = ` + itoa(maxParallel) + `
 worktree_root = "` + t.TempDir() + `"
 [runner]
 kind = "fake"

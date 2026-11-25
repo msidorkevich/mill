@@ -52,6 +52,13 @@ type Pipeline struct {
 	// LiveUsageInterval is the minimum time between live usage writes for one attempt;
 	// zero means DefaultLiveUsageInterval.
 	LiveUsageInterval time.Duration
+	// MaxParallelGates bounds the gates running at the same time across every mill process
+	// on this database; zero means Cfg.MaxParallelGates (and 1 when that is unset too).
+	// Agents are not limited by it.
+	MaxParallelGates int
+	// GateSlotPoll is how often a gate waiting for a slot checks again; zero means
+	// DefaultGateSlotPoll.
+	GateSlotPoll time.Duration
 
 	// A Pipeline may run several tasks from different goroutines. gitMu serializes the git
 	// operations that touch the shared repository; outMu keeps progress lines whole.
@@ -250,21 +257,18 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 
 		// gate
-		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseGate, ""); err != nil {
-			return out, err
-		}
-		started := p.now()
 		gopts := gate.Options{
 			Host: p.Host, Dir: br.Worktree, Cmds: gateCmds, LogDir: logDir,
 			Env: p.env(nil), Timeout: p.Cfg.GateTimeout.Duration,
 		}
-		g := gate.Run(ctx, gopts)
-		if _, err := p.Store.AppendEvent(ctx, "task-gate", "", t.ID, map[string]any{"attempt": n, "head": br.HeadSHA, "result": g}); err != nil {
+		gr, err := p.gateInSlot(ctx, t, n, startSHA, br.HeadSHA, gopts)
+		if err != nil {
 			return out, err
 		}
 		if ctx.Err() != nil {
 			return p.block(ctx, t.ID, store.PhaseGate, "interrupted", out, nil)
 		}
+		g, started := gr.gate, gr.started
 		var flaky []string
 		if !g.Passed && len(g.Commands) == 0 {
 			// No checks configured: nothing to triage.
@@ -276,13 +280,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			continue
 		}
 		if !g.Passed {
-			tr, err := p.triage(ctx, t, n, startSHA, gopts, g)
-			if err != nil {
-				return out, err
-			}
-			if ctx.Err() != nil {
-				return p.block(ctx, t.ID, store.PhaseGate, "interrupted", out, nil)
-			}
+			tr := gr.triage
 			if tr.blocked != "" {
 				// Not a failed attempt: no retry, but the findings explain the block.
 				if err := p.recordFindings(ctx, t.ID, n, tr.findings); err != nil {
@@ -368,6 +366,86 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 	}
 	return p.block(ctx, t.ID, "", fmt.Sprintf("not verified after %d attempt(s); see `mill task show %s` for the last findings", p.Cfg.MaxAttempts, t.ID), out, nil)
+}
+
+// DefaultGateSlotPoll is how often a gate waiting for a slot checks again when
+// Pipeline.GateSlotPoll is zero.
+const DefaultGateSlotPoll = 100 * time.Millisecond
+
+func (p *Pipeline) maxParallelGates() int {
+	switch {
+	case p.MaxParallelGates > 0:
+		return p.MaxParallelGates
+	case p.Cfg.MaxParallelGates > 0:
+		return p.Cfg.MaxParallelGates
+	}
+	return 1
+}
+
+func (p *Pipeline) gateSlotPoll() time.Duration {
+	if p.GateSlotPoll > 0 {
+		return p.GateSlotPoll
+	}
+	return DefaultGateSlotPoll
+}
+
+// AcquireGateSlot takes one of the max_parallel_gates gate slots for h, waiting while every
+// slot is held; onWait (if not nil) is called once when it has to wait. Call the returned
+// release once the gate is done, on every path.
+func (p *Pipeline) AcquireGateSlot(ctx context.Context, h store.GateHolder, onWait func()) (release func() error, err error) {
+	if h.PID == 0 {
+		h.PID = os.Getpid()
+	}
+	return p.Store.AcquireGateSlot(ctx, h, p.maxParallelGates(), p.gateSlotPoll(), onWait)
+}
+
+// gateRun is the outcome of a task's gate, with its triage when it failed.
+type gateRun struct {
+	gate    gate.Result
+	triage  triageResult // set when the gate failed with commands that ran
+	started time.Time    // when the slot was taken and the gate began
+}
+
+// gateInSlot runs the task's gate, and the triage re-runs when it fails, inside one gate
+// slot. While it waits for the slot the task is in phase PhaseGateWait, then PhaseGate. The
+// slot is released on every path. The caller checks ctx afterwards: an interrupted gate (or
+// wait for a slot) is meaningless.
+func (p *Pipeline) gateInSlot(ctx context.Context, t store.Task, n int, startSHA, head string, gopts gate.Options) (gr gateRun, err error) {
+	var waitErr error
+	release, err := p.AcquireGateSlot(ctx, store.GateHolder{TaskID: t.ID, Attempt: n}, func() {
+		waitErr = p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseGateWait, "")
+		p.logf("%s a%d gate      waiting for a free gate slot (max_parallel_gates = %d)", t.ID, n, p.maxParallelGates())
+	})
+	if err != nil {
+		if ctx.Err() != nil && waitErr == nil {
+			// Interrupted while waiting for a slot: no slot was taken.
+			return gr, nil
+		}
+		return gr, errors.Join(err, waitErr)
+	}
+	defer func() {
+		if rerr := release(); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
+	}()
+	if waitErr != nil {
+		return gr, waitErr
+	}
+	if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseGate, ""); err != nil {
+		return gr, err
+	}
+	gr.started = p.now()
+	gr.gate = gate.Run(ctx, gopts)
+	// Record the gate even when ctx is done, so an interrupted gate blocks the task as
+	// interrupted instead of failing it on the event write.
+	if _, err := p.Store.AppendEvent(context.WithoutCancel(ctx), "task-gate", "", t.ID, map[string]any{"attempt": n, "head": head, "result": gr.gate}); err != nil {
+		return gr, err
+	}
+	if ctx.Err() != nil || gr.gate.Passed || len(gr.gate.Commands) == 0 {
+		return gr, nil
+	}
+	gr.triage, err = p.triage(ctx, t, n, startSHA, gopts, gr.gate)
+	return gr, err
 }
 
 // prepare creates (or reattaches) the task's branch and worktree (TP1).

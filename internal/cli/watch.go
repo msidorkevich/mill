@@ -192,7 +192,9 @@ func renderWatch(ctx context.Context, w io.Writer, paths project.Paths, s *store
 	return tw.Flush()
 }
 
-// stageDetail describes a stage mill runs itself. For a gate it is the newest gate log's last non-empty line and its path.
+// stageDetail describes a stage mill runs itself. For a gate it is the newest gate log's last
+// non-empty line and its path; a task waiting for a gate slot (stage "waiting for gate") has
+// no detail.
 func stageDetail(paths project.Paths, r store.RunningStage) string {
 	if r.Phase != store.PhaseGate {
 		return "-"
