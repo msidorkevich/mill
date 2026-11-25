@@ -170,7 +170,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
 
 		// implement
-		if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
+		if blocked, reason, err := p.checkBudgets(ctx, t, stepImplement); err != nil || blocked {
 			return p.block(ctx, t.ID, store.PhaseImplement, reason, out, err)
 		}
 		implModel, implWhy, err := p.implementerModel(ctx, t, n)
@@ -306,7 +306,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 
 		// verify
-		if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
+		if blocked, reason, err := p.checkBudgets(ctx, t, stepVerify); err != nil || blocked {
 			return p.block(ctx, t.ID, store.PhaseVerify, reason, out, err)
 		}
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseVerify, ""); err != nil {
@@ -849,10 +849,27 @@ func (l *liveUsage) stop() {
 	<-l.done
 }
 
+// budgetStep is the step a budget check reserves for.
+type budgetStep int
+
+const (
+	stepImplement budgetStep = iota // an agent that may use a whole attempt
+	stepVerify                      // the verifier alone, which may use its share of an attempt
+)
+
+// reserve returns what the budgets must still cover before step runs for a task of the given
+// size, and how a block reason says that they cannot.
+func (p *Pipeline) reserve(step budgetStep, size string) (need budget.Limits, what, user string) {
+	if step == stepVerify {
+		return p.Cfg.VerifierBudget(size), "the verifier", "the verifier"
+	}
+	return p.Cfg.AttemptBudget(size), "another attempt", "an attempt"
+}
+
 // checkBudgets blocks when the task budget, or for a goal task the goal budget, cannot cover
-// another attempt (BG2).
-func (p *Pipeline) checkBudgets(ctx context.Context, t store.Task, need budget.Limits) (bool, string, error) {
-	if blocked, reason, err := p.checkTaskBudget(ctx, t.ID, need); err != nil || blocked {
+// step (BG2).
+func (p *Pipeline) checkBudgets(ctx context.Context, t store.Task, step budgetStep) (bool, string, error) {
+	if blocked, reason, err := p.checkTaskBudget(ctx, t, step); err != nil || blocked {
 		return blocked, reason, err
 	}
 	goal, _ := store.SplitTaskID(t.ID)
@@ -863,21 +880,23 @@ func (p *Pipeline) checkBudgets(ctx context.Context, t store.Task, need budget.L
 	if err != nil {
 		return false, "", err
 	}
+	need, _, user := p.reserve(step, t.Size)
 	if !budget.Covers(p.Cfg.Budget.Goal, spent, need, p.Cfg.Budget.Count) {
-		return true, fmt.Sprintf("goal budget exhausted for %s: spent %s of %s, an attempt may use %s",
-			goal, fmtUsage(spent), fmtLimits(p.Cfg.Budget.Goal), fmtLimits(need)), nil
+		return true, fmt.Sprintf("goal budget exhausted for %s: spent %s of %s, %s may use %s",
+			goal, fmtUsage(spent), fmtLimits(p.Cfg.Budget.Goal), user, fmtLimits(need)), nil
 	}
 	return false, "", nil
 }
 
-func (p *Pipeline) checkTaskBudget(ctx context.Context, taskID string, need budget.Limits) (bool, string, error) {
-	spent, err := p.Store.TaskUsage(ctx, taskID)
+func (p *Pipeline) checkTaskBudget(ctx context.Context, t store.Task, step budgetStep) (bool, string, error) {
+	spent, err := p.Store.TaskUsage(ctx, t.ID)
 	if err != nil {
 		return false, "", err
 	}
+	need, what, user := p.reserve(step, t.Size)
 	if !budget.Covers(p.Cfg.Budget.Task, spent, need, p.Cfg.Budget.Count) {
-		return true, fmt.Sprintf("task budget cannot cover another attempt: spent %s of %s, an attempt may use %s",
-			fmtUsage(spent), fmtLimits(p.Cfg.Budget.Task), fmtLimits(need)), nil
+		return true, fmt.Sprintf("task budget cannot cover %s: spent %s of %s, %s may use %s",
+			what, fmtUsage(spent), fmtLimits(p.Cfg.Budget.Task), user, fmtLimits(need)), nil
 	}
 	return false, "", nil
 }
