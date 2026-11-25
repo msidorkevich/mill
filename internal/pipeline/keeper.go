@@ -39,7 +39,7 @@ func (p *Pipeline) Resolve(ctx context.Context, taskID string, in prompt.Resolve
 		return AgentOutcome{}, err
 	}
 	limits := p.Cfg.AttemptBudget(t.Size)
-	if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
+	if blocked, reason, err := p.checkBudgets(ctx, t, stepImplement); err != nil || blocked {
 		return AgentOutcome{Stop: reason}, err
 	}
 	prev, err := p.Store.MaxAttemptN(ctx, t.ID)
@@ -89,7 +89,7 @@ func (p *Pipeline) Verify(ctx context.Context, taskID string) (prompt.VerifierOu
 		startSHA = br.BaseSHA
 	}
 	limits := p.Cfg.AttemptBudget(t.Size)
-	if blocked, reason, err := p.checkBudgets(ctx, t, limits); err != nil || blocked {
+	if blocked, reason, err := p.checkBudgets(ctx, t, stepVerify); err != nil || blocked {
 		return prompt.VerifierOutput{}, reason, err
 	}
 	head, err := gitx.RevParse(ctx, br.Worktree, "HEAD")
