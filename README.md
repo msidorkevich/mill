@@ -13,6 +13,11 @@ Status: **M5 (TUI and herdr host)**: the single-task pipeline, goals, review, pu
 
 Needs Go 1.27+ and git 2.38+.
 
+mill resolves git once per process. A git found on PATH is used as is. On macOS, when PATH
+resolves to `/usr/bin/git` (Apple's `xcrun` shim), mill asks `xcrun --find git` and runs the real
+binary directly, which is faster; if that fails, it keeps `/usr/bin/git`. `mill doctor` prints
+the path of the git it uses.
+
 ```sh
 make check     # gofmt, go vet, go test (zero tokens, no network)
 make build     # bin/mill
