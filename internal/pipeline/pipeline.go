@@ -165,6 +165,15 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 	limits := p.Cfg.AttemptBudget(t.Size)
 	out := Outcome{}
 
+	// A task blocked after its gate passed, with nothing changed since, resumes at the verifier.
+	out, verFindings, resumed, done, err := p.resume(ctx, t, br, startSHA, prev, limits, out)
+	if err != nil || done {
+		return out, err
+	}
+	if resumed {
+		findings = verFindings
+	}
+
 	for n := prev + 1; n <= prev+p.Cfg.MaxAttempts; n++ {
 		out.Attempts++
 		logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
@@ -232,13 +241,9 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 
 		// owns
-		var outside []string
-		if p.Cfg.OwnsPolicy != "off" {
-			files, err := gitx.ChangedFiles(ctx, br.Worktree, startSHA)
-			if err != nil {
-				return out, fmt.Errorf("list changed files for attempt %d: %w", n, err)
-			}
-			outside = plan.OutsideOwns(t.Owns, files)
+		outside, err := p.outsideOwns(ctx, t, br.Worktree, startSHA, n)
+		if err != nil {
+			return out, err
 		}
 		if len(outside) > 0 {
 			if _, err := p.Store.AppendEvent(ctx, "owns-outside", "", t.ID, map[string]any{"attempt": n, "files": outside}); err != nil {
@@ -306,66 +311,111 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 
 		// verify
-		if blocked, reason, err := p.checkBudgets(ctx, t, stepVerify); err != nil || blocked {
-			return p.block(ctx, t.ID, store.PhaseVerify, reason, out, err)
-		}
-		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseVerify, ""); err != nil {
-			return out, err
-		}
-		diff, err := gitx.Diff(ctx, br.Worktree, startSHA)
-		if err != nil {
-			return out, err
-		}
-		stat, err := gitx.DiffStat(ctx, br.Worktree, startSHA)
-		if err != nil {
-			return out, err
-		}
-		if err := writeFile(filepath.Join(logDir, "diff.patch"), diff); err != nil {
-			return out, err
-		}
-		verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside, Flaky: flaky})
-		verModel, verWhy := p.verifierModel(implModel)
-		vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
-		if err != nil {
-			return out, err
-		}
-		if vr.stop != "" {
-			out.RateLimited, out.ResetsAt = vr.rateLimited, vr.res.ResetsAt
-			return p.block(ctx, t.ID, store.PhaseVerify, vr.stop, out, nil)
-		}
-		if vr.res.Status != runner.StatusOK {
-			findings = []prompt.Finding{{Source: "mill", Issue: "the verifier could not complete its review: " + vr.res.Error}}
-			if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
-				return out, err
-			}
-			continue
-		}
-		verdict, perr := prompt.ParseVerifier(vr.res.Output)
-		if perr != nil {
-			findings = []prompt.Finding{{Source: "mill", Issue: "the verifier's answer was unusable: " + perr.Error()}}
-			if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
-				return out, err
-			}
-			continue
-		}
-		if _, err := p.Store.AppendEvent(ctx, "task-verdict", "", t.ID, map[string]any{"attempt": n, "head": br.HeadSHA, "verdict": verdict}); err != nil {
-			return out, err
-		}
-		if verdict.Verdict == "pass" {
-			p.logf("%s a%d verdict   pass: %s", t.ID, n, oneLine(verdict.Summary))
-			if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
-				return out, err
-			}
-			out.Status, out.HeadSHA = store.TaskVerified, br.HeadSHA
-			return out, nil
-		}
-		p.logf("%s a%d verdict   fail: %d finding(s)", t.ID, n, len(verdict.Findings))
-		findings = verdict.Findings
-		if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
+		var done bool
+		out, findings, done, err = p.verify(ctx, t, verifyStep{
+			n: n, br: br, startSHA: startSHA, logDir: logDir, gate: g, outside: outside, flaky: flaky,
+			implModel: implModel, limits: limits,
+		}, out)
+		if err != nil || done {
 			return out, err
 		}
 	}
 	return p.block(ctx, t.ID, "", fmt.Sprintf("not verified after %d attempt(s); see `mill task show %s` for the last findings", p.Cfg.MaxAttempts, t.ID), out, nil)
+}
+
+// outsideOwns lists the files changed since startSHA in wt that are outside the task's owns;
+// none when the owns policy is off.
+func (p *Pipeline) outsideOwns(ctx context.Context, t store.Task, wt, startSHA string, n int) ([]string, error) {
+	if p.Cfg.OwnsPolicy == "off" {
+		return nil, nil
+	}
+	files, err := gitx.ChangedFiles(ctx, wt, startSHA)
+	if err != nil {
+		return nil, fmt.Errorf("list changed files for attempt %d: %w", n, err)
+	}
+	return plan.OutsideOwns(t.Owns, files), nil
+}
+
+// verifyStep is what the verifier of attempt n reviews: the branch at br.HeadSHA against
+// startSHA, with the gate result that passed on it.
+type verifyStep struct {
+	n         int
+	br        store.Branch
+	startSHA  string
+	logDir    string
+	gate      gate.Result
+	outside   []string // changed files outside the task's owns
+	flaky     []string // gate commands that passed only on a re-run
+	implModel string   // the implementer's model, which picks the verifier's
+	limits    budget.Limits
+}
+
+// verify runs the verify step of an attempt: the verifier budget check, the verifier and its
+// verdict. done means the run ends with out (verified or blocked) or err. Otherwise the
+// verifier did not pass the change: findings are recorded and the next attempt starts with them.
+func (p *Pipeline) verify(ctx context.Context, t store.Task, v verifyStep, out Outcome) (_ Outcome, findings []prompt.Finding, done bool, err error) {
+	n := v.n
+	if blocked, reason, err := p.checkBudgets(ctx, t, stepVerify); err != nil || blocked {
+		out, err = p.block(ctx, t.ID, store.PhaseVerify, reason, out, err)
+		return out, nil, true, err
+	}
+	if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseVerify, ""); err != nil {
+		return out, nil, true, err
+	}
+	diff, err := gitx.Diff(ctx, v.br.Worktree, v.startSHA)
+	if err != nil {
+		return out, nil, true, err
+	}
+	stat, err := gitx.DiffStat(ctx, v.br.Worktree, v.startSHA)
+	if err != nil {
+		return out, nil, true, err
+	}
+	if err := writeFile(filepath.Join(v.logDir, "diff.patch"), diff); err != nil {
+		return out, nil, true, err
+	}
+	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky})
+	verModel, verWhy := p.verifierModel(v.implModel)
+	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, v.limits, v.br.Worktree, v.logDir)
+	if err != nil {
+		return out, nil, true, err
+	}
+	if vr.stop != "" {
+		out.RateLimited, out.ResetsAt = vr.rateLimited, vr.res.ResetsAt
+		out, err = p.block(ctx, t.ID, store.PhaseVerify, vr.stop, out, nil)
+		return out, nil, true, err
+	}
+	if vr.res.Status != runner.StatusOK {
+		findings = []prompt.Finding{{Source: "mill", Issue: "the verifier could not complete its review: " + vr.res.Error}}
+		if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
+			return out, nil, true, err
+		}
+		return out, findings, false, nil
+	}
+	verdict, perr := prompt.ParseVerifier(vr.res.Output)
+	if perr != nil {
+		findings = []prompt.Finding{{Source: "mill", Issue: "the verifier's answer was unusable: " + perr.Error()}}
+		if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
+			return out, nil, true, err
+		}
+		return out, findings, false, nil
+	}
+	if _, err := p.Store.AppendEvent(ctx, "task-verdict", "", t.ID, map[string]any{"attempt": n, "head": v.br.HeadSHA, "verdict": verdict}); err != nil {
+		return out, nil, true, err
+	}
+	if verdict.Verdict == "pass" {
+		p.logf("%s a%d verdict   pass: %s", t.ID, n, oneLine(verdict.Summary))
+		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
+			return out, nil, true, err
+		}
+		out.Status, out.HeadSHA = store.TaskVerified, v.br.HeadSHA
+		return out, nil, true, nil
+	}
+	p.logf("%s a%d verdict   fail: %d finding(s)", t.ID, n, len(verdict.Findings))
+	findings = verdict.Findings
+	if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
+		return out, nil, true, err
+	}
+	return out, findings, false, nil
 }
 
 // DefaultGateSlotPoll is how often a gate waiting for a slot checks again when
