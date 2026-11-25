@@ -38,7 +38,9 @@ func runEnv(ctx context.Context, dir, stdin string, env []string, args ...string
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	started(ctx)
 	if err := cmd.Run(); err != nil {
+		failed(ctx, dir)
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
@@ -114,11 +116,7 @@ func CommitAll(ctx context.Context, dir, msg string) (string, error) {
 	if _, err := Run(ctx, dir, "add", "-A"); err != nil {
 		return "", err
 	}
-	args := []string{"-c", "commit.gpgsign=false"}
-	if email, _ := Run(ctx, dir, "config", "user.email"); email == "" {
-		args = append(args, "-c", "user.name=mill", "-c", "user.email=mill@localhost")
-	}
-	args = append(args, "commit", "-q", "--no-verify", "-F", "-")
+	args := append(identity(ctx, dir), "commit", "-q", "--no-verify", "-F", "-")
 	if _, err := RunInput(ctx, dir, msg, args...); err != nil {
 		return "", err
 	}
@@ -165,11 +163,7 @@ func (e *ConflictError) Error() string {
 // fast-forward), skipping hooks and signing. When the repository has no identity configured,
 // mill's own is used. On conflicts the merge is aborted and a *ConflictError lists the files.
 func Merge(ctx context.Context, dir, branch, message string) error {
-	args := []string{"-c", "commit.gpgsign=false"}
-	if email, _ := Run(ctx, dir, "config", "user.email"); email == "" {
-		args = append(args, "-c", "user.name=mill", "-c", "user.email=mill@localhost")
-	}
-	args = append(args, "merge", "--no-ff", "--no-verify", "-q", "-m", message, branch)
+	args := append(identity(ctx, dir), "merge", "--no-ff", "--no-verify", "-q", "-m", message, branch)
 	_, mergeErr := Run(ctx, dir, args...)
 	if mergeErr == nil {
 		return nil
@@ -210,6 +204,7 @@ func IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, er
 	cmd.Env = cleanEnv()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
+	started(ctx)
 	err := cmd.Run()
 	if err == nil {
 		return true, nil
@@ -218,6 +213,7 @@ func IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, er
 	if errors.As(err, &ee) && ee.ExitCode() == 1 {
 		return false, nil
 	}
+	failed(ctx, dir)
 	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w: %s", ancestor, descendant, err, strings.TrimSpace(stderr.String()))
 }
 
@@ -237,11 +233,7 @@ func (e *RebaseConflictError) Error() string {
 // configured, mill's own is used. On conflicts the rebase is aborted and a
 // *RebaseConflictError lists the files. It returns the new HEAD sha.
 func RebaseOnto(ctx context.Context, dir, onto, upstream string) (string, error) {
-	args := []string{"-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"}
-	if email, _ := Run(ctx, dir, "config", "user.email"); email == "" {
-		args = append(args, "-c", "user.name=mill", "-c", "user.email=mill@localhost")
-	}
-	args = append(args, "rebase", "--no-verify", "--onto", onto, upstream)
+	args := append(identity(ctx, dir), "-c", "core.hooksPath=/dev/null", "rebase", "--no-verify", "--onto", onto, upstream)
 	_, rebaseErr := Run(ctx, dir, args...)
 	if rebaseErr == nil {
 		return RevParse(ctx, dir, "HEAD")
@@ -379,9 +371,11 @@ func runExit(ctx context.Context, dir string, args ...string) (string, int, erro
 	cmd.Env = cleanEnv()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	started(ctx)
 	err := cmd.Run()
 	var ee *exec.ExitError
 	if err != nil && (!errors.As(err, &ee) || ee.ExitCode() < 0) {
+		failed(ctx, dir)
 		return "", -1, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	code := 0
@@ -389,19 +383,41 @@ func runExit(ctx context.Context, dir string, args ...string) (string, int, erro
 		code = ee.ExitCode()
 	}
 	if code != 0 && code != 1 {
+		failed(ctx, dir)
 		return "", code, fmt.Errorf("git %s: exit status %d: %s", strings.Join(args, " "), code, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), code, nil
 }
 
 // identity returns the -c options for a commit without hooks or signing, adding mill's own
-// identity when the repository has none.
+// identity when the repository has none (or when that cannot be read: the commit then still
+// has an author). The answer comes from ctx's Cache when it has one.
 func identity(ctx context.Context, dir string) []string {
 	args := []string{"-c", "commit.gpgsign=false"}
-	if email, _ := Run(ctx, dir, "config", "user.email"); email == "" {
+	if ok, err := hasIdentity(ctx, dir); err != nil || !ok {
 		args = append(args, "-c", "user.name=mill", "-c", "user.email=mill@localhost")
 	}
 	return args
+}
+
+// hasIdentity reports whether the repository at dir has a non-empty user.email. An unset
+// user.email (git config exit 1) is a valid answer; any other failure is an error. Answers
+// are cached when ctx carries a Cache, and dropped when a git command with that ctx fails in dir.
+func hasIdentity(ctx context.Context, dir string) (bool, error) {
+	v, err := lookup(ctx, cacheKey{kind: "identity", dir: cacheDir(dir)}, func() (string, error) {
+		out, code, err := runExit(ctx, dir, "config", "user.email")
+		if err != nil {
+			return "", err
+		}
+		if code == 1 || out == "" {
+			return "no", nil
+		}
+		return "yes", nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return v == "yes", nil
 }
 
 // fetchLocks serializes fetches of the same repository within the process: two concurrent
@@ -411,8 +427,8 @@ var fetchLocks sync.Map // repository key -> *sync.Mutex
 // repoLock returns the fetch mutex of the repository dir belongs to. Worktrees share their
 // main repository's refs, so the key is the common git directory.
 func repoLock(ctx context.Context, dir string) *sync.Mutex {
-	key, err := Run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	if err != nil || key == "" {
+	key, err := CommonDir(ctx, dir)
+	if err != nil {
 		if key, err = filepath.Abs(dir); err != nil {
 			key = dir
 		}
