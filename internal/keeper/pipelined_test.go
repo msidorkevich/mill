@@ -339,6 +339,13 @@ func TestPipelinedRestackKeepParentGateFailureBlocksChild(t *testing.T) {
 		runner.RoleImplementer: {implStep(map[string]string{"other.txt": "x\n"}), implStep(map[string]string{"other.txt": "y\n"})},
 	})
 	e.h.fail[e.wts["g1/t1"]] = true
+	// t1's gate fails only once t2 is restacked, so the goal walk never finds t2's parent
+	// already blocked.
+	e.h.hold[e.wts["g1/t1"]] = func(ctx context.Context) {
+		pipelinedRestackWaitEvent(ctx, e.o.Store, "g1/t2", "task-restacked")
+	}
+	t3Head := git(t, e.wts["g1/t3"], "rev-parse", "HEAD")
+	remote := git(t, e.o.Paths.Root, "ls-remote", "origin")
 	res, err := Pass(context.Background(), e.o)
 	if err != nil {
 		t.Fatalf("Pass: %v\n%s", err, e.out)
@@ -360,8 +367,39 @@ func TestPipelinedRestackKeepParentGateFailureBlocksChild(t *testing.T) {
 	for _, b := range res.Blocked {
 		blocked = append(blocked, b.TaskID)
 	}
-	if strings.Join(blocked, " ") != "g1/t1 g1/t2 g1/t3" {
-		t.Errorf("blocked = %v, want t1, t2, t3 in stack order\n%s", blocked, e.out)
+	// t3 is restacked and blocked too, or, when t2 was blocked before the goal walk reached
+	// t3, skipped as a task whose dependency is blocked.
+	t3 := pipelinedRestackStatus(t, e.o.Store, "g1/t3")
+	br, err := e.o.Store.GetBranch(context.Background(), "g1/t3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch strings.Join(blocked, " ") {
+	case "g1/t1 g1/t2 g1/t3":
+		if t3.Status != store.TaskBlocked || !strings.Contains(t3.Reason, "the gate of its parent g1/t2 failed") {
+			t.Errorf("t3 is %s (%s), want blocked because its parent failed\n%s", t3.Status, t3.Reason, e.out)
+		}
+		if br.GateSHA == br.HeadSHA {
+			t.Errorf("t3 is gated at its restacked head %s\n%s", br.HeadSHA, e.out)
+		}
+	case "g1/t1 g1/t2":
+		want := Skipped{TaskID: "g1/t3", Reason: "dependency g1/t2 is blocked; waiting for it"}
+		if len(res.Skipped) != 1 || res.Skipped[0] != want {
+			t.Errorf("skipped = %+v, want %+v\n%s", res.Skipped, want, e.out)
+		}
+		if t3.Status != store.TaskVerified || br.HeadSHA != t3Head {
+			t.Errorf("t3 is %s at %s, want verified and left at %s\n%s", t3.Status, br.HeadSHA, t3Head, e.out)
+		}
+	default:
+		t.Errorf("blocked = %v, want t1, t2 (and t3) in stack order\n%s", blocked, e.out)
+	}
+	for _, id := range []string{"g1/t2", "g1/t3"} {
+		if pipelinedRestackSeq(e.o.Store, id, "task-published") != 0 {
+			t.Errorf("%s was published\n%s", id, e.out)
+		}
+	}
+	if got := git(t, e.o.Paths.Root, "ls-remote", "origin"); got != remote {
+		t.Errorf("the remote's branches changed:\n%s\nwant:\n%s", got, remote)
 	}
 	// The fixer's progress lines come with t1's, before t2's.
 	o := e.out.String()
@@ -378,6 +416,11 @@ func TestPipelinedRestackKeepChildOfFixedParentIsRestackedOntoFix(t *testing.T) 
 		runner.RoleVerifier:    {verdictStep("pass")},
 	})
 	e.h.fail[e.wts["g1/t1"]] = true
+	// t1's gate fails only once t2 is restacked, so t2 sits on t1's head from before the fix
+	// and the goal walk never finds t1 being fixed.
+	e.h.hold[e.wts["g1/t1"]] = func(ctx context.Context) {
+		pipelinedRestackWaitEvent(ctx, e.o.Store, "g1/t2", "task-restacked")
+	}
 	res, err := Pass(context.Background(), e.o)
 	if err != nil {
 		t.Fatalf("Pass: %v\n%s", err, e.out)

@@ -231,6 +231,8 @@ func TestPipelinedRestackParentGateFailureKeepsChildUnpublished(t *testing.T) {
 	t.Parallel()
 	o, h, wts := pipelinedRestackStack(t, 2)
 	h.fail[wts["g1/t1"]] = true
+	// t1's gate fails only once t2 is restacked, so t2's turn never finds t1 already blocked.
+	h.hold[wts["g1/t1"]] = func(ctx context.Context) { pipelinedRestackWaitEvent(ctx, o.Store, "g1/t2", "task-restacked") }
 	ctx := context.Background()
 	// t2 is published: a red gate of t1 must keep it from being re-published.
 	br, err := o.Store.GetBranch(ctx, "g1/t2")
