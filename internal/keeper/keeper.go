@@ -17,6 +17,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gate"
@@ -51,6 +53,12 @@ type Options struct {
 	// Claimer claims each task before the pass changes it; the zero value means
 	// store.NewClaimer("keep").
 	Claimer store.Claimer
+	// MaxParallelGates bounds the gates re-run after restacks at the same time (and across
+	// every mill process); zero means Cfg.MaxParallelGates.
+	MaxParallelGates int
+	// GateSlotPoll is how often a gate waiting for a slot checks again; zero means
+	// publish.DefaultGateSlotPoll.
+	GateSlotPoll time.Duration
 }
 
 // Rebased is a task whose own commits were replayed onto its moved base.
@@ -98,6 +106,26 @@ type keeper struct {
 	Options
 	upstream string // <remote>/<base_branch>
 	res      *Result
+	step     *syncer.Step[*Result] // the task being restacked in a pipelined goal; nil runs inline
+}
+
+// add appends the lists a goal's restacks fill of o to r.
+func (r *Result) add(o *Result) {
+	r.Rebased = append(r.Rebased, o.Rebased...)
+	r.ResolvedRerere = append(r.ResolvedRerere, o.ResolvedRerere...)
+	r.ResolvedAgent = append(r.ResolvedAgent, o.ResolvedAgent...)
+	r.Fixed = append(r.Fixed, o.Fixed...)
+	r.Blocked = append(r.Blocked, o.Blocked...)
+	r.Republished = append(r.Republished, o.Republished...)
+	r.NeedsRepublish = append(r.NeedsRepublish, o.NeedsRepublish...)
+	r.Skipped = append(r.Skipped, o.Skipped...)
+	r.Busy = append(r.Busy, o.Busy...)
+}
+
+// publishOptions are the publish options for task id.
+func (k *keeper) publishOptions(id string) publish.Options {
+	return publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: id, Out: k.Out,
+		MaxParallelGates: k.MaxParallelGates, GateSlotPoll: k.GateSlotPoll}
 }
 
 func (k *keeper) logf(format string, a ...any) {
@@ -127,7 +155,16 @@ func (k *keeper) withClaim(ctx context.Context, id, status string, fn func() err
 		}
 		return fn()
 	}()
-	if rerr := k.Store.ReleaseClaims(context.WithoutCancel(ctx), k.Claimer, []string{id}); rerr != nil {
+	release := func() error { return k.Store.ReleaseClaims(context.WithoutCancel(ctx), k.Claimer, []string{id}) }
+	if k.step != nil && k.step.Pending() {
+		if ferr == nil {
+			// The gate and publish go on in the background; they keep the claim.
+			k.step.Start(ctx, release)
+			return nil
+		}
+		k.step.Drop()
+	}
+	if rerr := release(); rerr != nil {
 		return errors.Join(ferr, rerr)
 	}
 	return ferr
@@ -145,7 +182,8 @@ func Pass(ctx context.Context, o Options) (Result, error) {
 	if o.Pipeline == nil {
 		return res, errors.New("keeper: no pipeline to run the resolver, verifier and fixer with")
 	}
-	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true, LeaveFanIn: true, Claimer: o.Claimer})
+	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true, LeaveFanIn: true, Claimer: o.Claimer,
+		MaxParallelGates: o.MaxParallelGates, GateSlotPoll: o.GateSlotPoll})
 	res.Sync = sr
 	if err != nil {
 		return res, err
@@ -159,7 +197,8 @@ func Pass(ctx context.Context, o Options) (Result, error) {
 			return res, err
 		}
 		if err := k.withClaim(ctx, t.ID, t.Status, func() error {
-			return k.fix(ctx, t, gr.Gate, t.Status == store.TaskPublished)
+			_, err := k.fix(ctx, t, gr.Gate, t.Status == store.TaskPublished)
+			return err
 		}); err != nil {
 			return res, err
 		}
@@ -208,7 +247,86 @@ func (k *keeper) goal(ctx context.Context, g store.Goal) error {
 	if err != nil {
 		return fmt.Errorf("goal %s plan: %w", g.ID, err)
 	}
+	// Each task is restacked in order; its gate and publish run in the background while the
+	// next one is restacked. Results and progress are handed back in stack order. The
+	// pipeline's progress lines for a task (resolver, verifier, fixer) go with the task's.
+	var rt *stepRouter
+	if k.Pipeline.Out != nil {
+		rt = &stepRouter{out: k.Pipeline.Out, steps: map[string]io.Writer{}}
+		k.Pipeline.Out = rt
+		defer func() { k.Pipeline.Out = rt.out }()
+	}
+	emit := func(p *syncer.Step[*Result]) {
+		k.res.add(p.Res)
+		if k.Out != nil && p.Out.Len() > 0 {
+			k.Out.Write(p.Out.Bytes())
+		}
+	}
+	// A child restacked onto its parent's head while the parent's gate went red and the fixer
+	// moved it is stale: another round restacks it onto the fixed head. Each round needs a
+	// fix, so the rounds are bounded by the tasks.
+	for round := 0; ; round++ {
+		st := syncer.NewStack[*Result]()
+		if rt != nil {
+			rt.reset()
+		}
+		err := k.goalSteps(ctx, g, locals, known, st, rt, emit)
+		if err = errors.Join(err, st.Drain(true, emit)); err != nil {
+			return err
+		}
+		stale := st.Stale()
+		if len(stale) == 0 {
+			return nil
+		}
+		if round >= len(locals) {
+			for _, id := range stale {
+				k.skip(id, "its parent's head kept moving during this pass; the next pass restacks it")
+			}
+			return nil
+		}
+	}
+}
+
+// stepRouter sends the pipeline's progress lines of a task restacked in a pipelined goal to the
+// task's step, so that they come out in stack order; other lines go to out. The pipeline writes
+// whole lines that start with the task ID.
+type stepRouter struct {
+	out   io.Writer
+	mu    sync.Mutex
+	steps map[string]io.Writer
+}
+
+func (r *stepRouter) add(id string, w io.Writer) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.steps[id] = w
+}
+
+// reset forgets the steps of the previous round.
+func (r *stepRouter) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.steps = map[string]io.Writer{}
+}
+
+func (r *stepRouter) Write(b []byte) (int, error) {
+	id, _, _ := strings.Cut(string(b), " ")
+	id = strings.TrimSuffix(id, ":")
+	r.mu.Lock()
+	w := r.steps[id]
+	r.mu.Unlock()
+	if w == nil {
+		w = r.out
+	}
+	return w.Write(b)
+}
+
+// goalSteps restacks the goal's tasks in plan order, one step of st each.
+func (k *keeper) goalSteps(ctx context.Context, g store.Goal, locals []string, known map[string]bool, st *syncer.Stack[*Result], rt *stepRouter, emit func(*syncer.Step[*Result])) error {
 	for _, l := range locals {
+		if err := st.Drain(false, emit); err != nil {
+			return err
+		}
 		id := store.TaskID(g.ID, l)
 		if !known[id] {
 			continue
@@ -231,7 +349,19 @@ func (k *keeper) goal(ctx context.Context, g store.Goal) error {
 		if br.Name == "" {
 			continue
 		}
-		if err := k.task(ctx, t, br); err != nil {
+		deps, err := k.Store.TaskDeps(ctx, id)
+		if err != nil {
+			return err
+		}
+		p := st.Add(id, deps, &Result{})
+		tk := &keeper{Options: k.Options, upstream: k.upstream, res: p.Res, step: p}
+		tk.Out = &p.Out
+		if rt != nil {
+			rt.add(id, &p.Out)
+		}
+		err = tk.task(ctx, t, br)
+		p.Finish()
+		if err != nil {
 			return err
 		}
 	}
@@ -494,10 +624,9 @@ type restacked struct {
 
 // settle records the restacked branch br (formerly old) and checks it: after the resolver the
 // gate and the verifier run and a failure goes through fail; otherwise the gate runs and a red
-// gate goes to the fixer. A published task is re-published.
+// gate goes to the fixer. A published task is re-published. In a pipelined goal the checks
+// run in the background (gateAndPublish) while the next task is restacked.
 func (k *keeper) settle(ctx context.Context, t store.Task, old, br store.Branch, r restacked, fail func(step string, files []string, detail string) error) error {
-	newHead := br.HeadSHA
-	wasPublished := t.Status == store.TaskPublished
 	by := ResolvedByNone
 	switch {
 	case r.agent:
@@ -509,29 +638,70 @@ func (k *keeper) settle(ctx context.Context, t store.Task, old, br store.Branch,
 	if err := k.Store.SaveBranch(ctx, br); err != nil {
 		return fail("recording the new head", nil, err.Error())
 	}
-	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: t.ID, Out: k.Out}
+	if k.step != nil {
+		k.step.Defer(func(ctx, gctx context.Context) (bool, error) {
+			return k.gateAndPublish(ctx, gctx, t, old, br, r, by, fail)
+		})
+		return nil
+	}
+	_, err := k.gateAndPublish(ctx, ctx, t, old, br, r, by, fail)
+	return err
+}
+
+// failedParent waits for the parents restacked in the same goal and returns the first whose
+// gate failed, "" when none did (or the task is not pipelined).
+func (k *keeper) failedParent(ctx context.Context) (string, error) {
+	if k.step == nil {
+		return "", nil
+	}
+	return k.step.WaitParents(ctx)
+}
+
+// parentFailedReason is why a restacked task was neither gated nor published.
+func parentFailedReason(onto, parent string) string {
+	return fmt.Sprintf("keeper: not gated or re-published after rebasing onto %s because the gate of its parent %s failed; every sync retries it once %s is green again",
+		onto, parent, parent)
+}
+
+// gateAndPublish checks the restacked branch br (formerly old), with gctx for its gate
+// (cancelled when a parent's gate fails), and re-publishes a published task. ok reports
+// whether it ended green, so that its children may be published. A task whose parent's gate
+// failed is neither gated nor published.
+func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br store.Branch, r restacked, by string, fail func(step string, files []string, detail string) error) (bool, error) {
+	newHead := br.HeadSHA
+	wasPublished := t.Status == store.TaskPublished
+	po := k.publishOptions(t.ID)
 	if r.agent {
 		// The agent changed code: the gate and the verifier both check it.
-		g, err := publish.GateAtHead(ctx, po, t, br, "keeper")
+		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
+		if parent, perr := k.failedParent(ctx); perr != nil || parent != "" {
+			if perr != nil {
+				return false, errors.Join(perr, err)
+			}
+			return false, fail("the gate", nil, parentFailedReason(r.onto, parent))
+		}
+		if stale, err := k.staleParent(ctx, t, newHead); err != nil || stale {
+			return false, err
+		}
 		if err != nil {
-			return fail("the gate", nil, err.Error())
+			return false, fail("the gate", nil, err.Error())
 		}
 		if !g.Passed {
-			return fail("the gate", nil, "it failed after the resolution:\n"+publish.FailedCommands(g))
+			return false, fail("the gate", nil, "it failed after the resolution:\n"+publish.FailedCommands(g))
 		}
 		v, stop, err := k.Pipeline.Verify(ctx, t.ID)
 		if err != nil {
-			return fail("the verifier", nil, err.Error())
+			return false, fail("the verifier", nil, err.Error())
 		}
 		if stop != "" {
-			return fail("the verifier", nil, "it stopped: "+stop)
+			return false, fail("the verifier", nil, "it stopped: "+stop)
 		}
 		if v.Verdict != "pass" {
-			return fail("the verifier", nil, fmt.Sprintf("verdict %s: %s", v.Verdict, oneLine(v.Summary)))
+			return false, fail("the verifier", nil, fmt.Sprintf("verdict %s: %s", v.Verdict, oneLine(v.Summary)))
 		}
 		br.GateSHA = newHead
 		if err := k.Store.SaveBranch(ctx, br); err != nil {
-			return fail("recording the new head", nil, err.Error())
+			return false, fail("recording the new head", nil, err.Error())
 		}
 	}
 
@@ -541,7 +711,7 @@ func (k *keeper) settle(ctx context.Context, t store.Task, old, br store.Branch,
 		data["new_start"] = br.StartSHA
 	}
 	if _, err := k.Store.AppendEvent(ctx, "task-restacked", goalID, t.ID, data); err != nil {
-		return err
+		return false, err
 	}
 	k.res.Rebased = append(k.res.Rebased, Rebased{TaskID: t.ID, Onto: r.onto, OntoSHA: r.tip, OldHead: old.HeadSHA, NewHead: newHead, ResolvedBy: by})
 	switch by {
@@ -554,22 +724,33 @@ func (k *keeper) settle(ctx context.Context, t store.Task, old, br store.Branch,
 
 	if !r.agent {
 		// KP3: after a rebase without the agent the gate is re-run, the verifier is not.
-		g, err := publish.GateAtHead(ctx, po, t, br, "keeper")
+		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
+		if parent, perr := k.failedParent(ctx); perr != nil || parent != "" {
+			if perr != nil {
+				return false, errors.Join(perr, err)
+			}
+			return false, k.blockRestack(ctx, t, parentFailedReason(r.onto, parent))
+		}
+		if stale, serr := k.staleParent(ctx, t, newHead); serr != nil || stale {
+			return false, serr
+		}
 		if err != nil {
-			return k.block(ctx, t.ID, fmt.Sprintf("keeper: the gate could not be re-run after the rebase: %v", err))
+			return false, k.block(ctx, t.ID, fmt.Sprintf("keeper: the gate could not be re-run after the rebase: %v", err))
 		}
 		if !g.Passed {
+			// A fixed task is green again (at a new head, which its stale children are
+			// restacked onto in another round).
 			return k.fix(ctx, t, g, wasPublished)
 		}
 		br.GateSHA = newHead
 		if err := k.Store.SaveBranch(ctx, br); err != nil {
-			return fmt.Errorf("record the gate result of %s at %s: %w", t.ID, short(newHead), err)
+			return false, fmt.Errorf("record the gate result of %s at %s: %w", t.ID, short(newHead), err)
 		}
 	}
 	if !wasPublished {
-		return nil
+		return true, nil
 	}
-	return k.republish(ctx, t.ID)
+	return true, k.republish(ctx, t.ID)
 }
 
 // restore puts the branch back at the old head: it aborts a rebase in progress, resets a
@@ -637,33 +818,78 @@ func rebaseInProgress(ctx context.Context, dir string) (bool, error) {
 
 // fix runs the fixer for a task whose gate turned red after a restack (KP7): the gate
 // failure becomes the findings of an implement attempt.
-func (k *keeper) fix(ctx context.Context, t store.Task, g gate.Result, wasPublished bool) error {
+// fixed reports whether the fixer got the task verified again.
+func (k *keeper) fix(ctx context.Context, t store.Task, g gate.Result, wasPublished bool) (fixed bool, err error) {
 	if err := k.Pipeline.RecordGateFailure(ctx, t.ID, g); err != nil {
-		return k.block(ctx, t.ID, fmt.Sprintf("keeper: the gate failed after the restack and its failure could not be recorded for the fixer: %v", err))
+		return false, k.block(ctx, t.ID, fmt.Sprintf("keeper: the gate failed after the restack and its failure could not be recorded for the fixer: %v", err))
 	}
 	k.logf("%s: the gate failed after the restack; running the fixer", t.ID)
 	out, err := k.Pipeline.Run(ctx, t.ID)
 	if err != nil {
-		return fmt.Errorf("fixer for %s: %w", t.ID, err)
+		return false, fmt.Errorf("fixer for %s: %w", t.ID, err)
 	}
 	if out.Status != store.TaskVerified {
 		// The pipeline already recorded the task's status and reason.
 		k.res.Blocked = append(k.res.Blocked, Blocked{TaskID: t.ID, Reason: "keeper: the fixer did not get the gate green: " + out.Reason})
-		return nil
+		k.logf("%s: blocked: the fixer did not get the gate green: %s", t.ID, out.Reason)
+		return false, nil
 	}
 	k.res.Fixed = append(k.res.Fixed, t.ID)
 	k.logf("%s: fixed at %s", t.ID, short(out.HeadSHA))
 	if !wasPublished {
-		return nil
+		return true, nil
 	}
-	return k.republish(ctx, t.ID)
+	return true, k.republish(ctx, t.ID)
+}
+
+// staleParent reports whether the restacked task t (now at head) sits on a parent head that
+// moved since its restack (a parent fixed after its gate went red, or itself stale). Such a
+// task is neither gated nor published: its step is marked stale and the goal restacks it again.
+func (k *keeper) staleParent(ctx context.Context, t store.Task, head string) (bool, error) {
+	if k.step == nil {
+		return false, nil
+	}
+	parent := k.step.StaleParent()
+	for _, id := range k.step.ParentIDs() {
+		if parent != "" {
+			break
+		}
+		pb, err := k.Store.GetBranch(ctx, id)
+		if err != nil {
+			return false, fmt.Errorf("parent %s of %s has no branch: %w", id, t.ID, err)
+		}
+		if pb.HeadSHA == "" {
+			continue
+		}
+		in, err := gitx.IsAncestor(ctx, k.Paths.Root, pb.HeadSHA, head)
+		if err != nil {
+			return false, fmt.Errorf("compare %s with its parent %s: %w", t.ID, id, err)
+		}
+		if !in {
+			parent = id
+		}
+	}
+	if parent == "" {
+		return false, nil
+	}
+	k.step.MarkStale()
+	k.logf("%s: its parent %s moved after this restack; not gated or published, restacking it again", t.ID, parent)
+	return true, nil
 }
 
 // republish pushes a changed published task again. A refusal by the dependency rule is
 // reported as waiting for its parent; any other failure blocks it.
 func (k *keeper) republish(ctx context.Context, id string) error {
-	po := publish.Options{Store: k.Store, Cfg: k.Cfg, Paths: k.Paths, Host: k.Host, TaskID: id}
-	pr, err := publish.Publish(ctx, po)
+	po := k.publishOptions(id)
+	po.Out = nil
+	var pr publish.Result
+	var err error
+	publishIt := func() { pr, err = publish.Publish(ctx, po) }
+	if k.step != nil {
+		k.step.Serialize(publishIt)
+	} else {
+		publishIt()
+	}
 	if parent, ok := publish.ParentRefusal(err); ok {
 		k.res.NeedsRepublish = append(k.res.NeedsRepublish, syncer.NeedsRepublish{TaskID: id, After: parent, Reason: err.Error()})
 		k.logf("%s: not re-published yet: %v", id, err)

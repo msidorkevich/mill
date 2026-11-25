@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/msidorkevich/mill/internal/config"
@@ -32,8 +33,18 @@ type Options struct {
 	Paths  project.Paths
 	Host   host.Host // runs the gate when it must be re-run; nil means host.NewExec()
 	TaskID string
-	Out    io.Writer // progress lines (a reused gate); nil discards
+	Out    io.Writer // progress lines (a reused gate, a wait for a gate slot); nil discards
+	// MaxParallelGates bounds the gates running at the same time across every mill process
+	// on this database; zero means Cfg.MaxParallelGates (and 1 when that is unset too).
+	MaxParallelGates int
+	// GateSlotPoll is how often a gate waiting for a slot checks again; zero means
+	// DefaultGateSlotPoll.
+	GateSlotPoll time.Duration
 }
+
+// DefaultGateSlotPoll is how often a gate waiting for a slot checks again when
+// Options.GateSlotPoll is zero.
+const DefaultGateSlotPoll = 100 * time.Millisecond
 
 // Result is what was published.
 type Result struct {
@@ -430,8 +441,9 @@ func FailedCommands(g gate.Result) string { return failedCmds(g) }
 // rerunGate runs check_cmd and the task's checks in the worktree, as the pipeline does. When
 // a gate with the same commands already passed on the worktree's HEAD tree, it is reused: no
 // command runs, the task-gate event is marked reused and "gate reused (tree <sha>)" is
-// printed. A pass is recorded for reuse; a failure never is.
-func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cmds []string, phase string) (gate.Result, error) {
+// printed. A pass is recorded for reuse; a failure never is. A gate that runs takes a gate
+// slot (max_parallel_gates) first and frees it on every path.
+func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cmds []string, phase string) (_ gate.Result, err error) {
 	if br.Worktree == "" {
 		return gate.Result{}, fmt.Errorf("task %s has no worktree to re-run the gate in", t.ID)
 	}
@@ -470,6 +482,15 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		}
 		return g, nil
 	}
+	release, err := gateSlot(ctx, o, t.ID)
+	if err != nil {
+		return gate.Result{}, err
+	}
+	defer func() {
+		if rerr := release(); rerr != nil {
+			err = errors.Join(err, rerr)
+		}
+	}()
 	h := o.Host
 	if h == nil {
 		h = host.NewExec()
@@ -495,6 +516,52 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		}
 	}
 	return g, nil
+}
+
+// gateSlot takes one of the max_parallel_gates gate slots for task id. While every slot is
+// held the task is in phase PhaseGateWait; it gets its phase back once a slot is taken or the
+// wait ends. Call the returned release once the gate is done.
+func gateSlot(ctx context.Context, o Options, id string) (func() error, error) {
+	max := o.MaxParallelGates
+	if max < 1 {
+		max = o.Cfg.MaxParallelGates
+	}
+	if max < 1 {
+		max = 1
+	}
+	poll := o.GateSlotPoll
+	if poll <= 0 {
+		poll = DefaultGateSlotPoll
+	}
+	var (
+		cur     store.Task
+		waited  bool
+		waitErr error
+	)
+	release, err := o.Store.AcquireGateSlot(ctx, store.GateHolder{TaskID: id, PID: os.Getpid()}, max, poll, func() {
+		if cur, waitErr = o.Store.GetTask(ctx, id); waitErr != nil {
+			return
+		}
+		if waitErr = o.Store.SetTaskStatus(ctx, id, cur.Status, store.PhaseGateWait, cur.Reason); waitErr != nil {
+			return
+		}
+		waited = true
+		if o.Out != nil {
+			fmt.Fprintf(o.Out, "%s: waiting for a free gate slot (max_parallel_gates = %d)\n", id, max)
+		}
+	})
+	if waited {
+		if perr := o.Store.SetTaskStatus(context.WithoutCancel(ctx), id, cur.Status, cur.Phase, cur.Reason); perr != nil {
+			waitErr = fmt.Errorf("give %s its phase back after waiting for a gate slot: %w", id, perr)
+		}
+	}
+	if err != nil {
+		return nil, errors.Join(err, waitErr)
+	}
+	if waitErr != nil {
+		return nil, errors.Join(waitErr, release())
+	}
+	return release, nil
 }
 
 // recordGate appends the task-gate event of a gate at the branch head, with extra fields.

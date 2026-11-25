@@ -31,7 +31,7 @@ func runSync(ctx context.Context, env Env, args []string) int {
 	if *asJSON {
 		out = nil
 	}
-	res, err := syncer.Sync(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: out, Home: env.Home})
+	res, err := syncer.Sync(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: out, Home: env.Home, MaxParallelGates: cfg.MaxParallelGates})
 	if err != nil {
 		return fail(err)
 	}
