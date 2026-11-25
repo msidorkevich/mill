@@ -30,7 +30,7 @@ func RunInput(ctx context.Context, dir, stdin string, args ...string) (string, e
 
 // runEnv is RunInput with extra environment variables (added after cleanEnv's).
 func runEnv(ctx context.Context, dir, stdin string, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, Bin(), args...)
 	cmd.Dir = dir
 	cmd.Env = append(cleanEnv(), env...)
 	if stdin != "" {
@@ -205,7 +205,7 @@ func DeleteBranch(ctx context.Context, repo, name string) error {
 
 // IsAncestor reports whether commit ancestor is reachable from descendant.
 func IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd := exec.CommandContext(ctx, Bin(), "merge-base", "--is-ancestor", ancestor, descendant)
 	cmd.Dir = dir
 	cmd.Env = cleanEnv()
 	var stderr bytes.Buffer
@@ -374,7 +374,7 @@ func ReplayOnto(ctx context.Context, dir, task, onto, upstream string) (string, 
 // runExit runs git in dir and returns trimmed stdout and git's exit code. err is set only
 // when git could not run or was killed (not for a non-zero exit).
 func runExit(ctx context.Context, dir string, args ...string) (string, int, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, Bin(), args...)
 	cmd.Dir = dir
 	cmd.Env = cleanEnv()
 	var stdout, stderr bytes.Buffer
