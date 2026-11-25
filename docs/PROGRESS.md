@@ -1052,3 +1052,25 @@ during a command (`config user.email` 12 times, `rev-parse --show-toplevel` 11 t
 shows the git it uses. (The two failing runs above failed only because I linked git into a
 temporary directory, where it found no templates and created repositories without
 `.git/hooks`; one test assumed that directory, and `g17` fixes that too.)
+
+### Follow-ups found in `g17`
+
+- [ ] **Triage compares commands, not failing tests.** `g17/doctor-git-path` broke three doctor
+      tests in `internal/cli` (its git check asked the test fake for a resolved path the fake
+      did not know). Triage re-ran `make check` on the task's starting point, where an unrelated
+      flaky herdr test failed, and blocked the task as "fails on the task's starting point too,
+      so this task did not cause them". A task is innocent only when the same tests fail on the
+      starting point: compare the failing test names (`--- FAIL` lines, or `go test -json`),
+      and treat a command whose failures differ as the task's failure. I fixed the task with
+      `mill task edit` (it now also owns `internal/cli/cli_test.go`, where the fake lives; the
+      planner had missed that file).
+- [ ] **Flaky herdr host tests: `Wait: operation not permitted`.**
+      `TestHerdrKillStopsProcessGroupAndClosesPane` (`herdr_unix_test.go:202`) and
+      `TestHerdrContextCancelKills` (`herdr_unix_test.go:222`) each failed once in a full
+      `make check` with `Wait: operation not permitted`. Find why waiting for the killed
+      process group returns EPERM under load and make the tests (or the host) handle it.
+- [ ] **Dependencies cannot change after approval.** To fix `doctor-git-path` I wanted it to
+      depend on `git-callers-use-bin` (which also edits `cli_test.go`); `mill task edit`
+      refuses any change to `depends_on`. Owning the file without the dependency works but
+      risks a conflict between the two branches. Allow adding a dependency on a task of the
+      same goal while the task is not yet running (and rebase it onto the new parent).
