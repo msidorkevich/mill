@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +32,7 @@ type Options struct {
 	Paths  project.Paths
 	Host   host.Host // runs the gate when it must be re-run; nil means host.NewExec()
 	TaskID string
+	Out    io.Writer // progress lines (a reused gate); nil discards
 }
 
 // Result is what was published.
@@ -425,7 +427,10 @@ func GateAtHead(ctx context.Context, o Options, t store.Task, br store.Branch, p
 // FailedCommands lists the failing commands of a gate result, one per line.
 func FailedCommands(g gate.Result) string { return failedCmds(g) }
 
-// rerunGate runs check_cmd and the task's checks in the worktree, as the pipeline does.
+// rerunGate runs check_cmd and the task's checks in the worktree, as the pipeline does. When
+// a gate with the same commands already passed on the worktree's HEAD tree, it is reused: no
+// command runs, the task-gate event is marked reused and "gate reused (tree <sha>)" is
+// printed. A pass is recorded for reuse; a failure never is.
 func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cmds []string, phase string) (gate.Result, error) {
 	if br.Worktree == "" {
 		return gate.Result{}, fmt.Errorf("task %s has no worktree to re-run the gate in", t.ID)
@@ -437,6 +442,33 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		return gate.Result{}, err
 	} else if dirty {
 		return gate.Result{}, fmt.Errorf("worktree %s has uncommitted changes; commit or discard them before publishing", br.Worktree)
+	}
+	// The same tree gated with the same commands already passed: reuse it. A reuse runs no
+	// command, so it takes no gate slot.
+	tree, err := gitx.HeadTree(ctx, br.Worktree)
+	if err != nil {
+		return gate.Result{}, err
+	}
+	fp := store.GateFingerprint(o.Cfg.CheckCmd, t.Checks)
+	prev, ok, err := o.Store.PassedGate(ctx, tree, fp)
+	if err != nil {
+		return gate.Result{}, err
+	}
+	if ok {
+		var g gate.Result
+		if err := json.Unmarshal(prev.Result, &g); err != nil {
+			return gate.Result{}, fmt.Errorf("the stored gate result of tree %s is unreadable: %w", tree, err)
+		}
+		if !g.Passed {
+			return gate.Result{}, fmt.Errorf("the stored gate result of tree %s is not a pass", tree)
+		}
+		if err := recordGate(ctx, o, t, br, g, phase, map[string]any{"reused": true, "tree": tree, "reused_from": prev.TaskID}); err != nil {
+			return g, err
+		}
+		if o.Out != nil {
+			fmt.Fprintf(o.Out, "%s: gate reused (tree %s)\n", t.ID, tree)
+		}
+		return g, nil
 	}
 	h := o.Host
 	if h == nil {
@@ -450,14 +482,33 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 	if ctx.Err() != nil {
 		return g, fmt.Errorf("gate re-run interrupted: %w", ctx.Err())
 	}
-	n, err := o.Store.MaxAttemptN(ctx, t.ID)
-	if err != nil {
+	if err := recordGate(ctx, o, t, br, g, phase, map[string]any{"tree": tree}); err != nil {
 		return g, err
 	}
-	if _, err := o.Store.AppendEvent(ctx, "task-gate", "", t.ID, map[string]any{"attempt": n, "head": br.HeadSHA, "result": g, phase: true}); err != nil {
-		return g, err
+	if g.Passed {
+		res, err := json.Marshal(g)
+		if err != nil {
+			return g, fmt.Errorf("encode the gate result of %s: %w", t.ID, err)
+		}
+		if err := o.Store.RecordGatePass(ctx, tree, fp, t.ID, res); err != nil {
+			return g, err
+		}
 	}
 	return g, nil
+}
+
+// recordGate appends the task-gate event of a gate at the branch head, with extra fields.
+func recordGate(ctx context.Context, o Options, t store.Task, br store.Branch, g gate.Result, phase string, extra map[string]any) error {
+	n, err := o.Store.MaxAttemptN(ctx, t.ID)
+	if err != nil {
+		return err
+	}
+	data := map[string]any{"attempt": n, "head": br.HeadSHA, "result": g, phase: true}
+	for k, v := range extra {
+		data[k] = v
+	}
+	_, err = o.Store.AppendEvent(ctx, "task-gate", "", t.ID, data)
+	return err
 }
 
 func failedCmds(g gate.Result) string {

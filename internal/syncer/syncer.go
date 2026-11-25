@@ -911,7 +911,7 @@ func (s *syncer) settle(ctx context.Context, t store.Task, br store.Branch, onto
 	}
 
 	// KP3: the gate is re-run, the verifier is not.
-	po := publish.Options{Store: s.Store, Cfg: s.Cfg, Paths: s.Paths, Host: s.Host, TaskID: t.ID}
+	po := publish.Options{Store: s.Store, Cfg: s.Cfg, Paths: s.Paths, Host: s.Host, TaskID: t.ID, Out: s.Out}
 	g, err := publish.GateAtHead(ctx, po, t, br, "sync")
 	if err != nil {
 		return s.block(ctx, t.ID, fmt.Sprintf("sync: the gate could not be re-run after the restack: %v", err))

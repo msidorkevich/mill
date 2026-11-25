@@ -411,6 +411,24 @@ type gateRun struct {
 // slot is released on every path. The caller checks ctx afterwards: an interrupted gate (or
 // wait for a slot) is meaningless.
 func (p *Pipeline) gateInSlot(ctx context.Context, t store.Task, n int, startSHA, head string, gopts gate.Options) (gr gateRun, err error) {
+	// The same tree gated with the same commands already passed: reuse it without a slot.
+	tree, err := gitx.HeadTree(ctx, gopts.Dir)
+	if err != nil {
+		return gr, fmt.Errorf("gate of attempt %d: %w", n, err)
+	}
+	fp := store.GateFingerprint(p.Cfg.CheckCmd, t.Checks)
+	reused, ok, err := p.reusedGate(ctx, t, n, head, tree, fp)
+	if err != nil || ok {
+		gr.gate, gr.started = reused, p.now()
+		return gr, err
+	}
+	defer func() {
+		// Only a gate that passed outright is recorded: a failure, or a pass only on a triage
+		// re-run, is never reused.
+		if err == nil && ctx.Err() == nil && gr.gate.Passed {
+			err = p.recordGatePass(ctx, t, tree, fp, gr.gate)
+		}
+	}()
 	var waitErr error
 	release, err := p.AcquireGateSlot(ctx, store.GateHolder{TaskID: t.ID, Attempt: n}, func() {
 		waitErr = p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseGateWait, "")
@@ -446,6 +464,38 @@ func (p *Pipeline) gateInSlot(ctx context.Context, t store.Task, n int, startSHA
 	}
 	gr.triage, err = p.triage(ctx, t, n, startSHA, gopts, gr.gate)
 	return gr, err
+}
+
+// reusedGate returns the stored passing gate for tree and fp, if there is one, and records it
+// as the attempt's gate result marked reused. ok is false when the gate must run.
+func (p *Pipeline) reusedGate(ctx context.Context, t store.Task, n int, head, tree, fp string) (g gate.Result, ok bool, err error) {
+	prev, ok, err := p.Store.PassedGate(ctx, tree, fp)
+	if err != nil || !ok {
+		return g, false, err
+	}
+	if err := json.Unmarshal(prev.Result, &g); err != nil {
+		return g, false, fmt.Errorf("the stored gate result of tree %s is unreadable: %w", tree, err)
+	}
+	if !g.Passed {
+		return g, false, fmt.Errorf("the stored gate result of tree %s is not a pass", tree)
+	}
+	if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseGate, ""); err != nil {
+		return g, false, err
+	}
+	if _, err := p.Store.AppendEvent(ctx, "task-gate", "", t.ID, map[string]any{"attempt": n, "head": head, "result": g, "reused": true, "tree": tree, "reused_from": prev.TaskID}); err != nil {
+		return g, false, err
+	}
+	p.logf("%s a%d gate reused (tree %s)", t.ID, n, tree)
+	return g, true, nil
+}
+
+// recordGatePass stores a passing gate result for reuse on the same tree.
+func (p *Pipeline) recordGatePass(ctx context.Context, t store.Task, tree, fp string, g gate.Result) error {
+	res, err := json.Marshal(g)
+	if err != nil {
+		return fmt.Errorf("encode the gate result of %s: %w", t.ID, err)
+	}
+	return p.Store.RecordGatePass(ctx, tree, fp, t.ID, res)
 }
 
 // prepare creates (or reattaches) the task's branch and worktree (TP1).

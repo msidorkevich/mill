@@ -151,6 +151,17 @@ CREATE TABLE gate_slots (
 	acquired_at TEXT NOT NULL
 );
 `,
+	// 12: passed gate results, reused when the same tree is gated with the same checks.
+	`
+CREATE TABLE gate_results (
+	tree_sha    TEXT NOT NULL,               -- git tree the gate passed on
+	fingerprint TEXT NOT NULL,               -- GateFingerprint of check_cmd and the task's checks
+	task_id     TEXT NOT NULL,               -- the task whose gate passed
+	result      TEXT NOT NULL DEFAULT '{}',  -- the passing gate result JSON
+	passed_at   TEXT NOT NULL,
+	PRIMARY KEY (tree_sha, fingerprint)
+);
+`,
 }
 
 // LatestVersion is the schema version this build writes.
