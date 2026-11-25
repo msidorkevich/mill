@@ -246,14 +246,35 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		if len(outside) > 0 {
-			if _, err := p.Store.AppendEvent(ctx, "owns-outside", "", t.ID, map[string]any{"attempt": n, "files": outside}); err != nil {
+			owners, err := p.siblingOwners(ctx, t, outside)
+			if err != nil {
 				return out, err
 			}
-			if p.Cfg.OwnsPolicy == "enforce" {
+			if _, err := p.Store.AppendEvent(ctx, "owns-outside", "", t.ID, map[string]any{"attempt": n, "files": outside, "owners": owners}); err != nil {
+				return out, err
+			}
+			if len(owners) > 0 || p.Cfg.OwnsPolicy == "enforce" {
+				var ownerIDs []string
+				seen := map[string]bool{}
 				for _, f := range outside {
-					findings = append(findings, prompt.Finding{Source: "mill", File: f, Issue: fmt.Sprintf("changed outside the task's owns; revert it with `git restore --source %s -- %s` (delete it instead if the task created it), or edit the task to widen its owns", short(startSHA), f)})
+					ids, owned := owners[f]
+					if owned {
+						for _, id := range ids {
+							if !seen[id] {
+								seen[id] = true
+								ownerIDs = append(ownerIDs, id)
+							}
+						}
+						findings = append(findings, prompt.Finding{Source: "mill", File: f, Issue: fmt.Sprintf("changed a file owned by task %s; revert it with `git restore --source %s -- %s` (delete it instead if the task created it), or edit the task to widen its owns", strings.Join(ids, ", "), short(startSHA), f)})
+					} else if p.Cfg.OwnsPolicy == "enforce" {
+						findings = append(findings, prompt.Finding{Source: "mill", File: f, Issue: fmt.Sprintf("changed outside the task's owns; revert it with `git restore --source %s -- %s` (delete it instead if the task created it), or edit the task to widen its owns", short(startSHA), f)})
+					}
 				}
-				p.logf("%s a%d owns      %d file(s) outside owns", t.ID, n, len(outside))
+				if len(owners) > 0 {
+					p.logf("%s a%d owns      %d file(s) owned by %s", t.ID, n, len(owners), strings.Join(ownerIDs, ", "))
+				} else {
+					p.logf("%s a%d owns      %d file(s) outside owns", t.ID, n, len(outside))
+				}
 				if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
 					return out, err
 				}
