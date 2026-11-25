@@ -662,16 +662,19 @@ kept focus, and the tabs closed when the workers ended.
       average to 132 on 8 cores, and test file churn kept `fseventsd` near 95% CPU.
       (Already done: `~/.cache/mill` is excluded from Time Machine.) Planned as a "fast gates"
       goal right after M5:
-  - [ ] **A. Run independent tests in parallel:** `t.Parallel()` in every test that does not
+  - [x] **A. Run independent tests in parallel:** `t.Parallel()` in every test that does not
         share process state, replacing the 5 `t.Setenv` uses that prevent it (pass the values
         explicitly instead). Target: `internal/cli` from ~300s to 60–90s.
-  - [ ] **B. No duplicate test runs in a gate:** `check_cmd` (`make check`) already runs every
+        (done in `g15`: 611 tests call `t.Parallel()`)
+  - [x] **B. No duplicate test runs in a gate:** `check_cmd` (`make check`) already runs every
         package, but the planner gave tasks checks like `go test ./internal/cli/...`, so those
         gates ran the slowest package twice. Task checks must stay narrow (`-run …`) when
         `check_cmd` covers the package: a planner prompt rule, plus a plan validation warning.
-  - [ ] **E. Limit concurrent gates:** a `max_parallel_gates` setting (default 1), separate
+        (done in `g15`, task `narrow-task-checks`)
+  - [x] **E. Limit concurrent gates:** a `max_parallel_gates` setting (default 1), separate
         from `max_parallel`, so agents still work in parallel while gates take turns. Fewer
         load spikes; less important once A is done.
+        (done in `g15`: `max_parallel_gates`, default 1)
 - [x] **herdr host could not read herdr's real response** (bug, fixed by task `herdr-pane-id`,
       PR #36). `pane split` returns the pane as an object (`.result.pane.pane_id`); the host
       expected a string, because I described herdr's output from memory when planning M5 and
@@ -787,10 +790,11 @@ together: they compile and their packages pass).
       clean_on_land removes the parent's worktree, branch and review branch while the child is
       still based on it. Fix: task `sync-busy-child` (after `e2e-one-scheduler` lands and after
       `restack-net-change`).
-- [ ] **End-to-end tests must be fast.** The scheduler end-to-end tests start real `mill run`
+- [x] **End-to-end tests must be fast.** The scheduler end-to-end tests start real `mill run`
       loops that poll; with default intervals every gate pays for that waiting. Tests must
       inject polling intervals of milliseconds, the way tests already inject clocks, and the
       planner prompt should say so for test tasks. Part of the fast-gates goal.
+      (done in `g15`: injected millisecond polls)
 - [ ] **I listed merged PRs as open** three times (#33, #37, #49). Before sending a PR link I
       check the GitHub API for its state, not only that the branch exists.
 
@@ -824,11 +828,13 @@ Not yet planned into a goal unless noted. Grouped by area; each names what was s
 
 ### Speed of sync and gates
 
-- [ ] **A stack is re-gated one task at a time.** When the bottom of a stack changes, sync
+- [x] **A stack is re-gated one task at a time.** When the bottom of a stack changes, sync
       restacks and re-gates every task above it in sequence (4 × ~5 minutes in `g13`). Pipeline
       it: restack the next task while the previous one's gate runs, within `max_parallel`.
-- [ ] **Identical trees are gated again.** A restacked task whose tree equals one that already
+      (done in `g15`, task `pipelined-restacks`)
+- [x] **Identical trees are gated again.** A restacked task whose tree equals one that already
       passed its gate should reuse that result, like the combined check's fingerprint cache.
+      (done in `g15`, task `gate-result-reuse`)
 - [ ] Fast gates (A, B, E and fast end-to-end tests above) stay the biggest win: `internal/cli`
       now takes about 290 seconds per gate.
 
@@ -882,7 +888,7 @@ without arguments, with the single task `sync-busy-child` joined to the same run
 models` works; tasks from before `g14` show complexity `medium` and model `-` because neither
 was recorded then.
 
-## Fast gates: in progress (goal `g15`, operator decision 2026-11-24)
+## Fast gates: done (goal `g15` landed 2026-11-25, $21.02)
 
 Measured before planning: `internal/cli` 250s (210 tests), `internal/keeper` 82s,
 `internal/pipeline` 74s, `internal/gitx` 44s; no `t.Parallel()` anywhere; `t.Setenv` 25 times in
@@ -929,5 +935,53 @@ under 90s) is not met yet.
       gate results, pipelined restacks) then carries the speed-up by saving whole gate runs,
       and test speed needs another approach (fewer git processes per test, shared fixture
       repositories).
-- [ ] Review the remaining `g15` tasks with this in mind: `max_parallel_gates = 1` matters more
-      than expected, because parallel test runs compete for the same cores.
+- [x] Review the remaining `g15` tasks with this in mind: `max_parallel_gates = 1` matters more
+      than expected, because parallel test runs compete for the same cores. (Reviewed; the
+      default stays 1.)
+
+### `g15` landed
+
+All 11 tasks landed (PRs #73–#78, #80–#84), $21.02 in total. What changed for gates:
+
+- **Gate slots.** `max_parallel_gates` (default 1) bounds the gates running at once across every
+  mill process: task gates, the combined check and the gates `sync` and `keep` re-run after
+  restacks. Agents still run up to `max_parallel`. `mill watch` shows `waiting for gate`.
+- **Gate reuse.** A tree that already passed the same `check_cmd` and task checks is not gated
+  again; mill prints `gate reused (tree <sha>)`.
+- **Pipelined restacks.** `sync` and `keep` restack the next task of a stack while the previous
+  task's gate runs; a child of a red parent is blocked with the reason and not published.
+- **Narrow task checks.** Plan validation warns when a task check repeats a whole-package
+  `go test` that `check_cmd` already runs.
+
+Findings from running it:
+
+- [ ] **The budget check blocks a task that only needs a verifier.** `pipelined-restacks`
+      passed its gate on attempt 2 with $5.51 of its $8 task budget spent, and was blocked
+      because "an attempt may use $3.00". Only a verifier run (about $0.55) was left. The check
+      should reserve what the next step costs (the verifier after a passed gate, a whole attempt
+      only before an implementer). It was unblocked by raising the task budget for one run.
+- [ ] **`--retry-blocked` on a task blocked in `verify` reruns the implementer.** The
+      implementer found nothing to do ($0.40, 8 minutes) before the verifier ran. A task
+      blocked after a passed gate should resume at the verifier.
+- [ ] **Background re-publishes fetch while the next task is restacked.** Since pipelined
+      restacks, a re-publish (fetch and push in the shared repository) can overlap with the
+      next task's rebase. Git locks refs one at a time, so a clash is unlikely; watch for
+      "cannot lock ref" errors in `sync` and `keep` and serialise those git calls if they occur.
+- [ ] **An attempt's wall time includes the Mac's sleep.** `pipelined-restacks` attempt 2 shows
+      2h40m for 13 minutes of work. Stats that average attempt time should use the agent's own
+      duration, not wall time.
+
+### This machine throttles
+
+mill runs on a MacBook Air M2 (Mac14,15): fanless, 4 performance and 4 efficiency cores, 16 GB,
+often on battery. Under a sustained load (two agents, a gate and `go test` with 8 packages of
+8 parallel tests each) it heats up and slows down, which is part of why the first
+measurement above was slower than the serial run. Also seen eating CPU next to mill:
+`fseventsd` (file events for the worktrees), AirBuddy's `AirStatsService` and the Colima VM
+(stopped on 2026-11-24).
+
+- Measure test settings only on power and with nothing else running.
+- Keep parallelism conservative on this machine: `max_parallel_gates = 1`, and test flags chosen
+  by the fair measurement, not by the core count.
+- [ ] Consider running gates under `nice`, so agents and the terminal stay responsive while a
+      gate runs.
