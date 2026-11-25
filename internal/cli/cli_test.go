@@ -61,17 +61,29 @@ func gitRepo(t *testing.T) string {
 	return resolved
 }
 
-// tools simulates agent CLIs on PATH, so tests never depend on the machine's claude/herdr.
+// fakeGitBin is the git binary tools() tells doctor mill runs.
+const fakeGitBin = "/fake/git"
+
+// tools simulates git and the agent CLIs, so doctor tests never depend on the machine's
+// git, claude or herdr.
 func tools(have map[string]string) *doctor.Options {
+	// git is asked for by the path GitBin returns, the other tools by name.
+	key := func(name string) string {
+		if name == fakeGitBin {
+			return "git"
+		}
+		return name
+	}
 	return &doctor.Options{
+		GitBin: func() string { return fakeGitBin },
 		LookPath: func(name string) (string, error) {
-			if _, ok := have[name]; ok {
-				return "/fake/" + name, nil
+			if _, ok := have[key(name)]; ok {
+				return "/fake/" + key(name), nil
 			}
 			return "", exec.ErrNotFound
 		},
 		Output: func(name string, _ ...string) (string, error) {
-			if out, ok := have[name]; ok {
+			if out, ok := have[key(name)]; ok {
 				return out, nil
 			}
 			return "", errors.New("missing")
@@ -310,6 +322,9 @@ func TestDoctorAfterInit(t *testing.T) {
 	}
 	if !strings.Contains(r.stdout, "warn  config") || !strings.Contains(r.stdout, "ok    database") {
 		t.Fatalf("doctor output:\n%s", r.stdout)
+	}
+	if want := "git 2.50.1 (>= 2.38.0) at " + fakeGitBin; !strings.Contains(r.stdout, want) {
+		t.Fatalf("doctor output lacks %q:\n%s", want, r.stdout)
 	}
 }
 

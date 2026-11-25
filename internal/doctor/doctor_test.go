@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 )
@@ -46,6 +48,9 @@ func TestAtLeast(t *testing.T) {
 	}
 }
 
+// fakeGitBin is the git path injected as GitBin. It names a tool in f.tools by base name.
+const fakeGitBin = "/fake/bin/git"
+
 // fakeEnv simulates tools on PATH. Real git is still used for repository checks.
 type fakeEnv struct {
 	tools  map[string]string // name → `--version` output; absent = not on PATH
@@ -54,15 +59,16 @@ type fakeEnv struct {
 
 func (f fakeEnv) opts(dir string) Options {
 	return Options{
-		Dir: dir,
+		Dir:    dir,
+		GitBin: func() string { return fakeGitBin },
 		LookPath: func(name string) (string, error) {
-			if _, ok := f.tools[name]; ok {
-				return "/fake/bin/" + name, nil
+			if _, ok := f.tools[filepath.Base(name)]; ok {
+				return "/fake/bin/" + filepath.Base(name), nil
 			}
 			return "", exec.ErrNotFound
 		},
 		Output: func(name string, args ...string) (string, error) {
-			out, ok := f.tools[name]
+			out, ok := f.tools[filepath.Base(name)]
 			if !ok {
 				return "", errors.New("not found")
 			}
@@ -82,11 +88,11 @@ func byName(r Report) map[string]Check {
 
 func gitRepo(t *testing.T) string {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
+	if _, err := exec.LookPath(gitx.Bin()); err != nil {
 		t.Skip("git not installed")
 	}
 	dir := t.TempDir()
-	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+	if out, err := exec.Command(gitx.Bin(), "init", "-q", dir).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 	return dir
@@ -134,12 +140,44 @@ func TestAllGreen(t *testing.T) {
 	}
 }
 
+func TestGitCheckNamesResolvedBinary(t *testing.T) {
+	t.Parallel()
+	opts := fakeEnv{tools: goodTools}.opts(t.TempDir())
+	const bin = "/opt/git/bin/git"
+	opts.GitBin = func() string { return bin }
+	output := opts.Output
+	var ran []string
+	opts.Output = func(name string, args ...string) (string, error) {
+		ran = append(ran, name)
+		return output(name, args...)
+	}
+	c := byName(Run(context.Background(), opts))["git"]
+	if c.Status != OK || !strings.Contains(c.Detail, bin) {
+		t.Fatalf("git = %+v, want ok with %s in detail", c, bin)
+	}
+	if !slices.Contains(ran, bin) {
+		t.Errorf("--version never ran on %s; ran %v", bin, ran)
+	}
+	if slices.Contains(ran, "git") {
+		t.Errorf("--version ran on PATH git instead of the resolved binary; ran %v", ran)
+	}
+}
+
+func TestMissingGitNamesResolvedBinaryAndFix(t *testing.T) {
+	t.Parallel()
+	r := Run(context.Background(), fakeEnv{}.opts(t.TempDir()))
+	c := byName(r)["git"]
+	if r.OK || c.Status != Fail || !strings.Contains(c.Detail, fakeGitBin) || !strings.Contains(c.Detail, "PATH") {
+		t.Fatalf("missing git = %+v, want fail naming %s and the PATH fix", c, fakeGitBin)
+	}
+}
+
 func TestOldGitFailsAndSkipsTheRest(t *testing.T) {
 	t.Parallel()
 	r := Run(context.Background(), fakeEnv{tools: map[string]string{"git": "git version 2.30.1"}}.opts(t.TempDir()))
 	c := byName(r)
-	if r.OK || c["git"].Status != Fail {
-		t.Fatalf("old git not failed: %+v", r.Checks)
+	if r.OK || c["git"].Status != Fail || !strings.Contains(c["git"].Detail, fakeGitBin) {
+		t.Fatalf("old git not failed with its path: %+v", r.Checks)
 	}
 	for _, name := range []string{"repo", "init", "config", "database", "runner", "host"} {
 		if c[name].Status != Skip {
