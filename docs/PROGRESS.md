@@ -382,7 +382,7 @@ commit, rebase, squash), and mill detects each one.
 - [x] (done: `g15`, plus plan warnings for task checks that repeat `check_cmd`.) mill's own gate now takes ~4 minutes (many end-to-end git tests, run twice: `make check`
       plus the task's `-race` checks). Consider sharding, or skipping the duplicate run when a
       task's checks are a subset of `check_cmd`.
-- [ ] Minor (from the verifier): if `Runner.Run` panics, the live-usage writer goroutine leaks.
+- [x] (done: `defer live.stop()` in the pipeline's agent call.) Minor (from the verifier): if `Runner.Run` panics, the live-usage writer goroutine leaks.
 - [ ] GT7 (rebuild state from git) stays deferred, see the design notes.
 
 
@@ -1329,14 +1329,13 @@ directory from the worktree's parent, which is wrong for goal tasks (`<root>/<go
 
 ## Open items from earlier goals (reviewed 2026-11-26)
 
-Every unticked item above was checked against the code: 19 were already done, superseded or
+Every unticked item above was checked against the code: 20 were already done, superseded or
 obsolete and are now ticked with what did it; five are process rules (two of them kept as my
 memories). Still open:
 
 - planned as `g22`: preparation conflicts go to the resolver; warn or rebase when a task's owned
   files changed on the base; combined check over verified siblings before a batch is published;
-  the planner puts cross-feature tests in their own task; the usage writer survives a runner
-  panic;
+  the planner puts cross-feature tests in their own task;
 - for M6, with the PR hooks: the fan-in publish rule makes wide graphs land in many rounds;
 - deferred: GT7 (rebuild state from git);
 - watching: "cannot lock ref" from overlapping re-publishes (not seen so far).
