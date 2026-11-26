@@ -1291,23 +1291,38 @@ a stack, then merge from the bottom.
 
 ### Found while running and reviewing `g20`
 
-- [ ] **16. The per-attempt `TMPDIR` is inside `.mill/runs`,** where role settings deny Read,
+- [x] **16. The per-attempt `TMPDIR` is inside `.mill/runs`,** (Fixed in `g21`, `worker-tmpdir-outside-mill` and `clean-removes-task-tmpdir`.) where role settings deny Read,
       Write and Edit (`.mill/**`), while the prompt tells agents to put scratch files there.
       Shell redirection works; the tools do not. Move it outside `.mill` (e.g. next to the
       worktrees).
-- [ ] **17. Only pipeline gates fall back to the exec host.** `gate.Options.Fallback` is set in
+- [x] **17. Only pipeline gates fall back to the exec host.** (Fixed in `g21`, `gate-fallback-everywhere`.) `gate.Options.Fallback` is set in
       `internal/pipeline/pipeline.go`; publish/restack gates (`internal/publish/publish.go`) and
       the combined check (`internal/keeper/combined.go`) get the retry but no fallback, although
       they can run on herdr.
-- [ ] **18. Out-of-scope verifier findings include landed tasks.** `splitOutOfScope` matches every
+- [x] **18. Out-of-scope verifier findings include landed tasks.** (Fixed in `g21`, `out-of-scope-skips-landed`.) `splitOutOfScope` matches every
       other task of the goal; the owns check skips landed ones, so a task may edit their files,
       and a real finding about such a file is dropped (and can turn a fail into a pass with
       notes). Skip landed tasks there too.
-- [ ] **19. Running tasks show a redundant claim.** `mill task list` prints
+- [x] **19. Running tasks show a redundant claim.** (Fixed in `g21`, `task-list-hide-run-claims`.) `mill task list` prints
       `(claimed: mill run, held …)` for every task `mill run` is running.
-- [ ] **20. The plan warning about siblings' files fires on mentions.** In `g20` it flagged a
+- [x] **20. The plan warning about siblings' files fires on mentions.** (Fixed in `g21`, `plan-warning-only-changes`.) In `g20` it flagged a
       criterion that used README.md as a test scenario and one that read `config.go` to check
       stated defaults. Warn only when the criterion asks for a change to that file, or list such
       warnings as "check" rather than "warning".
-- [ ] **21. `blocked` is printed twice** in the run log (`<task>: blocked: ... (task total ...)`
+- [x] **21. `blocked` is printed twice** (Fixed in `g21`, `blocked-logged-once`.) in the run log (`<task>: blocked: ... (task total ...)`
       and `<task>: blocked: ...`), like `verified` was.
+
+## `g20` follow-ups: done (goal `g21` landed 2026-11-26, $3.62)
+
+Eight small tasks (PRs #149–#156), planned at $1.99–$6.29 from past tasks; `plan show` printed
+the longest chain (three tasks, about 27 minutes). Agents' `TMPDIR` now lives under the worktree
+root (`<worktree root>/<repo>-<hash>/.tmp/<task>/a<n>-<role>`), outside `.mill`, removed after a
+successful run and by `mill clean`. Publish/restack gates and the combined check fall back to the
+exec host too. Verifier findings about files of landed tasks are no longer dropped. `mill task
+list` hides `mill run`'s own claims on running tasks. The plan warning about another task's file
+fires only when a criterion asks to change it. `blocked` is logged once.
+
+Four tasks needed a second attempt, all for real problems the verifiers found: a test that
+imitated the pipeline's log line instead of checking the real one, an untested planner path, a
+wrong README path, and a bug that came from the plan itself: `mill clean` derived the temp
+directory from the worktree's parent, which is wrong for goal tasks (`<root>/<goal>/<task>`).
