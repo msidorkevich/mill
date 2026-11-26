@@ -269,7 +269,9 @@ agent, and delivers each task as its own branch for a human to review and merge 
   - `mill doctor` runs each configured hook with `MILL_HOOK_CHECK=1` and no stdin; the script
     checks its own prerequisites (CLI installed, logged in, repository reachable) and exits 0.
     The core never knows which forge it is.
-- **HK4.** Example GitHub and Bitbucket hooks ship *outside* the core. Both handle stacks:
+- **HK4.** Example GitHub and Bitbucket hooks ship *outside* the core, as POSIX `sh` scripts
+  that use only `git`, `curl` and `jq` and the forges' REST APIs (no forge CLI). Both handle
+  stacks:
   - One PR per review branch. The script first looks for an open PR from the branch: if there is
     one it updates its base, title and body; otherwise it creates a draft PR.
   - The base is the parent's review branch for a stacked task, so each PR shows only its own
@@ -283,10 +285,26 @@ agent, and delivers each task as its own branch for a human to review and merge 
     "Automatically delete head branches"; Bitbucket: "Delete source branch after merging"), so
     the forge retargets open child PRs to `main`, and warns that a PR cannot be opened against
     a parent branch that is already gone.
-  - GitHub: `gh pr list --head`, `gh pr create --draft`, `gh pr edit --base`.
-  - Bitbucket Cloud: REST API 2.0 pull requests (`curl` + `jq`), draft when the workspace
-    supports it; credentials (an API token) come from the environment, never from
-    `.mill/config.toml`. `status` reads Bitbucket Pipelines build statuses for the head sha.
+  - The owner/workspace and repository come from the remote URL in the hook's JSON (HK2), in
+    both the SSH and the HTTPS form.
+  - GitHub REST: find the open PR with `GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}`,
+    create it with `POST /repos/{owner}/{repo}/pulls` (`draft: true`), update or retarget it
+    with `PATCH /repos/{owner}/{repo}/pulls/{n}`. `status` reads the head sha's combined status
+    and check runs.
+  - Bitbucket Cloud REST 2.0: find it with
+    `GET /2.0/repositories/{ws}/{repo}/pullrequests?q=source.branch.name="{branch}" AND state="OPEN"`,
+    create it with `POST …/pullrequests` (draft when the workspace supports it), update or
+    retarget it with `PUT …/pullrequests/{id}`. `status` reads the head sha's build statuses
+    (Bitbucket Pipelines and others).
+  - Credentials come from the environment, never from `.mill/config.toml`: a GitHub
+    fine-grained token limited to the repository (pull requests read/write, commit statuses and
+    checks read), or a Bitbucket API or repository access token. Hooks get the same
+    allowlisted environment as workers (SE3) plus `hook_env` from the config, which names the
+    token variables. A missing token fails the hook (and the doctor check) with what to set.
+  - The API base URL can be overridden (`MILL_GITHUB_API`, `MILL_BITBUCKET_API`), for GitHub
+    Enterprise and for tests: the scripts are tested by running them against a fake HTTP server
+    in Go tests, so the suite stays offline (P8). The scripts pass `shellcheck` when it is
+    installed.
 
 ### Budgets (BG)
 

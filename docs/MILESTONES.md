@@ -134,7 +134,7 @@ flagged correctly.
 ## M6. Extensions
 
 - Hooks (`on_publish`, `on_update`, `status`) plus example GitHub and Bitbucket scripts outside
-  the core. The scripts open one draft PR per published task (or update the open one), targeting
+  the core: POSIX `sh` with `git`, `curl` and `jq` over the forges' REST APIs, no forge CLI. The scripts open one draft PR per published task (or update the open one), targeting
   the parent task's review branch so a stack reviews bottom-up, retarget it when the parent
   lands, and name the parent PR in the body. This is the first goal of M6: everything after it is
   reviewed through PRs the hook opens.
