@@ -754,7 +754,8 @@ together: they compile and their packages pass).
 
 ### Follow-ups found in `g13`
 
-- [ ] **The verifier does not see the rest of the plan.** It rejected
+- [x] **The verifier does not see the rest of the plan.** (Fixed in `g19`, task
+      `verifier-plan-context`.) It rejected
       `run-command-one-scheduler` because `sync`, `keep` and `clean` still took the run lock on
       that branch, which is the sibling task `short-locks-sync-keep-clean`'s job, built in
       parallel. The implementer then did the sibling's work in the sibling's files, and the two
@@ -765,13 +766,15 @@ together: they compile and their packages pass).
       `owns-outside` for five files that belonged to a sibling task and let the attempt pass.
       When a file is owned by another task of the same goal, the owns check should fail the
       attempt (revert hint included), not warn.
-- [ ] **Overlapping acceptance criteria.** The planner gave `run-command-one-scheduler` a
+- [x] **Overlapping acceptance criteria.** (Partly fixed in `g19`: plan review warns when a
+      criterion names a file owned by another task.) The planner gave `run-command-one-scheduler` a
       criterion ("recovery output only from `mill run` and `mill task run`") that could only be
       met by changing a sibling's files, so a revert failed the same way a second time; I
       corrected the criterion with `mill task edit`. My plan review checked file ownership but
       not whether each criterion can be met within the task's own files; plan validation (or
       the planner prompt) should check that too.
-- [ ] **`mill task edit` needs bare ids and explicit fields.** Editing a goal task from
+- [x] **`mill task edit` needs bare ids and explicit fields.** (Fixed in `g19`, task
+      `task-edit-accepts-show-json`.) Editing a goal task from
       `mill task show --json` failed twice: the id must be the bare plan id
       (`run-command-one-scheduler`, not `g13/...`) and `depends_on` must be present even though
       `task show` leaves it out. `task edit` should accept what `task show --json` prints.
@@ -813,16 +816,19 @@ Not yet planned into a goal unless noted. Grouped by area; each names what was s
 
 ### Visibility
 
-- [ ] **Work done by `sync`, `keep` and `review approve` is invisible.** While `mill sync`
+- [x] **Work done by `sync`, `keep` and `review approve` is invisible.** (Fixed in `g19`:
+      claims carry an activity, shown by `mill watch` and `mill task list`.) While `mill sync`
       restacked and re-gated four `g13` tasks for about 20 minutes, the tasks stayed `verified`,
       `mill task list --status running` printed `no tasks` and `mill watch` printed `nothing
       running`; only the claim row showed it. Claims should carry what their holder is doing
       (`sync: restack`, `sync: gate 3m`, `approve: push`), and `mill watch`, `goal show`,
       `task list` and the TUI Agents view should list claimed tasks next to running ones.
-- [ ] **`mill task list` buries current work.** It lists every task oldest first (80 rows now),
+- [x] **`mill task list` buries current work.** (Fixed in `g19`, task
+      `task-list-current-first`.) It lists every task oldest first (80 rows now),
       so active tasks are at the bottom. Show running and claimed tasks first, then the rest
       (or newest first, with `--all` for history).
-- [ ] **Skipped tests are found by reading summaries.** The `e2e-one-scheduler` agent correctly
+- [x] **Skipped tests are found by reading summaries.** (Fixed in `g19`: added `t.Skip` calls
+      are listed by `mill review` and `mill task show`.) The `e2e-one-scheduler` agent correctly
       left `TestSyncDuringRunReportsRunningChildBusy` skipped with the bug in its reason. mill
       should detect `t.Skip` added by a task's diff and list it in the review and in `task
       show`, so it becomes a follow-up without me spotting it.
@@ -971,7 +977,8 @@ Findings from running it:
       restacks, a re-publish (fetch and push in the shared repository) can overlap with the
       next task's rebase. Git locks refs one at a time, so a clash is unlikely; watch for
       "cannot lock ref" errors in `sync` and `keep` and serialise those git calls if they occur.
-- [ ] **An attempt's wall time includes the Mac's sleep.** `pipelined-restacks` attempt 2 shows
+- [x] **An attempt's wall time includes the Mac's sleep.** (Fixed in `g19`, task
+      `agent-duration`; see finding 14 below for runs with several results.) `pipelined-restacks` attempt 2 shows
       2h40m for 13 minutes of work. Stats that average attempt time should use the agent's own
       duration, not wall time.
 
@@ -987,7 +994,7 @@ measurement above was slower than the serial run. Also seen eating CPU next to m
 - Measure test settings only on power and with nothing else running.
 - Keep parallelism conservative on this machine: `max_parallel_gates = 1`, and test flags chosen
   by the fair measurement, not by the core count.
-- [ ] Consider running gates under `nice`, so agents and the terminal stay responsive while a
+- [x] Consider running gates under `nice`, (done in `g19`: `gate_nice`, default 10) so agents and the terminal stay responsive while a
       gate runs.
 
 ### Fair measurement: parallel tests are 1.8× faster
@@ -1183,3 +1190,65 @@ time; together they are a candidate for the next goal.
       share `task.go`, `pipeline.go` and `migrations.go` were chained into a sequence of seven,
       which sets most of the goal's duration. `mill plan show` could print the longest chain
       with its estimated time, so splitting a shared file can be weighed at plan review.
+
+## Follow-ups landed: done (goal `g19` landed 2026-11-26, $9.79)
+
+Twelve tasks (PRs #118–#132), eleven verified on their first attempt. What changed:
+
+- Crash recovery closes the herdr tabs of recovered attempts (the herdr host records each
+  worker's tab next to its pid and exit files).
+- `mill plan show` estimates each task from past tasks of the same size, complexity and model
+  (25th–90th percentile, once there are three) and falls back to budget limits, saying which.
+  For `g19`'s own plan it now gives $7.26–$24.57 against $9.79 spent; the budget-based estimate
+  was $40–89.
+- Claims carry what their holder is doing (`sync: restack`, `keep: gate`, `approve: push`, ...);
+  `mill watch` and `mill task list` show claimed tasks and how long they have been held.
+- `mill task list` shows running and claimed tasks first, then blocked and failed ones, then the
+  20 newest others; `--all` keeps the old listing.
+- `t.Skip` calls a task adds are recorded when it is verified and listed in `mill review` and
+  `mill task show`.
+- The verifier sees the goal's other tasks (id, title, owns, summary) and is told not to fail a
+  task for another task's scope; plan review warns when a criterion names a sibling's file.
+- `mill task edit` accepts what `mill task show --json` prints.
+- Gates run under `nice -n 10` (`gate_nice`); `mill doctor` reports it.
+- Attempt times use the agent's reported duration, so Mac sleep no longer counts.
+
+Publishing took four waves. Two stacked PRs (#123, #124) were merged into their parents' review
+branches after the parents had landed, so their code missed `master`; `keep` restacked both onto
+`master` and they landed as #125 and #126. "Automatically delete head branches" is now on in
+GitHub, which retargets open child PRs, but a child PR can then no longer be opened once its
+parent merged. Opening and retargeting stacked PRs is now part of the M6 hook requirements
+(HK1–HK4, PR #130), planned as M6's first goal.
+
+### Found while running and reviewing `g19`
+
+Continues the numbered list in "Improvements found while watching `g19`".
+
+- [ ] **11. The owns check counts dependent tasks as siblings.** `task-list-current-first` edited
+      README.md (the verifier asked for it); README.md belongs to `readme-followups`, which
+      depends on it and builds on top, so the edit could not conflict. The owns check failed the
+      attempt anyway (`internal/pipeline/owns.go` counts every sibling that has not landed).
+      Exempt tasks that depend on the edited task, directly or not.
+- [ ] **12. A verifier finding about a sibling's file reaches the next attempt.** Attempt 2 then
+      got "update README.md" from the verifier and "revert README.md" from mill. The verifier
+      gave opposite verdicts on the same tree (fail on attempt 1, pass on attempt 3). Since `g19`
+      the verifier sees the siblings; mill could also drop or flag a finding whose file another
+      task owns before it reaches the implementer.
+- [ ] **13. Read-only commands migrate the database, and older mill then refuses it.** I ran a
+      `g19` build's `mill plan show` on the live database: it applied migrations 13–14 and the
+      `master` binary then failed with "schema version 14 is newer than this mill (12)", although
+      both migrations only add columns. I restored v12 by hand (backup kept). Migrate only on
+      write commands or on an explicit `mill migrate`, and let an older mill open a database
+      whose newer migrations are additive.
+- [ ] **14. Tokens and agent time come from the last `result` event only.** When a background
+      task wakes the agent after it finished, claude emits a second `result` covering only that
+      last turn. Cost is cumulative and correct, but tokens and `duration_ms` are not:
+      `pipelined-restacks` attempt 2 recorded 1,406 output tokens instead of about 35k, and
+      `task-edit-accepts-show-json` attempt 1 shows 5s instead of 5m13s. 4 of 301 runs so far.
+      Sum usage and durations over all `result` events.
+- [ ] **15. Small things from the review.**
+      - The event kind `skipped_tests` uses an underscore; every other kind uses hyphens.
+      - A skip removed by a later attempt still shows: nothing is recorded when there are none.
+      - A claim says `gate` while the task is still waiting for a gate slot, and has no activity
+        (`-`) during the combined check.
+      - Recovery does not close the tabs of keeper gates (`runs/<task>/keeper`).
