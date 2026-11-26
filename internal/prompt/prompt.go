@@ -227,6 +227,10 @@ type VerifierInput struct {
 	Flaky []string
 	// Siblings are the other tasks of the task's goal; empty for a standalone task.
 	Siblings []SiblingTask
+	// BaseChanged lists files that changed on the base branch since the task started.
+	BaseChanged []string
+	// BaseChangedStat is the diffstat of those base changes, shown with BaseChanged.
+	BaseChangedStat string
 }
 
 // SiblingTask is another task of the same goal, shown to the verifier so it can tell which
@@ -286,6 +290,14 @@ func Verifier(in VerifierInput) string {
 		fmt.Fprintf(&b, "The diff is too large to include (%d bytes). Files changed:\n```\n%s\n```\nRead the changed files to review them.\n\n", len(in.Diff), in.DiffStat)
 	} else {
 		fmt.Fprintf(&b, "```diff\n%s\n```\n\n", in.Diff)
+	}
+	if len(in.BaseChanged) > 0 {
+		b.WriteString("## Changed on the base since this task started\n")
+		for _, f := range in.BaseChanged {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+		fmt.Fprintf(&b, "\n```\n%s\n```\n", strings.TrimRight(in.BaseChangedStat, "\n"))
+		b.WriteString("\nCheck that this task's change does not duplicate or contradict what landed on the base in these files (for example a second section with the same purpose). Report a finding if it does.\n\n")
 	}
 	if len(in.OutsideOwns) > 0 {
 		b.WriteString("## Files changed outside the files the task owns\n")

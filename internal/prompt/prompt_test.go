@@ -149,6 +149,37 @@ func TestVerifierPromptNamesFlakyCommands(t *testing.T) {
 	}
 }
 
+func TestVerifierPromptListsBaseChanges(t *testing.T) {
+	t.Parallel()
+	in := VerifierInput{Task: taskspec.Spec{ID: "t", Title: "T", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
+	in.BaseChanged = []string{"docs/guide.md", "internal/cli/run.go"}
+	in.BaseChangedStat = "docs/guide.md | 4 ++++\ninternal/cli/run.go | 2 +-"
+	p := Verifier(in)
+	for _, w := range []string{
+		"## Changed on the base since this task started",
+		"- docs/guide.md\n", "- internal/cli/run.go\n",
+		"```\ndocs/guide.md | 4 ++++\ninternal/cli/run.go | 2 +-\n```",
+		"does not duplicate or contradict", "a second section with the same purpose", "Report a finding if it does",
+	} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+}
+
+func TestVerifierPromptOmitsBaseSectionWhenNoBaseChanges(t *testing.T) {
+	t.Parallel()
+	in := VerifierInput{Task: taskspec.Spec{ID: "t", Title: "T", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
+	before := Verifier(in)
+	in.BaseChangedStat = "docs/guide.md | 4 ++++"
+	if p := Verifier(in); p != before {
+		t.Fatalf("stat without files changed the prompt:\n%s", p)
+	}
+	if strings.Contains(before, "Changed on the base") || strings.Contains(before, "duplicate or contradict") {
+		t.Fatalf("base section shown without base changes:\n%s", before)
+	}
+}
+
 func TestVerifierPromptListsSiblingTasks(t *testing.T) {
 	t.Parallel()
 	in := VerifierInput{Task: taskspec.Spec{ID: "g/a", Title: "A", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
