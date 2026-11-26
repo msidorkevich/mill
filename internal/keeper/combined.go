@@ -333,6 +333,11 @@ func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResu
 	if err != nil {
 		return probeResult{}, err
 	}
+	for _, cr := range g.Commands {
+		if cr.Note != "" {
+			c.logf("combined check: probe %d: %s: %s", c.res.Probes, cr.Cmd, cr.Note)
+		}
+	}
 	if ctx.Err() != nil {
 		return probeResult{}, fmt.Errorf("combined check interrupted: %w", ctx.Err())
 	}
@@ -374,6 +379,7 @@ func (c *combined) gateInSlot(ctx context.Context, o gate.Options) (g gate.Resul
 			err = errors.Join(err, fmt.Errorf("combined check: %w", rerr))
 		}
 	}()
+	o.Fallback = host.NewExec()
 	return gate.Run(ctx, o), nil
 }
 
