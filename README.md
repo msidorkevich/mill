@@ -1,3 +1,5 @@
+![mill: a watermill whose wheel is a task graph, turning tasks into branches](docs/images/mill-hero.png)
+
 # mill
 
 A deterministic harness that turns a goal into a graph of tasks, runs a coding agent for each
