@@ -139,7 +139,7 @@ mill review show g1/a           # spec, acceptance, last verdict and gate, attem
 mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
 mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
 mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
-mill review approve --goal g1   # approve every verified task, parents first; children of unpublished parents are queued
+mill review approve --goal g1 [--no-combined]   # approve every verified task, parents first; children of unpublished parents are queued
 mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
 mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
 mill stats models               # first-pass rate, avg attempts and avg $ by size, complexity and first-attempt model (--json)
@@ -160,6 +160,10 @@ are not listed there.
 without `-run` while `check_cmd` already runs `go test ./...` (or `make check`): the gate runs
 those tests anyway, so the task check should be narrow, for example
 `go test -run 'TestName' ./pkg/`. The warning does not stop the plan from being created.
+
+`mill plan` and `mill plan show` also warn when a task depends on another task and their `owns`
+overlap only on test files (`*_test.go`), for example `b depends on a but they share only test
+files (...)`: consider moving the shared test into its own task. The warning does not stop the plan.
 
 `mill plan` and `mill plan show` also warn when an acceptance criterion asks to change a path that
 another task owns (for example `Update internal/x.go` or `internal/x.go documents ...` when task b
@@ -333,6 +337,8 @@ run `mill plan edit g1 --file <path>`.
 the head of README.md, build files, `check_cmd`) and read-only tools (Read, Glob, Grep). It uses
 the `[roles]` `planner` model and the per-attempt budget of size M from `.mill/config.toml`, the same agent
 environment as `mill run`, cannot touch `.mill/`, and logs under `.mill/runs/plans/<timestamp>/`.
+The planner prefers parallel tasks: it chains tasks with `depends_on` only when one needs the
+other's result, so independent tasks can run at the same time.
 An invalid plan goes back to the planner once with its problems. If the second plan is invalid
 too, mill prints the problems, saves the plan to `.mill/runs/plans/<timestamp>/plan.json`,
 creates no goal and exits 1: fix the file and run `mill plan --file <that path>`.
@@ -427,6 +433,13 @@ is based on that dependency's branch. With several, it is based on the deepest d
 branch and the others are merged in. Either way the verifier reviews only the task's own work:
 the diff from where the task started, after those merges.
 
+When the dependencies conflict with each other while the task's branch is prepared, mill runs the
+resolver agent on the conflicting files as an attempt with role `resolver`. If the resolver fails,
+the task is blocked with the resolver's summary. The verifier prompt lists the files changed on the
+base since the task started that the task owns or changed (`Changed on the base`), and
+`mill review show` lists them too, with the hint `mill task rebase <id>` for an unpublished task and
+`mill keep` for a published one. Other files changed on the base are not listed.
+
 **Blocked tasks.** When a task blocks or fails, independent tasks still run and the goal ends
 `blocked` (exit 4); `mill goal show g1` names the stopped tasks and the ones waiting on them.
 Find the cause with `mill task show g1/<task>` (reason, attempts, last findings), fix it (for
@@ -487,7 +500,10 @@ Once a goal's tasks are verified, you review them in mill and publish them for y
 
 - `mill review` lists verified and published tasks. `mill review show g1/a` prints the spec,
   acceptance, last verdict and gate, attempts, cost, branch and diff stat (`--diff` for the full
-  diff).
+  diff). It also lists the files changed on the base since the task started that the task owns or
+  changed, under `Changed on the base since this task started:`, with the hint
+  `mill task rebase <id>` (or `mill keep` for a published task). When there are no such files, the
+  list and hint are omitted, even if the base has moved.
 - `mill review approve g1/a` publishes the task. `mill review changes g1/a -m "text"` records
   your comments (a blank line separates findings) and sends the task back for another attempt.
   `mill review reject g1/a -m "why"` blocks the task and puts its non-landed descendants on hold.
@@ -505,6 +521,11 @@ put back to pending (`--retry-blocked`, crash recovery) or a new implementer or 
 whose attempt is older than the task's latest one (for example after the resolver agent changed
 the code). Restacks keep the approval: a rebase that replays the same commits onto a moved base
 is still the approved change.
+
+`mill review approve --goal g1` first runs the combined check over the verified branches it would
+publish (the same check as `mill keep`, see below). Pairs that clash are held back and not
+published: mill names each pair and its failed commands, and the rest are published. `--no-combined`
+skips the check and publishes as before.
 
 The recommended loop for a stack: `mill review approve --goal g1` publishes what it can and
 queues the rest, then `mill keep --watch` publishes each queued child as soon as you merge its
