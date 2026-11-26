@@ -847,10 +847,21 @@ func printGoalView(w io.Writer, v goalView) {
 		if r.Phase != "" {
 			st += " (" + r.Phase + ")"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%.2f\n", r.LocalID, st, strings.Join(r.DependsOn, ","),
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%.2f\n", r.LocalID, st, depsColumn(r.DependsOn),
 			r.Attempts, fmtInt(r.Usage.Tokens(budget.CountBillable)), r.Usage.CostUSD)
 	}
 	tw.Flush()
+}
+
+// maxDepsShown is how many dependencies the goal status table lists per task.
+const maxDepsShown = 3
+
+// depsColumn is a task's DEPENDS ON cell: at most maxDepsShown ids, then how many more.
+func depsColumn(ids []string) string {
+	if len(ids) <= maxDepsShown {
+		return strings.Join(ids, ",")
+	}
+	return fmt.Sprintf("%s +%d more", strings.Join(ids[:maxDepsShown], ","), len(ids)-maxDepsShown)
 }
 
 // editTemp writes data to a new temporary file named after prefix, runs $EDITOR (default vi)

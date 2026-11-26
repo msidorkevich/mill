@@ -383,3 +383,35 @@ func TestPlanGoalTextRateLimitedPrintsResetAndCreatesNoGoal(t *testing.T) {
 		t.Errorf("a goal was created:\n%s", l.stdout)
 	}
 }
+
+func TestPlanDepsCappedWithDependsMoreCount(t *testing.T) {
+	t.Parallel()
+	task := func(id, deps string) string {
+		return `{"id": "` + id + `", "title": "T", "kind": "implement", "spec": "x", "acceptance": ["x"], "checks": ["true"], "owns": ["` +
+			id + `.go"], "depends_on": [` + deps + `], "size": "S"}`
+	}
+	body := `{"goal": "Fan in", "tasks": [` + strings.Join([]string{
+		task("a", ""), task("b", ""), task("c", ""), task("d", ""), task("e", ""),
+		task("three", `"a", "b", "c"`), task("five", `"a", "b", "c", "d", "e"`),
+	}, ",") + `]}`
+	root := planRepo(t)
+	if r := run(t, root, nil, "plan", "--file", writePlan(t, body)); r.code != ExitOK {
+		t.Fatalf("plan: %+v", r)
+	}
+	if r := run(t, root, nil, "plan", "approve", "g1"); r.code != ExitOK {
+		t.Fatalf("approve: %+v", r)
+	}
+	r := run(t, root, nil, "goal", "show", "g1")
+	rows := map[string]string{}
+	for _, l := range strings.Split(r.stdout, "\n") {
+		if f := strings.Fields(l); len(f) > 0 {
+			rows[f[0]] = strings.Join(f, " ")
+		}
+	}
+	if want := "five pending a,b,c +2 more 0 "; !strings.HasPrefix(rows["five"], want) {
+		t.Errorf("five row = %q, want prefix %q\n%s", rows["five"], want, r.stdout)
+	}
+	if want := "three pending a,b,c 0 "; !strings.HasPrefix(rows["three"], want) {
+		t.Errorf("three row = %q, want prefix %q\n%s", rows["three"], want, r.stdout)
+	}
+}
