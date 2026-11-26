@@ -445,6 +445,16 @@ type taskView struct {
 	Findings []prompt.Finding `json:"findings,omitempty"` // last failed attempt's findings
 	Verdict  json.RawMessage  `json:"verdict,omitempty"`  // last verifier verdict
 	RunsDir  string           `json:"runs_dir"`
+	// DependsOn is a goal task's dependencies (full ids); DepsAdded lists the dependencies
+	// added after the plan was approved, oldest first.
+	DependsOn []string    `json:"depends_on,omitempty"`
+	DepsAdded []depsAdded `json:"deps_added,omitempty"`
+}
+
+// depsAdded is one task-deps-added event: when the dependencies were added and their full ids.
+type depsAdded struct {
+	At    time.Time `json:"at"`
+	Added []string  `json:"added"`
 }
 
 func runTaskShow(ctx context.Context, env Env, args []string) int {
@@ -509,6 +519,28 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 			}
 			break
 		}
+	}
+	goalID, _ := store.SplitTaskID(id)
+	if goalID != "" {
+		if v.DependsOn, err = s.TaskDeps(ctx, id); err != nil {
+			return fail(err)
+		}
+	}
+	for _, e := range evs {
+		if e.Kind != "task-deps-added" {
+			continue
+		}
+		var d struct {
+			Added []string `json:"added"`
+		}
+		if err := json.Unmarshal(e.Data, &d); err != nil {
+			return fail(fmt.Errorf("task %s: bad task-deps-added event %d: %w", id, e.Seq, err))
+		}
+		added := make([]string, 0, len(d.Added))
+		for _, l := range d.Added {
+			added = append(added, store.TaskID(goalID, l))
+		}
+		v.DepsAdded = append(v.DepsAdded, depsAdded{At: e.At, Added: added})
 	}
 
 	if *asJSON {
@@ -607,6 +639,12 @@ func printTask(env Env, v taskView) {
 		model = "(mapping)"
 	}
 	fmt.Fprintf(w, "  model     %s\n", model)
+	if len(v.DependsOn) > 0 {
+		fmt.Fprintf(w, "  depends   %s\n", localIDs(v.DependsOn))
+	}
+	for _, da := range v.DepsAdded {
+		fmt.Fprintf(w, "  dependencies added %s: %s\n", pipeline.FormatResetTime(da.At, time.Now()), localIDs(da.Added))
+	}
 	if b := v.Branch; b != nil {
 		fmt.Fprintf(w, "  branch    %s (base %s @%s, head %s)\n", b.Name, b.Base, short(b.BaseSHA), short(b.HeadSHA))
 		fmt.Fprintf(w, "  worktree  %s\n", b.Worktree)
@@ -661,6 +699,16 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// localIDs joins the local part of each full task id with ", ".
+func localIDs(ids []string) string {
+	local := make([]string, 0, len(ids))
+	for _, id := range ids {
+		_, l := store.SplitTaskID(id)
+		local = append(local, l)
+	}
+	return strings.Join(local, ", ")
 }
 
 func short(sha string) string {
