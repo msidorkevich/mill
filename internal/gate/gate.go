@@ -24,6 +24,11 @@ type CmdResult struct {
 	Error   string `json:"error,omitempty"` // why it could not run, or timed out
 	LogPath string `json:"log_path"`
 	Tail    string `json:"tail"` // last lines of output, for findings and the verifier
+	// Note says where the command ran when the gate's host could not start it.
+	Note string `json:"note,omitempty"`
+	// StartFailed is true when no host could start the command, so it never ran: a re-run
+	// or a run on the task's starting point says nothing about it.
+	StartFailed bool `json:"start_failed,omitempty"`
 }
 
 // Passed reports whether the command ran and exited 0.
@@ -38,13 +43,16 @@ type Result struct {
 
 // Options configure a gate run.
 type Options struct {
-	Host    host.Host
-	Dir     string        // the worktree
-	Cmds    []string      // check_cmd first, then the task's checks; empty entries are skipped
-	LogDir  string        // gate-<i>.log files are written here; never overwritten
-	Env     []string      // complete environment for the commands
-	Timeout time.Duration // per command
-	Nice    int           // > 0 runs each command under `nice -n Nice`; 0 runs it unchanged
+	Host host.Host
+	// Fallback runs a command Host could not start twice (e.g. the exec host); nil, or the
+	// same kind of host as Host, means none.
+	Fallback host.Host
+	Dir      string        // the worktree
+	Cmds     []string      // check_cmd first, then the task's checks; empty entries are skipped
+	LogDir   string        // gate-<i>.log files are written here; never overwritten
+	Env      []string      // complete environment for the commands
+	Timeout  time.Duration // per command
+	Nice     int           // > 0 runs each command under `nice -n Nice`; 0 runs it unchanged
 }
 
 // TailLines and TailBytes bound how much output is kept for findings.
@@ -98,15 +106,17 @@ func runOne(ctx context.Context, o Options, i int, cmd string) CmdResult {
 	if o.Nice > 0 {
 		argv = append([]string{"nice", "-n", strconv.Itoa(o.Nice)}, argv...)
 	}
-	h, err := o.Host.Start(cctx, host.ProcSpec{
+	h, note, err := start(cctx, o, host.ProcSpec{
 		Name:       fmt.Sprintf("gate %d", i),
 		Argv:       argv,
 		Dir:        o.Dir,
 		Env:        o.Env,
 		StdoutPath: cr.LogPath,
 	})
+	cr.Note = note
 	if err != nil {
 		cr.Error = "could not run: " + err.Error()
+		cr.StartFailed = ctx.Err() == nil && !errors.Is(cctx.Err(), context.DeadlineExceeded)
 		return cr
 	}
 	ex, err := h.Wait()
@@ -124,6 +134,29 @@ func runOne(ctx context.Context, o Options, i int, cmd string) CmdResult {
 		cr.Exit = ex.Code
 	}
 	return cr
+}
+
+// start starts spec on o.Host. A start failure is retried once on the same host; when that
+// fails too, the command runs on the fallback host and note says so. A failed start never
+// ran the command.
+func start(ctx context.Context, o Options, spec host.ProcSpec) (h host.Handle, note string, err error) {
+	h, err = o.Host.Start(ctx, spec)
+	if err == nil || ctx.Err() != nil {
+		return h, "", err
+	}
+	if h, err = o.Host.Start(ctx, spec); err == nil || ctx.Err() != nil {
+		return h, "", err
+	}
+	fb := o.Fallback
+	if fb == nil || fb.Name() == o.Host.Name() {
+		return nil, "", err
+	}
+	note = fmt.Sprintf("%s could not start it (twice: %v); ran on %s", o.Host.Name(), err, fb.Name())
+	h, ferr := fb.Start(ctx, spec)
+	if ferr != nil {
+		return nil, note, fmt.Errorf("%s could not start it (twice: %v), nor could %s: %w", o.Host.Name(), err, fb.Name(), ferr)
+	}
+	return h, note, nil
 }
 
 // uniqueLog returns <dir>/gate-<i>.log, or gate-<i>.<k>.log if that exists (TP3: never

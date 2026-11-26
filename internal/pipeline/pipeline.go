@@ -285,7 +285,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 
 		// gate
 		gopts := gate.Options{
-			Host: p.Host, Dir: br.Worktree, Cmds: gateCmds, LogDir: logDir,
+			Host: p.Host, Fallback: host.NewExec(), Dir: br.Worktree, Cmds: gateCmds, LogDir: logDir,
 			Env: p.env(nil), Timeout: p.Cfg.GateTimeout.Duration, Nice: p.Cfg.GateNice,
 		}
 		gr, err := p.gateInSlot(ctx, t, n, startSHA, br.HeadSHA, gopts)

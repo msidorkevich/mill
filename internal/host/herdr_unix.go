@@ -31,7 +31,7 @@ type Herdr struct {
 // NewHerdr returns the herdr host using the herdr binary on PATH and the workspace in
 // HERDR_WORKSPACE_ID.
 func NewHerdr() *Herdr {
-	return &Herdr{Bin: "herdr", Workspace: os.Getenv("HERDR_WORKSPACE_ID"), Poll: 50 * time.Millisecond, StartTimeout: 10 * time.Second, Grace: 2 * time.Second}
+	return &Herdr{Bin: "herdr", Workspace: os.Getenv("HERDR_WORKSPACE_ID"), Poll: 50 * time.Millisecond, StartTimeout: 30 * time.Second, Grace: 2 * time.Second}
 }
 
 // Name implements Host.
@@ -53,7 +53,7 @@ func (h *Herdr) poll() time.Duration {
 
 func (h *Herdr) startTimeout() time.Duration {
 	if h.StartTimeout <= 0 {
-		return 10 * time.Second
+		return 30 * time.Second
 	}
 	return h.StartTimeout
 }
