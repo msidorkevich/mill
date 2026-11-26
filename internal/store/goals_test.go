@@ -38,7 +38,7 @@ func TestMigrationFourUpgradesSchemaThreeInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3; i++ {
-		if _, err := raw.Exec(migrations[i]); err != nil {
+		if _, err := raw.Exec(migrations[i].SQL); err != nil {
 			t.Fatal(err)
 		}
 	}

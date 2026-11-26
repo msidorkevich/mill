@@ -31,6 +31,9 @@ type Options struct {
 	// ClaimAlive reports whether the process holding a task claim is still running it.
 	// Defaults to a check that the pid exists and still runs the claiming mill command.
 	ClaimAlive func(TaskClaim) (bool, error)
+	// migrations replaces the schema migrations. Defaults to the first LatestVersion
+	// entries of the package list. Tests inject longer or shorter lists.
+	migrations []migration
 }
 
 // Open opens (or creates) the database at path, enables WAL mode and applies pending
@@ -58,7 +61,11 @@ func Open(ctx context.Context, path string, opts Options) (*Store, error) {
 	if s.alive == nil {
 		s.alive = claimProcessAlive
 	}
-	if err := s.migrate(ctx); err != nil {
+	list := opts.migrations
+	if list == nil {
+		list = migrations[:LatestVersion]
+	}
+	if err := s.migrate(ctx, list); err != nil {
 		db.Close()
 		return nil, err
 	}
