@@ -1055,7 +1055,7 @@ temporary directory, where it found no templates and created repositories withou
 
 ### Follow-ups found in `g17`
 
-- [ ] **Triage compares commands, not failing tests.** `g17/doctor-git-path` broke three doctor
+- [x] **Triage compares commands, not failing tests.** (Fixed in `g18`.) `g17/doctor-git-path` broke three doctor
       tests in `internal/cli` (its git check asked the test fake for a resolved path the fake
       did not know). Triage re-ran `make check` on the task's starting point, where an unrelated
       flaky herdr test failed, and blocked the task as "fails on the task's starting point too,
@@ -1073,7 +1073,8 @@ temporary directory, where it found no templates and created repositories withou
       `TestHerdrContextCancelKills` (`herdr_unix_test.go:222`) each failed once in a full
       `make check` with `Wait: operation not permitted`. Find why waiting for the killed
       process group returns EPERM under load and make the tests (or the host) handle it.
-- [ ] **Dependencies cannot change after approval.** To fix `doctor-git-path` I wanted it to
+- [x] **Dependencies cannot change after approval.** (Fixed in `g18`: dependencies can be
+      added, not removed.) To fix `doctor-git-path` I wanted it to
       depend on `git-callers-use-bin` (which also edits `cli_test.go`); `mill task edit`
       refuses any change to `depends_on`. Owning the file without the dependency works but
       risks a conflict between the two branches. Allow adding a dependency on a task of the
@@ -1112,3 +1113,22 @@ What went wrong:
 - **The planner missed a file.** `doctor-git-path` broke three doctor tests in `internal/cli`
   whose fake lives in `cli_test.go`, which the task did not own; triage then blamed the base
   (see "Triage compares commands, not failing tests" above). Fixed by `mill task edit`.
+
+## Triage by failing tests, dependencies added after approval: done (goal `g18` landed 2026-11-26, $4.69)
+
+Seven tasks (PRs #108–#114). When a gate command fails and also fails on the task's starting
+point, triage now compares the failing Go tests (`--- FAIL` lines, subtests and package build
+failures, read from the full log): the task is innocent only when every test that failed on its
+head also fails on the starting point. Tests that fail only on the head become findings with an
+excerpt of their output, and the attempt is retried; tests that fail on both are listed as "not
+your fault". Output that is not `go test` output keeps the whole-command comparison, and the
+compared sets are recorded in the `gate-base-failing` / `gate-base-compared` events.
+`mill task edit` can add dependencies on tasks of the same goal to a pending, blocked or failed
+task, moves its branch onto the new parent (a conflict blocks it with the files named) and
+refuses to remove dependencies; `mill task show` lists dependencies and the ones added later.
+
+The run was killed once by Claude Code because the Mac was critically low on memory (five tasks
+verified, one agent mid-attempt). `mill run g18` recovered it: it recorded the interrupted
+attempt's tokens, committed the work the agent had left uncommitted and resumed the task. Usage
+then reached 97% of the five-hour limit; the rest ran after the reset.
+
