@@ -140,9 +140,26 @@ agent, and delivers each task as its own branch for a human to review and merge 
   from files, never from the screen.
 - **HO2.** An `exec` host (subprocess, the default).
 - **HO3.** A `herdr` host: one pane per worker via `herdr pane split` + `herdr pane run`.
-  Selected by `--host auto|exec|herdr`; `auto` picks herdr only when it's installed and mill
-  runs inside a herdr pane.
-- **HO4.** The system is fully functional without herdr.
+  Selected by `--host auto|exec|herdr|tmux`; `auto` picks herdr only when it's installed and
+  mill runs inside a herdr pane.
+- **HO4.** The system is fully functional without herdr or tmux.
+- **HO5.** A `tmux` host, for operators who use plain tmux instead of herdr:
+  - one tmux window per worker (gates included), named like herdr tabs
+    (`mill <task> a<n> implementer`, `mill <task> a<n> gate <i>`), started detached
+    (`tmux new-window -d`) so focus stays where the operator is;
+  - inside tmux (`$TMUX` set) the windows open in the current session; outside it mill creates
+    or reuses a detached session `mill-<repo>` and prints `tmux attach -t mill-<repo>`;
+  - the same wrapper as the herdr host writes the pid, rc and exit files, so results are read
+    from files, never from the screen (HO1); Kill stops the process group and closes the window;
+    a finished worker's window closes, or stays open for a configurable time when it failed
+    (`host.keep_failed`), so the operator can read it;
+  - window ids are recorded next to the wrapper files with the pid of the mill process, and
+    crash recovery closes the windows of mill processes that are gone, as for herdr tabs;
+  - `auto` picks herdr inside a herdr pane, otherwise tmux inside a tmux session, otherwise
+    exec; `mill doctor` shows the tmux version and the session it will use; the TUI's `o` opens
+    the worktree in a new tmux window;
+  - the wrapper and file protocol are shared with the herdr host, not copied; tests use a fake
+    tmux like the fake herdr, and one real-tmux test runs only when tmux is installed.
 
 ### Project toolchains (TC)
 
