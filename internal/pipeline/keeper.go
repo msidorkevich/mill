@@ -52,6 +52,7 @@ func (p *Pipeline) Resolve(ctx context.Context, taskID string, in prompt.Resolve
 		return AgentOutcome{Attempt: n, Stop: why}, nil
 	}
 	logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
+	in.CheckCmd, in.RunsCheck = p.Cfg.CheckCmd, p.Cfg.ImplementerRunsCheck
 	ar, err := p.agent(ctx, t, n, runner.RoleResolver, model, why, prompt.Resolver(in), prompt.ResolverSchema, ImplementerTools, limits, dir, logDir)
 	out := AgentOutcome{Attempt: n, Status: string(ar.res.Status), Usage: ar.res.Usage,
 		Stop: ar.stop, RateLimited: ar.rateLimited, ResetsAt: ar.res.ResetsAt}

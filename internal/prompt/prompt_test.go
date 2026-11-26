@@ -29,7 +29,9 @@ func TestSchemasAreValidJSON(t *testing.T) {
 
 func TestImplementerPrompt(t *testing.T) {
 	t.Parallel()
-	p := Implementer(ImplementerInput{Task: task, GateCmds: []string{"go test ./..."}, Attempt: 1, MaxAttempts: 3})
+	withCheck := task
+	withCheck.Checks = []string{"go test ./..."}
+	p := Implementer(ImplementerInput{Task: withCheck, Attempt: 1, MaxAttempts: 3})
 	for _, want := range []string{"Attempt 1 of 3", "Add func Reverse", "handles UTF-8", "reverse.go", "`go test ./...`", "mill commits"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("prompt missing %q", want)

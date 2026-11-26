@@ -52,6 +52,10 @@ type Config struct {
 	// GateNice runs gate commands under `nice -n GateNice` so they yield the CPU to
 	// interactive work. 0 disables it.
 	GateNice int `toml:"gate_nice"`
+	// ImplementerRunsCheck tells implementer, fixer and resolver agents to run check_cmd
+	// themselves before they finish. When false, mill runs check_cmd only in the gate and
+	// the agents run the task's checks and the tests of the packages they changed.
+	ImplementerRunsCheck bool `toml:"implementer_runs_check"`
 	// EnvAllow lists extra environment variables passed to workers and gate commands, on top
 	// of the built-in allowlist (SE3).
 	EnvAllow []string     `toml:"env_allow"`
@@ -146,21 +150,22 @@ var (
 // Default returns the built-in defaults. DefaultTOML documents the same values.
 func Default() Config {
 	return Config{
-		CheckCmd:         "",
-		BaseBranch:       "main",
-		Remote:           "origin",
-		MaxParallel:      2,
-		MaxParallelGates: 1,
-		MaxAttempts:      3,
-		OwnsPolicy:       "warn",
-		StartChildrenOn:  "verified",
-		CleanOnLand:      "all",
-		WorktreeRoot:     "",
-		GateTimeout:      Duration{20 * time.Minute},
-		GateRerun:        true,
-		GateCheckBase:    true,
-		GateNice:         DefaultGateNice(),
-		EnvAllow:         []string{},
+		CheckCmd:             "",
+		BaseBranch:           "main",
+		Remote:               "origin",
+		MaxParallel:          2,
+		MaxParallelGates:     1,
+		MaxAttempts:          3,
+		OwnsPolicy:           "warn",
+		StartChildrenOn:      "verified",
+		CleanOnLand:          "all",
+		WorktreeRoot:         "",
+		GateTimeout:          Duration{20 * time.Minute},
+		GateRerun:            true,
+		GateCheckBase:        true,
+		GateNice:             DefaultGateNice(),
+		ImplementerRunsCheck: false,
+		EnvAllow:             []string{},
 		Runner: RunnerConfig{
 			Kind:           "claude",
 			ClaudeBin:      "claude",
@@ -218,6 +223,7 @@ gate_timeout = "20m"      # per gate command
 gate_rerun = true         # re-run failed gate commands once; passing then = flaky, the gate passes
 gate_check_base = true    # run still-failing commands on the task's starting point; failing there too blocks the task
 # gate_nice = 10          # run gate commands under "nice -n <value>"; 0 disables. Default: 10 on macOS and Linux, 0 elsewhere
+implementer_runs_check = false   # true: implementer, fixer and resolver agents run check_cmd themselves; false: only the gate runs it
 env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
 
 # Model families from cheapest to strongest. A model belongs to the first tier whose name it

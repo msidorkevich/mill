@@ -569,3 +569,22 @@ func TestGateNiceNegativeRejected(t *testing.T) {
 		t.Fatalf("gate_nice = -1: err = %v, want a gate_nice validation error", err)
 	}
 }
+
+func TestImplementerRunsCheckDefaultsFalseAndParses(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("")
+	if err != nil || cfg.ImplementerRunsCheck {
+		t.Fatalf("default implementer_runs_check = %v, %v; want false", cfg.ImplementerRunsCheck, err)
+	}
+	cfg, err = Parse(DefaultTOML)
+	if err != nil || cfg.ImplementerRunsCheck {
+		t.Fatalf("DefaultTOML implementer_runs_check = %v, %v; want false", cfg.ImplementerRunsCheck, err)
+	}
+	cfg, err = Parse("implementer_runs_check = true\n")
+	if err != nil || !cfg.ImplementerRunsCheck {
+		t.Fatalf("implementer_runs_check = true parsed as %v, %v", cfg.ImplementerRunsCheck, err)
+	}
+	if _, err := Parse(`implementer_runs_check = "yes"`); err == nil {
+		t.Fatal(`implementer_runs_check = "yes" parsed; want a type error`)
+	}
+}
