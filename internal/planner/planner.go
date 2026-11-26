@@ -167,6 +167,12 @@ Rules for the plan:
   default intervals or sleeps to wait for state.
 - owns lists the files the task may change, as file globs (e.g. "internal/foo/**", "README.md").
 - depends_on lists only tasks whose code this task needs; leave it empty otherwise.
+- Prefer tasks that can run in parallel: chain tasks with depends_on only when one needs
+  the other's code.
+- Put tests that span several tasks' features in their own test task that depends on those
+  tasks, so the feature tasks stay independent.
+- When two tasks need the same file, split the work by file where possible instead of
+  chaining the tasks.
 - Tasks that do not depend on each other own disjoint files where possible, so they can run
   in parallel.
 - assumptions lists what you assumed where the goal is ambiguous.
