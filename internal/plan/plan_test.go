@@ -330,3 +330,33 @@ func TestCheckWarningsIgnoreNarrowOrUncoveredChecks(t *testing.T) {
 		t.Errorf("warned although check_cmd has no go test: %v", w)
 	}
 }
+
+func TestAcceptanceWarningsFlagCriterionNamingSiblingsFile(t *testing.T) {
+	t.Parallel()
+	a := task("a")
+	a.Owns = []string{"internal/a/a.go", "internal/a/a_test.go"}
+	a.Acceptance = []string{
+		"`internal/a/a.go` exports Foo, tested in internal/a/a_test.go.",
+		"README.md documents Foo",
+		"works, e.g. returns 1.5",
+	}
+	b := task("b")
+	b.Owns = []string{"README.md", "internal/b/**"}
+	w := mk(a, b).WarningsFor("")
+	want := `task a: acceptance "README.md documents Foo" names README.md, owned by b and not by a`
+	if len(w) != 1 || w[0] != want {
+		t.Fatalf("got %q, want only %q", w, want)
+	}
+}
+
+func TestAcceptanceWarningsIgnorePathsTheTaskOwns(t *testing.T) {
+	t.Parallel()
+	a := task("a")
+	a.Owns = []string{"internal/shared/**"}
+	a.Acceptance = []string{"internal/shared/x.go handles the empty case"}
+	b := task("b", "a")
+	b.Owns = []string{"internal/shared/x.go"}
+	if w := mk(a, b).WarningsFor(""); len(w) != 0 {
+		t.Errorf("warned about a path the task owns: %v", w)
+	}
+}

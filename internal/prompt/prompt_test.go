@@ -146,3 +146,24 @@ func TestVerifierPromptNamesFlakyCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestVerifierPromptListsSiblingTasks(t *testing.T) {
+	t.Parallel()
+	in := VerifierInput{Task: taskspec.Spec{ID: "g/a", Title: "A", Kind: "implement", Spec: "s"}, BaseSHA: "abc", Diff: "d"}
+	if p := Verifier(in); strings.Contains(p, "Other tasks of this goal") || strings.Contains(p, "out of scope") {
+		t.Fatalf("sibling section shown for a standalone task:\n%s", p)
+	}
+	in.Siblings = []SiblingTask{
+		{ID: "g/b", Title: "Docs", Owns: []string{"README.md", "docs/**"}, Summary: "Document the command."},
+		{ID: "g/c", Title: "Store", Owns: []string{"internal/store/x.go"}, Summary: "Persist x."},
+	}
+	p := Verifier(in)
+	for _, w := range []string{"## Other tasks of this goal",
+		"g/b", "Docs", "README.md, docs/**", "Document the command.",
+		"g/c", "Store", "internal/store/x.go", "Persist x.",
+		"out of scope", "do not fail this task"} {
+		if !strings.Contains(p, w) {
+			t.Fatalf("prompt lacks %q:\n%s", w, p)
+		}
+	}
+}
