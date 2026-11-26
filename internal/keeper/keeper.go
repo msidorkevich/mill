@@ -170,6 +170,15 @@ func (k *keeper) withClaim(ctx context.Context, id, status string, fn func() err
 	return ferr
 }
 
+// activity records step as what the keeper is doing with the claimed task id, as
+// "<command>: <step>".
+func (k *keeper) activity(ctx context.Context, id, step string) error {
+	if err := k.Store.SetClaimActivity(ctx, k.Claimer, id, k.Claimer.Command+": "+step); err != nil {
+		return fmt.Errorf("%s: record step %q on its claim: %w", id, step, err)
+	}
+	return nil
+}
+
 // Pass runs one reconcile pass. Problems with one task block that task and are reported in
 // the result; an error means the pass itself could not continue.
 func Pass(ctx context.Context, o Options) (Result, error) {
@@ -469,6 +478,9 @@ func (k *keeper) blockRestack(ctx context.Context, t store.Task, reason string) 
 // is a clean checkout of the branch at the recorded head. A failed check blocks the task and
 // returns ok false.
 func (k *keeper) preflight(ctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
+	if err := k.activity(ctx, t.ID, "restack"); err != nil {
+		return false, err
+	}
 	if br.StartSHA == "" && br.BaseSHA == "" {
 		return false, k.block(ctx, t.ID, "keeper: no recorded starting point, so its own commits cannot be told apart; rebase it by hand")
 	}
@@ -673,6 +685,9 @@ func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br
 	po := k.publishOptions(t.ID)
 	if r.agent {
 		// The agent changed code: the gate and the verifier both check it.
+		if err := k.activity(ctx, t.ID, "gate"); err != nil {
+			return false, err
+		}
 		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
 		if parent, perr := k.failedParent(ctx); perr != nil || parent != "" {
 			if perr != nil {
@@ -688,6 +703,9 @@ func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br
 		}
 		if !g.Passed {
 			return false, fail("the gate", nil, "it failed after the resolution:\n"+publish.FailedCommands(g))
+		}
+		if err := k.activity(ctx, t.ID, "verify"); err != nil {
+			return false, err
 		}
 		v, stop, err := k.Pipeline.Verify(ctx, t.ID)
 		if err != nil {
@@ -724,6 +742,9 @@ func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br
 
 	if !r.agent {
 		// KP3: after a rebase without the agent the gate is re-run, the verifier is not.
+		if err := k.activity(ctx, t.ID, "gate"); err != nil {
+			return false, err
+		}
 		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
 		if parent, perr := k.failedParent(ctx); perr != nil || parent != "" {
 			if perr != nil {
@@ -823,6 +844,9 @@ func (k *keeper) fix(ctx context.Context, t store.Task, g gate.Result, wasPublis
 	if err := k.Pipeline.RecordGateFailure(ctx, t.ID, g); err != nil {
 		return false, k.block(ctx, t.ID, fmt.Sprintf("keeper: the gate failed after the restack and its failure could not be recorded for the fixer: %v", err))
 	}
+	if err := k.activity(ctx, t.ID, "fix"); err != nil {
+		return false, err
+	}
 	k.logf("%s: the gate failed after the restack; running the fixer", t.ID)
 	out, err := k.Pipeline.Run(ctx, t.ID)
 	if err != nil {
@@ -880,6 +904,9 @@ func (k *keeper) staleParent(ctx context.Context, t store.Task, head string) (bo
 // republish pushes a changed published task again. A refusal by the dependency rule is
 // reported as waiting for its parent; any other failure blocks it.
 func (k *keeper) republish(ctx context.Context, id string) error {
+	if err := k.activity(ctx, id, "publish"); err != nil {
+		return err
+	}
 	po := k.publishOptions(id)
 	po.Out = nil
 	var pr publish.Result
