@@ -53,6 +53,10 @@ type TaskClaim struct {
 	Command    string    `json:"command"`
 	Executable string    `json:"executable,omitempty"`
 	ClaimedAt  time.Time `json:"claimed_at"`
+	// Activity is what the holder is doing with the task ("" until it says); ActivitySince
+	// is when it last set Activity (zero until then).
+	Activity      string    `json:"activity,omitempty"`
+	ActivitySince time.Time `json:"activity_since,omitempty"`
 }
 
 // BusyError is returned by ClaimTasks when a task is already being worked on.
@@ -105,7 +109,7 @@ func (s *Store) ClaimTasks(ctx context.Context, c Claimer, ids []string) error {
 			}
 			return &BusyError{TaskID: id, Doing: doing}
 		}
-		held, err := scanClaim(tx.QueryRowContext(ctx, `SELECT task_id, owner, pid, command, executable, claimed_at
+		held, err := scanClaim(tx.QueryRowContext(ctx, `SELECT task_id, owner, pid, command, executable, claimed_at, activity, activity_since
 			FROM task_claims WHERE task_id = ?`, id))
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -123,7 +127,8 @@ func (s *Store) ClaimTasks(ctx context.Context, c Claimer, ids []string) error {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO task_claims (task_id, owner, pid, command, executable, claimed_at)
 			VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT (task_id) DO UPDATE SET owner = excluded.owner, pid = excluded.pid,
-			command = excluded.command, executable = excluded.executable, claimed_at = excluded.claimed_at`,
+			command = excluded.command, executable = excluded.executable, claimed_at = excluded.claimed_at,
+			activity = '', activity_since = NULL`,
 			id, c.Owner, c.PID, c.Command, c.Executable, now); err != nil {
 			return fmt.Errorf("claim task %s: %w", id, err)
 		}
@@ -152,6 +157,24 @@ func (s *Store) ReleaseClaims(ctx context.Context, c Claimer, ids []string) erro
 	return nil
 }
 
+// SetClaimActivity records activity as what c is doing with task id, since now. It changes
+// only a claim c holds; a claim held by another claimer, or no claim, is an error.
+func (s *Store) SetClaimActivity(ctx context.Context, c Claimer, id, activity string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE task_claims SET activity = ?, activity_since = ?
+		WHERE task_id = ? AND owner = ?`, activity, s.ts(), id, c.Owner)
+	if err != nil {
+		return fmt.Errorf("set activity of claim on %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set activity of claim on %s: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("set activity of claim on %s: the claim is not held by mill %s (pid %d); claim the task before setting its activity", id, c.Command, c.PID)
+	}
+	return nil
+}
+
 // ClaimedTasks lists the claims whose process is still alive, by task id.
 func (s *Store) ClaimedTasks(ctx context.Context) (map[string]TaskClaim, error) {
 	claims, err := s.allClaims(ctx, s.db)
@@ -176,7 +199,7 @@ type queryer interface {
 }
 
 func (s *Store) allClaims(ctx context.Context, q queryer) ([]TaskClaim, error) {
-	rows, err := q.QueryContext(ctx, `SELECT task_id, owner, pid, command, executable, claimed_at
+	rows, err := q.QueryContext(ctx, `SELECT task_id, owner, pid, command, executable, claimed_at, activity, activity_since
 		FROM task_claims ORDER BY task_id`)
 	if err != nil {
 		return nil, err
@@ -217,10 +240,14 @@ func (s *Store) deleteDeadClaimsTx(ctx context.Context, tx *sql.Tx) error {
 func scanClaim(r rowScanner) (TaskClaim, error) {
 	var c TaskClaim
 	var at string
-	if err := r.Scan(&c.TaskID, &c.Owner, &c.PID, &c.Command, &c.Executable, &at); err != nil {
+	var since sql.NullString
+	if err := r.Scan(&c.TaskID, &c.Owner, &c.PID, &c.Command, &c.Executable, &at, &c.Activity, &since); err != nil {
 		return TaskClaim{}, err
 	}
 	c.ClaimedAt, _ = parseTime(at)
+	if since.Valid {
+		c.ActivitySince, _ = parseTime(since.String)
+	}
 	return c, nil
 }
 

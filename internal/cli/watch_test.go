@@ -208,3 +208,112 @@ func TestWatchListsOtherRunningStages(t *testing.T) {
 		t.Errorf("stage not listed:\n%s", out)
 	}
 }
+
+// claimRepo has goal g1 whose task a is verified and claimed by a live "mill run" (pid 4242)
+// that says it is merging, and whose task b is pending. The store clock is fixed at the
+// returned time; the returned store treats every claim as alive.
+func claimRepo(t *testing.T) (project.Paths, *store.Store, time.Time) {
+	t.Helper()
+	root := gitRepo(t)
+	if r := run(t, root, nil, "init"); r.code != ExitOK {
+		t.Fatalf("init: %+v", r)
+	}
+	at := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	paths := project.PathsAt(root)
+	s, err := store.Open(ctx, paths.DB, store.Options{
+		Now:        func() time.Time { return at },
+		ClaimAlive: func(store.TaskClaim) (bool, error) { return true, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	g, err := s.CreateGoal(ctx, "goal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := func(id string) taskspec.Spec {
+		return taskspec.Spec{ID: id, Title: id, Kind: "implement", Spec: "do it", Acceptance: []string{"done"},
+			Checks: []string{}, Owns: []string{}, Size: "S", DependsOn: []string{}}
+	}
+	if err := s.ApproveGoal(ctx, g.ID, plan.Plan{Goal: "goal", Assumptions: []string{}, Tasks: []taskspec.Spec{spec("a"), spec("b")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskStatus(ctx, "g1/a", store.TaskVerified, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	c := store.Claimer{Owner: "o1", PID: 4242, Command: "run", Executable: "mill"}
+	if err := s.ClaimTasks(ctx, c, []string{"g1/a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetClaimActivity(ctx, c, "g1/a", "merging"); err != nil {
+		t.Fatal(err)
+	}
+	return paths, s, at
+}
+
+func TestWatchListsClaimedVerifiedTaskWithHolderActivityAndHeldTime(t *testing.T) {
+	t.Parallel()
+	paths, s, at := claimRepo(t)
+	var b strings.Builder
+	if err := renderWatch(context.Background(), &b, paths, s, "", at.Add(95*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	want := "g1/a  claimed by run (pid 4242): merging  held 1m35s"
+	if !strings.Contains(out, want) {
+		t.Errorf("output lacks %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "nothing running") {
+		t.Errorf("says nothing running while a claim is live:\n%s", out)
+	}
+	if strings.Contains(out, "g1/b") {
+		t.Errorf("lists unclaimed task b:\n%s", out)
+	}
+}
+
+func TestWatchShowsDashForClaimWithoutActivityAndSkipsClaimsOutOfScope(t *testing.T) {
+	t.Parallel()
+	paths, s, at := claimRepo(t)
+	ctx := context.Background()
+	c := store.Claimer{Owner: "o2", PID: 77, Command: "task run"}
+	if err := s.ClaimTasks(ctx, c, []string{"g1/b"}); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if err := renderWatch(ctx, &b, paths, s, "g1/b", at.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if want := "g1/b  claimed by task run (pid 77): -  held 0m05s"; !strings.Contains(out, want) {
+		t.Errorf("output lacks %q:\n%s", want, out)
+	}
+	if strings.Contains(out, "g1/a") || strings.Contains(out, "nothing running") {
+		t.Errorf("watch of g1/b shows g1/a or nothing running:\n%s", out)
+	}
+}
+
+func TestWatchDoesNotRepeatClaimOfRunningTask(t *testing.T) {
+	t.Parallel()
+	paths, s, at := claimRepo(t)
+	ctx := context.Background()
+	// The claim on a is still held when a starts running, as mill run holds it during its attempt.
+	if err := s.SetTaskStatus(ctx, "g1/a", store.TaskRunning, store.PhaseImplement, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartAttempt(ctx, "g1/a", 1, "implementer"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ClaimedTasks(ctx); err != nil || got["g1/a"].Owner != "o1" {
+		t.Fatalf("claim on g1/a = %+v, %v; want it still held", got, err)
+	}
+	var b strings.Builder
+	if err := renderWatch(ctx, &b, paths, s, "", at.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "g1/a") || strings.Contains(out, "claimed by") {
+		t.Errorf("running task should be listed once, without its claim:\n%s", out)
+	}
+}

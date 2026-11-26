@@ -167,10 +167,59 @@ func renderWatch(ctx context.Context, w io.Writer, paths project.Paths, s *store
 			stages = append(stages, r)
 		}
 	}
-	if len(running) == 0 && len(stages) == 0 {
+	shown := map[string]bool{}
+	for _, a := range running {
+		shown[a.TaskID] = true
+	}
+	for _, r := range stages {
+		shown[r.TaskID] = true
+	}
+	allClaims, err := s.ClaimedTasks(ctx)
+	if err != nil {
+		return err
+	}
+	var claims []store.TaskClaim
+	for id, c := range allClaims {
+		if _, ok := statuses[id]; ok && !shown[id] {
+			claims = append(claims, c)
+		}
+	}
+	sort.Slice(claims, func(i, j int) bool { return claims[i].TaskID < claims[j].TaskID })
+	if len(running) == 0 && len(stages) == 0 && len(claims) == 0 {
 		fmt.Fprintln(w, "nothing running")
 		return nil
 	}
+	if len(running) > 0 || len(stages) > 0 {
+		if err := renderRunning(w, paths, running, stages, now); err != nil {
+			return err
+		}
+	}
+	if len(claims) > 0 {
+		if len(running) > 0 || len(stages) > 0 {
+			fmt.Fprintln(w)
+		}
+		renderClaims(w, claims, now)
+	}
+	return nil
+}
+
+// renderClaims lists tasks a mill command holds a claim on without running them, with what
+// the holder says it is doing and how long it has held the claim.
+func renderClaims(w io.Writer, claims []store.TaskClaim, now time.Time) {
+	for _, c := range claims {
+		activity := c.Activity
+		if activity == "" {
+			activity = "-"
+		}
+		if r := []rune(activity); len(r) > maxActionWidth {
+			activity = string(r[:maxActionWidth-1]) + "…"
+		}
+		fmt.Fprintf(w, "%s  claimed by %s (pid %d): %s  held %s\n", c.TaskID, c.Command, c.PID, activity,
+			fmtElapsed(now.Sub(c.ClaimedAt)))
+	}
+}
+
+func renderRunning(w io.Writer, paths project.Paths, running []store.Attempt, stages []store.RunningStage, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 2, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "TASK\tATTEMPT\tROLE\tELAPSED\tTOKENS\tCOST\tLATEST ACTION")
 	for _, a := range running {
