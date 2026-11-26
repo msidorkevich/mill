@@ -41,7 +41,7 @@ func runTask(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintln(w, "Usage:")
 		fmt.Fprintln(w, "  mill task run --file task.json [--retry]   run one task until verified, blocked or failed")
 		fmt.Fprintln(w, "  mill task show <id> [--json]               show a task, its attempts, spend and findings")
-		fmt.Fprintln(w, "  mill task list [--status S] [--json]       list all tasks, oldest first")
+		fmt.Fprintln(w, "  mill task list [--status S] [--all] [--json]  list current work first, then the 20 newest others (--all: every task, oldest first)")
 		fmt.Fprintln(w, "  mill task edit <id> [--file spec.json]     change the spec of a pending, blocked or failed task (opens $EDITOR without --file)")
 		fmt.Fprintln(w, "  mill task rebase <id>                      move a pending, blocked or failed task's own commits onto its base's current tip")
 		return code
@@ -558,7 +558,8 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 func runTaskList(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "task list")
 	asJSON := fs.Bool("json", false, "print one JSON document")
-	status := fs.String("status", "", "only tasks with this status")
+	status := fs.String("status", "", "only tasks with this status (running includes claimed tasks)")
+	all := fs.Bool("all", false, "list every task, oldest first")
 	if code, ok := parse(fs, args); !ok {
 		return code
 	}
@@ -575,42 +576,122 @@ func runTaskList(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	defer s.Close()
-	tasks, err := s.TaskSummaries(ctx, *status)
-	if err != nil {
+	opts := taskListOptions{Status: *status, All: *all, JSON: *asJSON}
+	if err := renderTaskList(ctx, env.Stdout, s, opts, time.Now()); err != nil {
 		return fail(err)
 	}
-	if tasks == nil {
-		tasks = []store.TaskSummary{}
+	return ExitOK
+}
+
+// taskListRecent is how many tasks that are neither current nor blocked/failed the default
+// task list shows.
+const taskListRecent = 20
+
+type taskListOptions struct {
+	Status string // only tasks with this status; "running" includes claimed tasks
+	All    bool   // every task oldest first, instead of current work first
+	JSON   bool
+}
+
+// listedTask is a task list row: the task and the live claim on it, if any.
+type listedTask struct {
+	store.TaskSummary
+	Claim *store.TaskClaim `json:"claim,omitempty"`
+}
+
+// renderTaskList writes the task list to w. By default it shows running and claimed tasks,
+// then blocked and failed ones, then the taskListRecent newest others; opts.All and
+// opts.JSON list every task oldest first. now is the clock for claim held times.
+func renderTaskList(ctx context.Context, w io.Writer, s *store.Store, opts taskListOptions, now time.Time) error {
+	summaries, err := s.TaskSummaries(ctx, "")
+	if err != nil {
+		return err
+	}
+	claims, err := s.ClaimedTasks(ctx)
+	if err != nil {
+		return err
+	}
+	tasks := []listedTask{}
+	for _, t := range summaries {
+		lt := listedTask{TaskSummary: t}
+		if c, ok := claims[t.ID]; ok {
+			lt.Claim = &c
+		}
+		switch {
+		case opts.Status == "":
+		case opts.Status == store.TaskRunning && lt.Claim != nil:
+		case t.Status != opts.Status:
+			continue
+		}
+		tasks = append(tasks, lt)
 	}
 
-	if *asJSON {
-		enc := json.NewEncoder(env.Stdout)
+	if opts.JSON {
+		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		doc := struct {
-			Schema string              `json:"schema"`
-			Tasks  []store.TaskSummary `json:"tasks"`
+			Schema string       `json:"schema"`
+			Tasks  []listedTask `json:"tasks"`
 		}{"mill/task-list@1", tasks}
-		if err := enc.Encode(doc); err != nil {
-			return fail(err)
-		}
-		return ExitOK
+		return enc.Encode(doc)
 	}
 	if len(tasks) == 0 {
-		fmt.Fprintln(env.Stdout, "no tasks")
-		return ExitOK
+		_, err := fmt.Fprintln(w, "no tasks")
+		return err
 	}
-	tw := tabwriter.NewWriter(env.Stdout, 2, 0, 2, ' ', 0)
+	rows, hidden := tasks, 0
+	if !opts.All {
+		rows, hidden = currentFirst(tasks)
+	}
+	tw := tabwriter.NewWriter(w, 2, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tSTATUS\tATTEMPTS\tTOKENS\tCOST\tTITLE")
-	for _, t := range tasks {
+	for _, t := range rows {
 		st := t.Status
 		if t.Phase != "" {
 			st += " (" + t.Phase + ")"
 		}
+		if c := t.Claim; c != nil {
+			doing := c.Activity
+			if doing == "" {
+				doing = "mill " + c.Command
+			}
+			st += fmt.Sprintf(" (claimed: %s, held %s)", doing, fmtElapsed(now.Sub(c.ClaimedAt)))
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%.2f\t%s\n", t.ID, st, t.Attempts,
 			fmtInt(t.Usage.Tokens(budget.CountBillable)), t.Usage.CostUSD, t.Title)
 	}
-	tw.Flush()
-	return ExitOK
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if hidden > 0 {
+		_, err := fmt.Fprintf(w, "… %d older task(s) not shown; use --all\n", hidden)
+		return err
+	}
+	return nil
+}
+
+// currentFirst orders tasks (given oldest first) for the default list: running and claimed
+// tasks, then blocked and failed ones, both oldest first, then the others newest first,
+// keeping only the taskListRecent newest of those. It returns the rows and how many it left out.
+func currentFirst(tasks []listedTask) ([]listedTask, int) {
+	var current, stuck, rest []listedTask
+	for _, t := range tasks {
+		switch {
+		case t.Status == store.TaskRunning || t.Claim != nil:
+			current = append(current, t)
+		case t.Status == store.TaskBlocked || t.Status == store.TaskFailed:
+			stuck = append(stuck, t)
+		default:
+			rest = append(rest, t)
+		}
+	}
+	slices.Reverse(rest)
+	hidden := 0
+	if len(rest) > taskListRecent {
+		hidden = len(rest) - taskListRecent
+		rest = rest[:taskListRecent]
+	}
+	return append(append(current, stuck...), rest...), hidden
 }
 
 func printTask(env Env, v taskView) {
