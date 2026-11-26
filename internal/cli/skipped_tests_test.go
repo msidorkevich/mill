@@ -9,11 +9,20 @@ import (
 	"github.com/msidorkevich/mill/internal/skiptest"
 )
 
-// appendSkippedTests records a skipped_tests event for task g1/a as the pipeline does.
+// appendSkippedTests records a skipped-tests event for task g1/a as the pipeline does.
 func appendSkippedTests(t *testing.T, root string, skips ...skiptest.Skip) {
 	t.Helper()
+	appendSkippedTestsKind(t, root, "skipped-tests", skips...)
+}
+
+// appendSkippedTestsKind records a skip event of the given kind for task g1/a.
+func appendSkippedTestsKind(t *testing.T, root, kind string, skips ...skiptest.Skip) {
+	t.Helper()
+	if skips == nil {
+		skips = []skiptest.Skip{}
+	}
 	ev := map[string]any{"attempt": 1, "head": "deadbeef", "skips": skips}
-	if _, err := openStore(t, root).AppendEvent(context.Background(), "skipped_tests", "", "g1/a", ev); err != nil {
+	if _, err := openStore(t, root).AppendEvent(context.Background(), kind, "", "g1/a", ev); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -95,5 +104,45 @@ func TestSkippedTestsAbsentWithoutEvent(t *testing.T) {
 	r := run(t, root, nil, "task", "show", "g1/a", "--json")
 	if r.code != ExitOK || strings.Contains(r.stdout, "skipped_tests") {
 		t.Errorf("task show --json has skipped_tests without an event:\n%s", r.stdout)
+	}
+}
+
+func TestSkippedTestsOldEventKindShownByTaskShowAndReview(t *testing.T) {
+	t.Parallel()
+	root := verifiedGoal(t)
+	appendSkippedTestsKind(t, root, "skipped_tests", twoSkips...)
+
+	for _, args := range [][]string{{"task", "show", "g1/a"}, {"review", "show", "g1/a"}} {
+		r := run(t, root, nil, args...)
+		if r.code != ExitOK || !strings.Contains(r.stdout, twoSkipsSection) {
+			t.Errorf("%v: %+v\nwant section:\n%s", args, r, twoSkipsSection)
+		}
+	}
+}
+
+func TestSkippedTestsClearedByLaterEmptyEvent(t *testing.T) {
+	t.Parallel()
+	for _, oldKind := range []string{"skipped-tests", "skipped_tests"} {
+		t.Run(oldKind, func(t *testing.T) {
+			t.Parallel()
+			root := verifiedGoal(t)
+			appendSkippedTestsKind(t, root, oldKind, twoSkips...)
+			// A later attempt verified with no skips.
+			appendSkippedTestsKind(t, root, "skipped-tests")
+
+			for _, args := range [][]string{{"task", "show", "g1/a"}, {"review", "show", "g1/a"}} {
+				r := run(t, root, nil, args...)
+				if r.code != ExitOK {
+					t.Fatalf("%v: %+v", args, r)
+				}
+				if strings.Contains(r.stdout, "Skipped tests") || strings.Contains(r.stdout, "a_test.go") {
+					t.Errorf("%v shows stale skips:\n%s", args, r.stdout)
+				}
+			}
+			r := run(t, root, nil, "task", "show", "g1/a", "--json")
+			if r.code != ExitOK || strings.Contains(r.stdout, `"skipped_tests":`) {
+				t.Errorf("task show --json shows stale skips:\n%s", r.stdout)
+			}
+		})
 	}
 }

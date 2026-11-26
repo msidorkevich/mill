@@ -172,7 +172,7 @@ type reviewView struct {
 	From     string                 `json:"from"`               // start of the diff
 	DiffStat string                 `json:"diff_stat"`
 	Diff     string                 `json:"diff,omitempty"`
-	// skipped are the test skips the latest skipped_tests event recorded; text only, so
+	// skipped are the test skips the latest skipped-tests event recorded; text only, so
 	// --json keeps its fields as they are.
 	skipped []skiptest.Skip
 }

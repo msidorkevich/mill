@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -464,9 +465,10 @@ func TestHerdrWaitReturnsAfterCancelWhenExitFileNeverAppears(t *testing.T) {
 	}
 }
 
-func TestHerdrStartRecordsTabFileInLogDir(t *testing.T) {
+func TestHerdrStartRecordsTabFileWithMillPidInLogDir(t *testing.T) {
 	t.Parallel()
 	hh, _, _ := fakeHerdr(t, "")
+	millPid := strconv.Itoa(os.Getpid())
 	dir := t.TempDir()
 	logs := filepath.Join(dir, "a1")
 	h, err := hh.Start(context.Background(), ProcSpec{
@@ -480,11 +482,11 @@ func TestHerdrStartRecordsTabFileInLogDir(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("tab files in log dir = %v, want one", files)
 	}
-	if got, want := strings.TrimSpace(read(t, files[0])), `{"tab":"w8:t2","workspace":"w8"}`; got != want {
+	if got, want := strings.TrimSpace(read(t, files[0])), `{"tab":"w8:t2","workspace":"w8","mill_pid":`+millPid+`}`; got != want {
 		t.Fatalf("tab file = %s, want %s", got, want)
 	}
 	tabs, err := RecordedHerdrTabs(logs)
-	if err != nil || len(tabs) != 1 || tabs[0].Tab != "w8:t2" || tabs[0].Workspace != "w8" || tabs[0].File != files[0] {
+	if err != nil || len(tabs) != 1 || tabs[0].Tab != "w8:t2" || tabs[0].Workspace != "w8" || tabs[0].File != files[0] || tabs[0].MillPID != os.Getpid() {
 		t.Fatalf("RecordedHerdrTabs = %+v, %v", tabs, err)
 	}
 	if err := h.Kill(); err != nil {
@@ -513,7 +515,7 @@ func TestHerdrStartRecordsTabFileInLogDir(t *testing.T) {
 		waitHerdr(t, h)
 	}()
 	files, _ = filepath.Glob(filepath.Join(logs2, "herdr-*.tab"))
-	if len(files) != 1 || strings.TrimSpace(read(t, files[0])) != `{"tab":"w8:t2","workspace":""}` {
+	if len(files) != 1 || strings.TrimSpace(read(t, files[0])) != `{"tab":"w8:t2","workspace":"","mill_pid":`+millPid+`}` {
 		t.Fatalf("tab files = %v", files)
 	}
 }
@@ -533,7 +535,7 @@ func TestHerdrStartFailsAndClosesTabWhenTabFileCannotBeWritten(t *testing.T) {
 	}
 }
 
-func TestRecordedHerdrTabsReadsEveryTabFile(t *testing.T) {
+func TestRecordedHerdrTabsReadsEveryTabFileAndMillPid(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	if tabs, err := RecordedHerdrTabs(dir); err != nil || len(tabs) != 0 {
@@ -544,7 +546,7 @@ func TestRecordedHerdrTabsReadsEveryTabFile(t *testing.T) {
 	}
 	for name, body := range map[string]string{
 		"herdr-1.tab": `{"tab":"w8:t2","workspace":"w8"}`,
-		"herdr-2.tab": `{"tab":"t5","workspace":""}`,
+		"herdr-2.tab": `{"tab":"t5","workspace":"","mill_pid":4242}`,
 		"herdr-1.pid": "1 2",
 		"other.tab":   `{"tab":"nope"}`,
 	} {
@@ -556,7 +558,8 @@ func TestRecordedHerdrTabsReadsEveryTabFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tabs) != 2 || tabs[0].Tab != "w8:t2" || tabs[0].Workspace != "w8" || tabs[1].Tab != "t5" || tabs[1].Workspace != "" {
+	if len(tabs) != 2 || tabs[0].Tab != "w8:t2" || tabs[0].Workspace != "w8" || tabs[0].MillPID != 0 ||
+		tabs[1].Tab != "t5" || tabs[1].Workspace != "" || tabs[1].MillPID != 4242 {
 		t.Fatalf("tabs = %+v", tabs)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "herdr-3.tab"), []byte("garbage"), 0o644); err != nil {

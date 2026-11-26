@@ -454,22 +454,23 @@ type taskView struct {
 	// added after the plan was approved, oldest first.
 	DependsOn []string    `json:"depends_on,omitempty"`
 	DepsAdded []depsAdded `json:"deps_added,omitempty"`
-	// SkippedTests are the test skips the task's latest skipped_tests event recorded.
+	// SkippedTests are the test skips the task's latest skipped-tests event recorded.
 	SkippedTests []skiptest.Skip `json:"skipped_tests,omitempty"`
 }
 
-// latestSkippedTests returns the test skips recorded by the last skipped_tests event of a
-// task, nil when there is none. evs are the task's events in seq order.
+// latestSkippedTests returns the test skips recorded by the last skipped-tests event of a
+// task (either the current kind or the older skipped_tests), nil when there is none. evs
+// are the task's events in seq order.
 func latestSkippedTests(evs []store.Event) ([]skiptest.Skip, error) {
 	for i := len(evs) - 1; i >= 0; i-- {
-		if evs[i].Kind != "skipped_tests" {
+		if evs[i].Kind != pipeline.SkippedTestsEvent && evs[i].Kind != pipeline.OldSkippedTestsEvent {
 			continue
 		}
 		var d struct {
 			Skips []skiptest.Skip `json:"skips"`
 		}
 		if err := json.Unmarshal(evs[i].Data, &d); err != nil {
-			return nil, fmt.Errorf("corrupt skipped_tests event %d: %w", evs[i].Seq, err)
+			return nil, fmt.Errorf("corrupt %s event %d: %w", evs[i].Kind, evs[i].Seq, err)
 		}
 		return d.Skips, nil
 	}
@@ -901,7 +902,8 @@ func fmtInt(n int64) string {
 }
 
 // killLeftoverWorkers kills the process groups of workers that outlived a killed mill and
-// closes the herdr tabs they ran in. A recorded process is only killed when it is alive,
+// closes the herdr tabs they ran in, plus every herdr tab under the runs directory whose
+// recorded mill process is gone. A recorded process is only killed when it is alive,
 // leads its own group and its command line contains the recorded command; anything else
 // (gone, or pid reused) is left alone.
 func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store, tabs herdrTabs) error {
@@ -917,7 +919,7 @@ func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store, tab
 			return err
 		}
 	}
-	return nil
+	return closeOrphanedTabs(out, tabs)
 }
 
 // killLeftoverProcesses kills what is left of one running attempt's worker.

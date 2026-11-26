@@ -18,7 +18,7 @@ func skippedTestsEvents(t *testing.T, e *env, id string) []store.Event {
 	}
 	var out []store.Event
 	for _, ev := range evs {
-		if ev.Kind == "skipped_tests" {
+		if ev.Kind == SkippedTestsEvent || ev.Kind == OldSkippedTestsEvent {
 			out = append(out, ev)
 		}
 	}
@@ -38,8 +38,8 @@ func TestSkippedTestsAddedByTaskAreRecordedOnVerification(t *testing.T) {
 		t.Fatalf("outcome = %+v\n%s", out, e.out)
 	}
 	evs := skippedTestsEvents(t, e, "hello")
-	if len(evs) != 1 {
-		t.Fatalf("skipped_tests events = %d, want 1", len(evs))
+	if len(evs) != 1 || evs[0].Kind != "skipped-tests" {
+		t.Fatalf("skipped-tests events = %+v, want one of kind skipped-tests", evs)
 	}
 	var data struct {
 		Head  string          `json:"head"`
@@ -66,6 +66,44 @@ func TestSkippedTestsNotRecordedWithoutAddedSkips(t *testing.T) {
 		t.Fatalf("outcome = %+v\n%s", out, e.out)
 	}
 	if evs := skippedTestsEvents(t, e, "hello"); len(evs) != 0 {
-		t.Fatalf("skipped_tests events = %+v, want none", evs)
+		t.Fatalf("skipped-tests events = %+v, want none", evs)
+	}
+}
+
+func TestSkippedTestsClearedWhenLaterAttemptVerifiesWithoutSkips(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{SkippedTestsEvent, OldSkippedTestsEvent} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			src := "package x\n\nimport \"testing\"\n\nfunc TestHello(t *testing.T) {\n}\n"
+			e := setup(t, `grep -q hello hello.txt`, runner.Script{
+				runner.RoleImplementer: {impl(map[string]string{"hello.txt": "hello\n", "x/hello_test.go": src})},
+				runner.RoleVerifier:    {verdict("pass")},
+			}, nil)
+			e.task(t, "hello")
+			// An earlier attempt was verified with a skip that the task no longer adds.
+			old := map[string]any{"attempt": 1, "head": "deadbeef", "skips": []skiptest.Skip{{File: "x/hello_test.go", Line: 6}}}
+			if _, err := e.p.Store.AppendEvent(context.Background(), kind, "", "hello", old); err != nil {
+				t.Fatal(err)
+			}
+			out := e.run(t, "hello")
+			if out.Status != store.TaskVerified {
+				t.Fatalf("outcome = %+v\n%s", out, e.out)
+			}
+			evs := skippedTestsEvents(t, e, "hello")
+			if len(evs) != 2 || evs[1].Kind != SkippedTestsEvent {
+				t.Fatalf("skipped-tests events = %+v, want the old one and an empty one", evs)
+			}
+			var data struct {
+				Head  string          `json:"head"`
+				Skips []skiptest.Skip `json:"skips"`
+			}
+			if err := json.Unmarshal(evs[1].Data, &data); err != nil {
+				t.Fatal(err)
+			}
+			if len(data.Skips) != 0 || data.Head != out.HeadSHA {
+				t.Fatalf("clearing event data = %s", evs[1].Data)
+			}
+		})
 	}
 }
