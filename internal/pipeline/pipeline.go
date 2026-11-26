@@ -830,7 +830,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 		}
 	}
 	// Record the attempt even when ctx is done, so spend is never lost.
-	if err := p.Store.FinishAttempt(context.WithoutCancel(ctx), id, status, res.Usage, res.CostEstimated, outPath, res.RawPath); err != nil {
+	if err := p.Store.FinishAttempt(context.WithoutCancel(ctx), id, status, res.Usage, res.CostEstimated, outPath, res.RawPath, res.Duration); err != nil {
 		return ar, err
 	}
 	detail := ""

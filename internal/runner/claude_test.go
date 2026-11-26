@@ -147,6 +147,31 @@ func TestClaudeBudgetSubtype(t *testing.T) {
 	}
 }
 
+func TestClaudeResultDurationParsed(t *testing.T) {
+	t.Parallel()
+	r := `{"type":"result","subtype":"success","is_error":false,"structured_output":{"ok":true},"duration_ms":83250,"duration_api_ms":61000,"total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}`
+	bin, _, _ := fakeClaude(t, []string{r}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil || res.Status != StatusOK {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	if want := 83250 * time.Millisecond; res.Duration != want {
+		t.Fatalf("Duration = %v, want %v", res.Duration, want)
+	}
+}
+
+func TestClaudeResultWithoutDurationIsZero(t *testing.T) {
+	t.Parallel()
+	bin, _, _ := fakeClaude(t, []string{lineResult}, "")
+	res, err := newClaude(bin).Run(context.Background(), baseReq(t))
+	if err != nil || res.Status != StatusOK {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	if res.Duration != 0 {
+		t.Fatalf("Duration = %v, want 0", res.Duration)
+	}
+}
+
 func TestClaudeErrorResult(t *testing.T) {
 	t.Parallel()
 	r := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"usage":{}}`

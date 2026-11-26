@@ -786,9 +786,10 @@ func printTask(env Env, v taskView) {
 		tw := tabwriter.NewWriter(w, 2, 0, 2, ' ', 0)
 		fmt.Fprintln(tw, "  #\trole\tmodel\treason\tstatus\tin\tout\tcache w/r\tcost\ttime")
 		for _, a := range v.Attempts {
+			// The agent-reported duration when known, else the wall time.
 			dur := "-"
-			if a.EndedAt != nil {
-				dur = a.EndedAt.Sub(a.StartedAt).Round(time.Second).String()
+			if a.EndedAt != nil || a.AgentDuration > 0 {
+				dur = a.Duration().Round(time.Second).String()
 			}
 			mark := ""
 			if a.CostEstimated {
