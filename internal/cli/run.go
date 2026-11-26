@@ -155,7 +155,7 @@ func acquireScheduler(ctx context.Context, env Env, paths project.Paths, s *stor
 		fmt.Fprintf(env.Stderr, "mill run: %v\n", err)
 		return nil, ExitError
 	}
-	if err := killLeftoverWorkers(ctx, env.Stdout, s); err != nil {
+	if err := killLeftoverWorkers(ctx, env.Stdout, s, herdrTabs{runs: paths.Runs, lookPath: env.lookPath}); err != nil {
 		return fail(err)
 	}
 	usage, err := interruptedUsage(ctx, env.Stdout, s, prices)
