@@ -408,6 +408,19 @@ func (s *syncer) withClaim(ctx context.Context, id, status string, fn func() err
 	return ferr
 }
 
+// activity records step as what this sync is doing with the claimed task id, as
+// "<command>: <step>" (the claimer's command: sync, or keep when the keeper syncs). Restore
+// runs under its caller's claim (no Claimer) and records nothing.
+func (s *syncer) activity(ctx context.Context, id, step string) error {
+	if s.Claimer.Owner == "" {
+		return nil
+	}
+	if err := s.Store.SetClaimActivity(ctx, s.Claimer, id, s.Claimer.Command+": "+step); err != nil {
+		return fmt.Errorf("%s: record step %q on its claim: %w", id, step, err)
+	}
+	return nil
+}
+
 // newResult is an empty result whose lists are empty rather than nil.
 func newResult(o Options) Result {
 	return Result{Remote: o.Cfg.Remote, BaseBranch: o.Cfg.BaseBranch,
@@ -1021,6 +1034,9 @@ func (s *syncer) restackFanIn(ctx context.Context, t store.Task, br store.Branch
 
 // restackFanInClaimed restacks the claimed fan-in task t onto tg.
 func (s *syncer) restackFanInClaimed(ctx context.Context, t store.Task, br store.Branch, tg fanin.Target) error {
+	if err := s.activity(ctx, t.ID, "restack"); err != nil {
+		return err
+	}
 	if ok, err := s.preflight(ctx, t, br, tg.Onto); err != nil || !ok {
 		return err
 	}
@@ -1104,6 +1120,9 @@ func (s *syncer) preflight(ctx context.Context, t store.Task, br store.Branch, o
 // rebase replays the net change of the task's own commits onto ontoSHA, re-gates and
 // re-publishes it.
 func (s *syncer) rebase(ctx context.Context, t store.Task, br store.Branch, onto, ontoSHA string, landed bool) error {
+	if err := s.activity(ctx, t.ID, "restack"); err != nil {
+		return err
+	}
 	if ok, err := s.preflight(ctx, t, br, onto); err != nil || !ok {
 		return err
 	}
@@ -1182,6 +1201,9 @@ func (s *syncer) failedParent(ctx context.Context) (string, error) {
 // neither gated nor published: it is blocked for later syncs to retry.
 func (s *syncer) gateAndPublish(ctx, gctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
 	newHead := br.HeadSHA
+	if err := s.activity(ctx, t.ID, "gate"); err != nil {
+		return false, err
+	}
 	// KP3: the gate is re-run, the verifier is not.
 	g, err := publish.GateAtHead(gctx, s.publishOptions(t.ID), t, br, "sync")
 	parent, perr := s.failedParent(ctx)
@@ -1249,6 +1271,9 @@ func (s *syncer) republishIfStale(ctx context.Context, t store.Task, br store.Br
 // republish pushes a published task again. A refusal by the dependency rule leaves it
 // published and reports it as waiting for its parent; any other failure blocks it.
 func (s *syncer) republish(ctx context.Context, t store.Task) error {
+	if err := s.activity(ctx, t.ID, "push"); err != nil {
+		return err
+	}
 	po := s.publishOptions(t.ID)
 	po.Out = nil
 	var pr publish.Result

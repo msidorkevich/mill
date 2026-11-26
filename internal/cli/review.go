@@ -549,27 +549,46 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 // approveClaimed claims one task for the whole of its publish (the store updates before
 // and after the push and the push itself) and releases the claim when it is done. A busy
 // task is refused with a *store.BusyError and left as it is.
+// The claim's activity says what the approval is doing: "approve: gate" when the gate must
+// be re-run at the head before the push, "approve: push" otherwise.
 func approveClaimed(ctx context.Context, env Env, s *store.Store, o publish.Options) error {
-	release, err := claimTasks(ctx, env, s, "review approve", o.TaskID)
+	c := store.NewClaimer("review approve")
+	release, err := claimTasksAs(ctx, env, s, c, o.TaskID)
 	if err != nil {
 		return err
 	}
 	defer release()
+	step := "push"
+	// A branch that cannot be loaded is reported by the publish itself.
+	if br, err := s.GetBranch(ctx, o.TaskID); err == nil && br.HeadSHA != "" && br.GateSHA != br.HeadSHA {
+		step = "gate"
+	}
+	if err := setClaimActivity(s, ctx, c, o.TaskID, "approve: "+step); err != nil {
+		return fmt.Errorf("%s: record step %q on its claim: %w; nothing was published", o.TaskID, step, err)
+	}
 	return approveOne(ctx, env, s, o)
 }
+
+// setClaimActivity records what the holder of a claim is doing. Tests replace it to make the
+// update fail.
+var setClaimActivity = (*store.Store).SetClaimActivity
 
 // claimTasks claims ids for this process running the mill subcommand command, so no other
 // mill command changes them meanwhile. The returned release deletes the claims and reports
 // a failure to do so on stderr; call it on every exit path.
 func claimTasks(ctx context.Context, env Env, s *store.Store, command string, ids ...string) (release func(), err error) {
-	c := store.NewClaimer(command)
+	return claimTasksAs(ctx, env, s, store.NewClaimer(command), ids...)
+}
+
+// claimTasksAs is claimTasks for the claimer c.
+func claimTasksAs(ctx context.Context, env Env, s *store.Store, c store.Claimer, ids ...string) (release func(), err error) {
 	if err := s.ClaimTasks(ctx, c, ids); err != nil {
 		return nil, err
 	}
 	return func() {
 		// Release even when ctx was cancelled, or the claim would outlive the command.
 		if err := s.ReleaseClaims(context.WithoutCancel(ctx), c, ids); err != nil {
-			fmt.Fprintf(env.Stderr, "mill %s: %v; the claim is dropped once this process exits\n", command, err)
+			fmt.Fprintf(env.Stderr, "mill %s: %v; the claim is dropped once this process exits\n", c.Command, err)
 		}
 	}, nil
 }

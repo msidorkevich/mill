@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
@@ -273,4 +277,121 @@ func assertNotApproved(t *testing.T, root, id string) {
 	if n := approvedEvents(t, root, id); n != 0 {
 		t.Errorf("%s has %d task-approved events", id, n)
 	}
+}
+
+// approveLatch is a gate command or git hook that creates started and waits until release
+// exists, polling every few milliseconds.
+type approveLatch struct{ started, release string }
+
+func newApproveLatch(t *testing.T) approveLatch {
+	dir := t.TempDir()
+	return approveLatch{started: filepath.Join(dir, "started"), release: filepath.Join(dir, "release")}
+}
+
+func (l approveLatch) script() string {
+	return "touch '" + l.started + "'; while [ ! -f '" + l.release + "' ]; do sleep 0.005; done"
+}
+
+// approveWithLatch runs `mill review approve id` while l holds it, and returns the claim on
+// id seen once l's holder started (as `mill watch` reads it) and the command's result.
+func approveWithLatch(t *testing.T, root, id string, l approveLatch) (store.TaskClaim, result) {
+	t.Helper()
+	done := make(chan result, 1)
+	go func() {
+		var out, errb bytes.Buffer
+		code := Run(context.Background(), Env{Stdout: &out, Stderr: &errb, Dir: root}, []string{"review", "approve", id})
+		done <- result{code, out.String(), errb.String()}
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(l.started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the latched step never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// The test binary does not run a mill command, so the observer counts every claim's
+	// process as alive.
+	ctx := context.Background()
+	s, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{ClaimAlive: func(store.TaskClaim) (bool, error) { return true, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := s.ClaimedTasks(ctx)
+	s.Close()
+	if err := os.WriteFile(l.release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := <-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, ok := claims[id]
+	if !ok {
+		t.Fatalf("%s is not claimed; claims = %+v", id, claims)
+	}
+	return c, r
+}
+
+func TestReviewApproveClaimActivityShowsGateWhileTheGateRuns(t *testing.T) {
+	t.Parallel()
+	root, bare := publishedGoal(t)
+	ctx := context.Background()
+	s := openStore(t, root)
+	br, _ := s.GetBranch(ctx, "g1/a")
+	br.GateSHA = ""
+	if err := s.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+	l := newApproveLatch(t)
+	writeCheckCmd(t, root, l.script())
+
+	c, r := approveWithLatch(t, root, "g1/a", l)
+	if r.code != ExitOK {
+		t.Fatalf("approve: %+v", r)
+	}
+	if c.Command != "review approve" || c.Activity != "approve: gate" || c.ActivitySince.IsZero() {
+		t.Fatalf("claim during the gate = %+v, want approve: gate", c)
+	}
+	if remoteRefs(t, bare)["refs/heads/review/g1/a"] == "" {
+		t.Fatal("review/g1/a was not pushed")
+	}
+}
+
+func TestReviewApproveClaimActivityShowsPushWhilePushing(t *testing.T) {
+	t.Parallel()
+	root, bare := publishedGoal(t)
+	l := newApproveLatch(t)
+	if err := os.WriteFile(filepath.Join(bare, "hooks", "pre-receive"), []byte("#!/bin/sh\ncat >/dev/null\n"+l.script()+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c, r := approveWithLatch(t, root, "g1/a", l)
+	if r.code != ExitOK {
+		t.Fatalf("approve: %+v", r)
+	}
+	if c.Command != "review approve" || c.Activity != "approve: push" {
+		t.Fatalf("claim during the push = %+v, want approve: push", c)
+	}
+}
+
+// Not parallel: it replaces setClaimActivity for the package.
+func TestReviewApproveClaimActivityErrorStopsTheApprovalNamingTaskAndStep(t *testing.T) {
+	root, bare := publishedGoal(t)
+	defer func(f func(*store.Store, context.Context, store.Claimer, string, string) error) { setClaimActivity = f }(setClaimActivity)
+	setClaimActivity = func(*store.Store, context.Context, store.Claimer, string, string) error {
+		return errors.New("database is locked")
+	}
+
+	r := run(t, root, nil, "review", "approve", "g1/a")
+	if r.code != ExitError || !strings.Contains(r.stderr, "g1/a") || !strings.Contains(r.stderr, `"push"`) ||
+		!strings.Contains(r.stderr, "database is locked") {
+		t.Fatalf("approve: %+v", r)
+	}
+	if _, ok := remoteRefs(t, bare)["refs/heads/review/g1/a"]; ok {
+		t.Error("the approval pushed despite the failure")
+	}
+	assertNotApproved(t, root, "g1/a")
 }
