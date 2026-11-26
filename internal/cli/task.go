@@ -24,6 +24,7 @@ import (
 	"github.com/msidorkevich/mill/internal/runlock"
 	"github.com/msidorkevich/mill/internal/runner"
 	"github.com/msidorkevich/mill/internal/scheduler"
+	"github.com/msidorkevich/mill/internal/skiptest"
 	"github.com/msidorkevich/mill/internal/store"
 	"github.com/msidorkevich/mill/internal/taskspec"
 )
@@ -449,6 +450,42 @@ type taskView struct {
 	// added after the plan was approved, oldest first.
 	DependsOn []string    `json:"depends_on,omitempty"`
 	DepsAdded []depsAdded `json:"deps_added,omitempty"`
+	// SkippedTests are the test skips the task's latest skipped_tests event recorded.
+	SkippedTests []skiptest.Skip `json:"skipped_tests,omitempty"`
+}
+
+// latestSkippedTests returns the test skips recorded by the last skipped_tests event of a
+// task, nil when there is none. evs are the task's events in seq order.
+func latestSkippedTests(evs []store.Event) ([]skiptest.Skip, error) {
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Kind != "skipped_tests" {
+			continue
+		}
+		var d struct {
+			Skips []skiptest.Skip `json:"skips"`
+		}
+		if err := json.Unmarshal(evs[i].Data, &d); err != nil {
+			return nil, fmt.Errorf("corrupt skipped_tests event %d: %w", evs[i].Seq, err)
+		}
+		return d.Skips, nil
+	}
+	return nil, nil
+}
+
+// printSkippedTests prints the skips a task added, one "file:line  reason" line each, and
+// nothing when there are none.
+func printSkippedTests(w io.Writer, skips []skiptest.Skip) {
+	if len(skips) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nSkipped tests added (%d):\n", len(skips))
+	for _, s := range skips {
+		line := fmt.Sprintf("  %s:%d", s.File, s.Line)
+		if s.Reason != "" {
+			line += "  " + s.Reason
+		}
+		fmt.Fprintln(w, line)
+	}
 }
 
 // depsAdded is one task-deps-added event: when the dependencies were added and their full ids.
@@ -525,6 +562,9 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 		if v.DependsOn, err = s.TaskDeps(ctx, id); err != nil {
 			return fail(err)
 		}
+	}
+	if v.SkippedTests, err = latestSkippedTests(evs); err != nil {
+		return fail(fmt.Errorf("task %s: %w", id, err))
 	}
 	for _, e := range evs {
 		if e.Kind != "task-deps-added" {
@@ -766,6 +806,7 @@ func printTask(env Env, v taskView) {
 			fmt.Fprintf(w, "\nLast verdict: %s: %s\n", vd.Verdict, vd.Summary)
 		}
 	}
+	printSkippedTests(w, v.SkippedTests)
 	if len(v.Findings) > 0 {
 		fmt.Fprintln(w, "\nLast findings:")
 		for _, f := range v.Findings {
