@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/gate"
@@ -546,7 +547,7 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 	}
 	code := ExitOK
 	for _, id := range ids {
-		if err := approveClaimed(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id}); err != nil {
+		if err := approveClaimed(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id, GateSlotPoll: approveGateSlotPoll}); err != nil {
 			fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
 			code = ExitError
 		}
@@ -557,8 +558,9 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 // approveClaimed claims one task for the whole of its publish (the store updates before
 // and after the push and the push itself) and releases the claim when it is done. A busy
 // task is refused with a *store.BusyError and left as it is.
-// The claim's activity says what the approval is doing: "approve: gate" when the gate must
-// be re-run at the head before the push, "approve: push" otherwise.
+// The claim's activity says what the approval is doing: "approve: waiting for gate" when the
+// gate must be re-run at the head before the push, until the gate holds a gate slot, then
+// "approve: gate"; "approve: push" otherwise.
 func approveClaimed(ctx context.Context, env Env, s *store.Store, o publish.Options) error {
 	c := store.NewClaimer("review approve")
 	release, err := claimTasksAs(ctx, env, s, c, o.TaskID)
@@ -566,16 +568,27 @@ func approveClaimed(ctx context.Context, env Env, s *store.Store, o publish.Opti
 		return err
 	}
 	defer release()
+	activity := func(step string) error {
+		if err := setClaimActivity(s, ctx, c, o.TaskID, "approve: "+step); err != nil {
+			return fmt.Errorf("%s: record step %q on its claim: %w; nothing was published", o.TaskID, step, err)
+		}
+		return nil
+	}
 	step := "push"
 	// A branch that cannot be loaded is reported by the publish itself.
 	if br, err := s.GetBranch(ctx, o.TaskID); err == nil && br.HeadSHA != "" && br.GateSHA != br.HeadSHA {
-		step = "gate"
+		step = "waiting for gate"
 	}
-	if err := setClaimActivity(s, ctx, c, o.TaskID, "approve: "+step); err != nil {
-		return fmt.Errorf("%s: record step %q on its claim: %w; nothing was published", o.TaskID, step, err)
+	if err := activity(step); err != nil {
+		return err
 	}
+	o.GateActivity = activity
 	return approveOne(ctx, env, s, o)
 }
+
+// approveGateSlotPoll is how often an approval's gate waiting for a slot checks again; zero
+// means publish.DefaultGateSlotPoll. Tests shorten it.
+var approveGateSlotPoll time.Duration
 
 // setClaimActivity records what the holder of a claim is doing. Tests replace it to make the
 // update fail.

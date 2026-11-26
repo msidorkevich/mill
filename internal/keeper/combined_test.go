@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -531,5 +532,61 @@ func TestCombinedForceRunsDespiteUnchangedFingerprint(t *testing.T) {
 	}
 	if res.Cached || !res.Passed || runs() <= after {
 		t.Fatalf("forced = %+v, gate runs %d -> %d", res, after, runs())
+	}
+}
+
+// liveClaims reads the live claims, as `mill watch` would. The test binary does not run a
+// mill command, so the observer counts every claim's process as alive.
+func (e *combinedEnv) liveClaims(t *testing.T) map[string]store.TaskClaim {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Open(ctx, e.o.Paths.DB, store.Options{ClaimAlive: func(store.TaskClaim) (bool, error) { return true, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	claims, err := s.ClaimedTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return claims
+}
+
+func TestCombinedClaimsEveryBranchWithCombinedCheckActivity(t *testing.T) {
+	t.Parallel()
+	l := newClaimActivityLatch(t)
+	e := combinedSetup(t, l.script(), []string{"a", "b"}, nil)
+	h := &nameHost{}
+	e.o.Host = h
+	type result struct {
+		res CombinedResult
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := Combined(context.Background(), e.o)
+		done <- result{res, err}
+	}()
+
+	l.wait(t)
+	claims := e.liveClaims(t)
+	l.open(t)
+	r := <-done
+	if r.err != nil || !r.res.Ran || !r.res.Passed {
+		t.Fatalf("Combined = %+v, %v\n%s", r.res, r.err, e.out)
+	}
+	if len(claims) != len(e.ids) {
+		t.Fatalf("claims during the combined check = %+v, want one on each of %v", claims, e.ids)
+	}
+	for _, id := range e.ids {
+		if c := claims[id]; c.Command != "keep" || c.Activity != "keep: combined check" || c.ActivitySince.IsZero() {
+			t.Fatalf("claim on %s during the combined check = %+v, want keep: combined check", id, c)
+		}
+	}
+	if after := e.liveClaims(t); len(after) != 0 {
+		t.Fatalf("claims left after the combined check: %+v", after)
+	}
+	if got := h.started(); fmt.Sprint(got) != fmt.Sprint([]string{"combined check 1"}) {
+		t.Fatalf("gate names = %q, want [combined check 1]", got)
 	}
 }

@@ -40,6 +40,10 @@ type Options struct {
 	// GateSlotPoll is how often a gate waiting for a slot checks again; zero means
 	// DefaultGateSlotPoll.
 	GateSlotPoll time.Duration
+	// GateActivity, when set, is told what a gate that must run is doing: "waiting for gate"
+	// before it waits for a gate slot, "gate" once it holds one. A reused gate tells it
+	// nothing. An error stops the gate and is returned as it is.
+	GateActivity func(step string) error
 }
 
 // DefaultGateSlotPoll is how often a gate waiting for a slot checks again when
@@ -482,6 +486,9 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		}
 		return g, nil
 	}
+	if err := gateActivity(o, "waiting for gate"); err != nil {
+		return gate.Result{}, err
+	}
 	release, err := gateSlot(ctx, o, t.ID)
 	if err != nil {
 		return gate.Result{}, err
@@ -491,6 +498,9 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 			err = errors.Join(err, rerr)
 		}
 	}()
+	if err := gateActivity(o, "gate"); err != nil {
+		return gate.Result{}, err
+	}
 	h := o.Host
 	if h == nil {
 		h = host.NewExec()
@@ -500,6 +510,7 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		Env:     host.AllowEnv(os.Environ(), append(append([]string{}, host.DefaultEnvAllow...), o.Cfg.EnvAllow...)),
 		Timeout: o.Cfg.GateTimeout.Duration,
 		Nice:    o.Cfg.GateNice,
+		Label:   t.ID + " " + phase + " gate",
 	})
 	if ctx.Err() != nil {
 		return g, fmt.Errorf("gate re-run interrupted: %w", ctx.Err())
@@ -517,6 +528,14 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		}
 	}
 	return g, nil
+}
+
+// gateActivity tells o.GateActivity, if set, that the gate is at step.
+func gateActivity(o Options, step string) error {
+	if o.GateActivity == nil {
+		return nil
+	}
+	return o.GateActivity(step)
 }
 
 // gateSlot takes one of the max_parallel_gates gate slots for task id. While every slot is

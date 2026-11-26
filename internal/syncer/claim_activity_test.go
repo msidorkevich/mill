@@ -2,12 +2,15 @@ package syncer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -144,5 +147,100 @@ func TestSyncClaimActivityErrorStopsTheSyncNamingTaskAndStep(t *testing.T) {
 	}
 	if after := git(t, o.Paths.Root, "ls-remote", strings.TrimSpace(bare), "refs/heads/review/g1/b"); after != refs {
 		t.Fatalf("review/g1/b moved after the failure: %s -> %s", refs, after)
+	}
+}
+
+// claimUntil polls the live claim on task id until want reports true, failing the test after
+// a deadline. It returns the claim that matched.
+func claimUntil(t *testing.T, o Options, id, what string, want func(store.TaskClaim) bool) store.TaskClaim {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Open(ctx, o.Paths.DB, store.Options{ClaimAlive: func(store.TaskClaim) (bool, error) { return true, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		claims, err := s.ClaimedTasks(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c, ok := claims[id]; ok && want(c) {
+			return c
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the claim on %s never showed %s; claims = %+v", id, what, claims)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestSyncClaimActivityShowsWaitingForGateUntilItHoldsASlot(t *testing.T) {
+	t.Parallel()
+	o := stackedGoal(t, false)
+	l := newClaimActivityLatch(t)
+	o.Cfg.CheckCmd = l.script()
+	o.MaxParallelGates, o.GateSlotPoll = 1, time.Millisecond
+	release, err := o.Store.AcquireGateSlot(context.Background(), store.GateHolder{TaskID: "other", Attempt: 1, PID: os.Getpid()},
+		1, time.Millisecond, func() { t.Error("the test's own slot had to wait: a slot was left held") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := claimActivitySync(o)
+
+	// The task is in phase gate-wait only while its gate waits for a slot.
+	c := claimUntil(t, o, "g1/b", "the wait for a gate slot", func(store.TaskClaim) bool {
+		tk, err := o.Store.GetTask(context.Background(), "g1/b")
+		return err == nil && tk.Phase == store.PhaseGateWait
+	})
+	if c.Command != "sync" || c.Activity != "sync: waiting for gate" {
+		t.Fatalf("claim while waiting for a gate slot = %+v, want sync: waiting for gate", c)
+	}
+	if _, err := os.Stat(l.started); !os.IsNotExist(err) {
+		t.Fatalf("the gate ran while every slot was held (stat: %v)", err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	l.wait(t)
+	c = claimOf(t, o, "g1/b")
+	l.open(t)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if c.Activity != "sync: gate" {
+		t.Fatalf("claim while holding the gate slot = %+v, want sync: gate", c)
+	}
+}
+
+// nameHost runs every command on the exec host and records the name it was started with,
+// as a herdr host shows it in the tab label.
+type nameHost struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (h *nameHost) Name() string { return "names" }
+
+func (h *nameHost) Start(ctx context.Context, spec host.ProcSpec) (host.Handle, error) {
+	h.mu.Lock()
+	h.names = append(h.names, spec.Name)
+	h.mu.Unlock()
+	return host.NewExec().Start(ctx, spec)
+}
+
+func TestSyncGateNameCarriesTaskAndCommand(t *testing.T) {
+	t.Parallel()
+	o := stackedGoal(t, false)
+	h := &nameHost{}
+	o.Host = h
+	if _, err := Sync(context.Background(), o); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if want := []string{"g1/b sync gate 1"}; fmt.Sprint(h.names) != fmt.Sprint(want) {
+		t.Fatalf("gate names = %q, want %q", h.names, want)
 	}
 }
