@@ -277,7 +277,7 @@ func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResu
 	}
 	g, err := c.gateInSlot(ctx, gate.Options{
 		Host: c.host, Dir: c.dir, Cmds: cmds, LogDir: filepath.Join(c.logDir, fmt.Sprintf("probe-%d", c.res.Probes)),
-		Env: c.env, Timeout: c.Cfg.GateTimeout.Duration,
+		Env: c.env, Timeout: c.Cfg.GateTimeout.Duration, Nice: c.Cfg.GateNice,
 	})
 	if err != nil {
 		return probeResult{}, err

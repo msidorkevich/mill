@@ -499,6 +499,7 @@ func rerunGate(ctx context.Context, o Options, t store.Task, br store.Branch, cm
 		Host: h, Dir: br.Worktree, Cmds: cmds, LogDir: filepath.Join(o.Paths.Runs, t.ID, phase),
 		Env:     host.AllowEnv(os.Environ(), append(append([]string{}, host.DefaultEnvAllow...), o.Cfg.EnvAllow...)),
 		Timeout: o.Cfg.GateTimeout.Duration,
+		Nice:    o.Cfg.GateNice,
 	})
 	if ctx.Err() != nil {
 		return g, fmt.Errorf("gate re-run interrupted: %w", ctx.Err())

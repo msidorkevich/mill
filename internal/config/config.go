@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,6 +49,9 @@ type Config struct {
 	// GateCheckBase runs the commands that still fail on the task's starting point, so a
 	// check that is already broken there blocks the task instead of becoming a finding.
 	GateCheckBase bool `toml:"gate_check_base"`
+	// GateNice runs gate commands under `nice -n GateNice` so they yield the CPU to
+	// interactive work. 0 disables it.
+	GateNice int `toml:"gate_nice"`
 	// EnvAllow lists extra environment variables passed to workers and gate commands, on top
 	// of the built-in allowlist (SE3).
 	EnvAllow []string     `toml:"env_allow"`
@@ -155,6 +159,7 @@ func Default() Config {
 		GateTimeout:      Duration{20 * time.Minute},
 		GateRerun:        true,
 		GateCheckBase:    true,
+		GateNice:         DefaultGateNice(),
 		EnvAllow:         []string{},
 		Runner: RunnerConfig{
 			Kind:           "claude",
@@ -182,6 +187,16 @@ func Default() Config {
 	}
 }
 
+// DefaultGateNice is the default gate_nice: 10 on darwin and linux, where nice is standard,
+// 0 elsewhere.
+func DefaultGateNice() int {
+	switch runtime.GOOS {
+	case "darwin", "linux":
+		return 10
+	}
+	return 0
+}
+
 // DefaultTOML is the config file `mill init` writes. Decoding it yields Default().
 const DefaultTOML = `# mill project configuration. Commit this file; .mill/runs/ and the database are ignored.
 
@@ -202,6 +217,7 @@ worktree_root = ""        # where task worktrees live; "" = ~/.cache/mill/worktr
 gate_timeout = "20m"      # per gate command
 gate_rerun = true         # re-run failed gate commands once; passing then = flaky, the gate passes
 gate_check_base = true    # run still-failing commands on the task's starting point; failing there too blocks the task
+# gate_nice = 10          # run gate commands under "nice -n <value>"; 0 disables. Default: 10 on macOS and Linux, 0 elsewhere
 env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
 
 # Model families from cheapest to strongest. A model belongs to the first tier whose name it
@@ -352,6 +368,9 @@ func (c Config) Validate() error {
 	}
 	if c.GateTimeout.Duration <= 0 {
 		add("gate_timeout must be > 0")
+	}
+	if c.GateNice < 0 {
+		add("gate_nice must be >= 0 (0 disables nice), got %d", c.GateNice)
 	}
 	for _, k := range c.EnvAllow {
 		if !envKeyRe.MatchString(k) {

@@ -123,7 +123,7 @@ func initRepo(t *testing.T, dir, cfgText string) project.Paths {
 	return p
 }
 
-var goodTools = map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)"}
+var goodTools = map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)", "nice": ""}
 
 func TestAllGreen(t *testing.T) {
 	t.Parallel()
@@ -319,5 +319,46 @@ func TestGitignoreSkippedWhenNotInitialized(t *testing.T) {
 	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
 	if c := byName(r)["gitignore"]; c.Status != Skip {
 		t.Fatalf("gitignore check = %+v", c)
+	}
+}
+
+func TestGateNiceReportedWhenNiceOnPath(t *testing.T) {
+	t.Parallel()
+	dir := gitRepo(t)
+	initRepo(t, dir, "check_cmd = \"true\"\ngate_nice = 7\n")
+	r := Run(context.Background(), fakeEnv{tools: goodTools}.opts(dir))
+	c := byName(r)["gate_nice"]
+	if c.Status != OK || !strings.Contains(c.Detail, "gate_nice = 7") {
+		t.Fatalf("gate_nice = %+v, want ok mentioning gate_nice = 7", c)
+	}
+	if !r.OK {
+		t.Fatalf("report not OK: %+v", r.Checks)
+	}
+}
+
+func TestGateNiceFailsWhenNiceMissing(t *testing.T) {
+	t.Parallel()
+	dir := gitRepo(t)
+	initRepo(t, dir, "check_cmd = \"true\"\ngate_nice = 10\n")
+	tools := map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)"}
+	r := Run(context.Background(), fakeEnv{tools: tools}.opts(dir))
+	c := byName(r)["gate_nice"]
+	if c.Status != Fail || !strings.Contains(c.Detail, "gate_nice = 10") || !strings.Contains(c.Detail, "nice") {
+		t.Fatalf("gate_nice = %+v, want fail naming gate_nice and nice", c)
+	}
+	if r.OK {
+		t.Fatal("a missing nice must fail the report")
+	}
+}
+
+func TestGateNiceZeroNeedsNoNice(t *testing.T) {
+	t.Parallel()
+	dir := gitRepo(t)
+	initRepo(t, dir, "check_cmd = \"true\"\ngate_nice = 0\n")
+	tools := map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)"}
+	r := Run(context.Background(), fakeEnv{tools: tools}.opts(dir))
+	c := byName(r)["gate_nice"]
+	if c.Status != OK || !strings.Contains(c.Detail, "gate_nice = 0") {
+		t.Fatalf("gate_nice = %+v, want ok mentioning gate_nice = 0", c)
 	}
 }

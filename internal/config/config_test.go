@@ -1,9 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -529,5 +531,41 @@ func TestMaxParallelGatesBelowOneIsRejected(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "max_parallel_gates must be >= 1, got "+v) {
 			t.Errorf("max_parallel_gates = %s: err = %v, want a clear >= 1 error", v, err)
 		}
+	}
+}
+
+func TestGateNiceDefaultsByPlatform(t *testing.T) {
+	t.Parallel()
+	want := 0
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		want = 10
+	}
+	cfg, err := Parse("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GateNice != want {
+		t.Fatalf("default gate_nice = %d on %s, want %d", cfg.GateNice, runtime.GOOS, want)
+	}
+}
+
+func TestGateNiceParsesZeroAndPositive(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{0, 5, 19} {
+		cfg, err := Parse(fmt.Sprintf("gate_nice = %d", n))
+		if err != nil {
+			t.Fatalf("gate_nice = %d: %v", n, err)
+		}
+		if cfg.GateNice != n {
+			t.Fatalf("gate_nice = %d parsed as %d", n, cfg.GateNice)
+		}
+	}
+}
+
+func TestGateNiceNegativeRejected(t *testing.T) {
+	t.Parallel()
+	_, err := Parse("gate_nice = -1")
+	if err == nil || !strings.Contains(err.Error(), "gate_nice must be >= 0") {
+		t.Fatalf("gate_nice = -1: err = %v, want a gate_nice validation error", err)
 	}
 }
