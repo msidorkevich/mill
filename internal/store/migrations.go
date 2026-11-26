@@ -162,6 +162,11 @@ CREATE TABLE gate_results (
 	PRIMARY KEY (tree_sha, fingerprint)
 );
 `,
+	// 13: what a claim's holder is doing with the task, and since when.
+	`
+ALTER TABLE task_claims ADD COLUMN activity TEXT NOT NULL DEFAULT '';
+ALTER TABLE task_claims ADD COLUMN activity_since TEXT NULL;
+`,
 }
 
 // LatestVersion is the schema version this build writes.

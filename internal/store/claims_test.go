@@ -246,3 +246,123 @@ func TestRunsClaimerMatchesExecutableAndCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrateFromV12OldClaimsReadWithEmptyActivity(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mill.db")
+	saved := migrations
+	migrations = saved[:12]
+	LatestVersion = 12
+	s, err := Open(ctx, path, Options{})
+	migrations, LatestVersion = saved, len(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO tasks (id, title, kind, spec, status, created_at, updated_at)
+		VALUES ('t1', 'T', 'implement', 's', 'verified', '2026-01-01T00:00:00.000000000Z', '2026-01-01T00:00:00.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO task_claims (task_id, owner, pid, command, executable, claimed_at)
+		VALUES ('t1', 'o1', 101, 'run', 'mill', '2026-01-01T00:00:00.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2, err := Open(ctx, path, Options{ClaimAlive: func(TaskClaim) (bool, error) { return true, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if v, _ := s2.SchemaVersion(ctx); v != LatestVersion || v < 13 {
+		t.Fatalf("schema = %d, want %d", v, LatestVersion)
+	}
+	var activity string
+	var since *string
+	if err := s2.DB().QueryRowContext(ctx, `SELECT activity, activity_since FROM task_claims WHERE task_id = 't1'`).
+		Scan(&activity, &since); err != nil {
+		t.Fatalf("new columns: %v", err)
+	}
+	if activity != "" || since != nil {
+		t.Errorf("activity = %q, since = %v; want empty and NULL", activity, since)
+	}
+	got, err := s2.ClaimedTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := got["t1"]
+	if cl.Owner != "o1" || cl.Activity != "" || !cl.ActivitySince.IsZero() || cl.ClaimedAt.IsZero() {
+		t.Errorf("claim after upgrade = %+v", cl)
+	}
+}
+
+func TestSetClaimActivityUpdatesHoldersClaim(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := claimStore(t, nil, "a", "b")
+	c := Claimer{Owner: "o1", PID: 101, Command: "run", Executable: "mill"}
+	if err := s.ClaimTasks(ctx, c, []string{"a", "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetClaimActivity(ctx, c, "a", "merging"); err != nil {
+		t.Fatalf("SetClaimActivity: %v", err)
+	}
+	got, err := s.ClaimedTasks(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a := got["a"]; a.Activity != "merging" || !a.ActivitySince.Equal(fixed) || !a.ClaimedAt.Equal(fixed) || a.Owner != "o1" {
+		t.Errorf("claim on a = %+v; want activity merging since %v", a, fixed)
+	}
+	if b := got["b"]; b.Activity != "" || !b.ActivitySince.IsZero() {
+		t.Errorf("claim on b = %+v; want no activity", b)
+	}
+}
+
+func TestSetClaimActivityRefusesClaimHeldByAnotherClaimer(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := claimStore(t, nil, "a", "b")
+	holder := Claimer{Owner: "o1", PID: 101, Command: "run"}
+	other := Claimer{Owner: "o2", PID: 202, Command: "task run"}
+	if err := s.ClaimTasks(ctx, holder, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetClaimActivity(ctx, holder, "a", "gating"); err != nil {
+		t.Fatal(err)
+	}
+	err := s.SetClaimActivity(ctx, other, "a", "stolen")
+	if err == nil || !strings.Contains(err.Error(), "not held") {
+		t.Fatalf("SetClaimActivity by another claimer: err = %v; want a not-held error", err)
+	}
+	if err := s.SetClaimActivity(ctx, holder, "b", "x"); err == nil || !strings.Contains(err.Error(), "not held") {
+		t.Fatalf("SetClaimActivity on an unclaimed task: err = %v; want a not-held error", err)
+	}
+	got, _ := s.ClaimedTasks(ctx)
+	if got["a"].Activity != "gating" || got["a"].Owner != "o1" {
+		t.Errorf("claim on a = %+v; want o1 gating unchanged", got["a"])
+	}
+	if _, ok := got["b"]; ok {
+		t.Errorf("unclaimed task b gained a claim: %+v", got["b"])
+	}
+}
+
+func TestClaimTakenOverFromDeadProcessStartsWithoutActivity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := claimStore(t, map[int]bool{200: true}, "a")
+	dead := Claimer{Owner: "dead", PID: 200, Command: "run"}
+	if err := s.ClaimTasks(ctx, dead, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetClaimActivity(ctx, dead, "a", "merging"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ClaimTasks(ctx, Claimer{Owner: "live", PID: 300, Command: "run"}, []string{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.ClaimedTasks(ctx)
+	if a := got["a"]; a.Owner != "live" || a.Activity != "" || !a.ActivitySince.IsZero() {
+		t.Errorf("claim on a = %+v; want live owner with no activity", a)
+	}
+}
