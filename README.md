@@ -75,7 +75,9 @@ mill task rebase <id>                                # move a pending, blocked o
 `mill task list` by default shows running and claimed tasks first, then blocked and failed tasks,
 both oldest first, then the 20 newest of the others. A row that a mill command holds a claim on
 shows the claim in its status, for example `claimed: approve: gate, held 2m`; the holder is
-`mill <command>` when it gave no activity. When more tasks exist, the last line says
+`mill <command>` when it gave no activity. A running task's claim by `mill run` is not shown,
+because the status already says `running`; claims by other commands, and claims on tasks that are
+not running, are shown. When more tasks exist, the last line says
 `… N older task(s) not shown; use --all`. `--all` lists every task oldest first, and `--json`
 lists every task oldest first too, with the claim of each claimed task.
 
@@ -156,6 +158,11 @@ are not listed there.
 without `-run` while `check_cmd` already runs `go test ./...` (or `make check`): the gate runs
 those tests anyway, so the task check should be narrow, for example
 `go test -run 'TestName' ./pkg/`. The warning does not stop the plan from being created.
+
+`mill plan` and `mill plan show` also warn when an acceptance criterion asks to change a path that
+another task owns (for example `Update internal/x.go` or `internal/x.go documents ...` when task b
+owns `internal/x.go` and the criterion's task does not). Merely mentioning the path does not warn,
+so a criterion that only reads a file or names it as a fixture is fine.
 
 `mill plan show` prints a `Longest chain` line after the estimated cost: the dependency chain that
 takes longest, with its task ids in order and its estimated duration. A task's estimate is the
@@ -671,7 +678,13 @@ process's pid file. A start that does not get one in time fails. For gate comman
 start-failure rules above apply: only task gates fall back to the exec host; the others retry once
 and then fail.
 
-**Worker environment.** Each agent attempt gets its own `TMPDIR`, inside the attempt's run
-directory under `.mill/runs/`, so workers never share or clean up one another's temporary files.
+**Worker environment.** Each agent attempt gets its own `TMPDIR`, so workers never share or clean
+up one another's temporary files. For a task it is `<worktree root>/.tmp/<task id>/a<n>-<role>`.
+The worktree root is this repository's own directory, `<worktree_root>/<repo name>-<hash>`, where
+`worktree_root` is set in `.mill/config.toml` (default `~/.cache/mill/worktrees`) and `<hash>` is
+eight hex digits derived from the repository's path; for example
+`~/.cache/mill/worktrees/myrepo-1a2b3c4d/.tmp/add-reverse/a1-implementer`. mill creates the
+directory before the agent starts, removes it after a successful attempt, keeps it after a failed
+one for inspection, and `mill clean` removes it together with the task's worktree.
 Workers are denied `pkill`, `killall` and `pgrep`, because other agents share the machine, so
 they may only wait on and stop processes they started themselves.
