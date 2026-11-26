@@ -1145,7 +1145,7 @@ then reached 97% of the five-hour limit; the rest ran after the reset.
 Seen from outside while `g19` ran (two agents, one gate slot, herdr host). Items 1–4 cost the most
 time; together they are a candidate for the next goal.
 
-- [ ] **1. Implementers run the whole gate themselves.** The implementer prompt lists
+- [x] **1. Implementers run the whole gate themselves.** (Fixed in `g20`, `prompt-gate-wording`.) The implementer prompt lists
       `check_cmd` under "Gate (must pass; run these yourself before you finish)", so every
       implementer ran `make check` (one ran it three times), outside the gate slots and next to
       other tasks' gates. Load average reached 82, `skipped-tests-detect`'s gate took 3m22s
@@ -1155,38 +1155,38 @@ time; together they are a candidate for the next goal.
       fingerprint, so the gate reuses it when the tree is unchanged (reuse exists since `g15`).
       Cheaper alternative: the prompt asks only for the task's checks and the tests of the
       changed packages, and leaves `check_cmd` to the gate.
-- [ ] **2. Agents act on machine-wide processes and shared temp files.** One implementer waited
+- [x] **2. Agents act on machine-wide processes and shared temp files.** (Fixed in `g20`, `runner-attempt-isolation`.) One implementer waited
       with `pgrep -f "go test"` (which also matches other tasks' gates), ran
       `pkill -f "until \[ -s"` (which can kill a sibling worker's shell) and wrote to
       `/tmp/g19check.log` (a name two agents can share). Role settings do not deny `pkill` or
       `killall`. Wanted: deny them, give each attempt its own `TMPDIR` in its run directory, and
       tell agents to wait on their own background jobs only.
-- [ ] **3. A host start failure is reported as a flaky gate.** In `g18/readme-triage-and-deps`
+- [x] **3. A host start failure is reported as a flaky gate.** (Fixed in `g20`, `gate-start-failure`.) In `g18/readme-triage-and-deps`
       attempt 2 the herdr wrapper did not write its pid within 10s under load; the gate counted
       the command as failed (`could not run`), the re-run passed, and the command was recorded as
       `gate-flaky`, so the verifier was told the tests are flaky. The passing result was also
       recorded twice. Wanted: a command the host could not start is retried (or run on the exec
       host) and never counted as flaky; the pid wait allows for load.
-- [ ] **4. `max_parallel` slots idle during gates.** A task in `gate` or "waiting for a free gate
+- [x] **4. `max_parallel` slots idle during gates.** (Fixed in `g20`, `scheduler-agent-slots`.) A task in `gate` or "waiting for a free gate
       slot" holds one of the `max_parallel` slots although no agent runs; with two slots and one
       gate slot, one agent slot is often empty for the 2–4 minutes of a gate. Count only agent
       runs (implementer, verifier, resolver, fixer) against `max_parallel`; gates are already
       limited by `max_parallel_gates`. Best done together with item 1, or load rises further.
-- [ ] **5. `mill goal show` gets very wide.** DEPENDS ON lists every dependency;
+- [x] **5. `mill goal show` gets very wide.** (Fixed in `g20`, `output-fixes-doctor`.) DEPENDS ON lists every dependency;
       `readme-followups` has nine, which makes a line of about 230 columns. Show a count or the
       first few, or wrap.
-- [ ] **6. Duplicate lines.** The run log prints `verified at <sha> (...)` and then `verified` for
+- [x] **6. Duplicate lines.** (Fixed in `g20`, `scheduler-agent-slots`.) The run log prints `verified at <sha> (...)` and then `verified` for
       every task; one of them is enough.
-- [ ] **7. Gate tabs have no task name.** The herdr tab of a gate is labelled `mill gate 1`;
+- [x] **7. Gate tabs have no task name.** (Fixed in `g20`, `gate-labels-claim-activity`.) The herdr tab of a gate is labelled `mill gate 1`;
       agent tabs say `mill g19/<task> a1 implementer`. Label gates the same way
       (`mill g19/<task> a1 gate`).
-- [ ] **8. `mill doctor` does not report ignored config.** `.mill/config.toml` still has legacy
+- [x] **8. `mill doctor` does not report ignored config.** (Fixed in `g20`, `output-fixes-doctor`.) `.mill/config.toml` still has legacy
       `[sizes.S]`/`[sizes.M]` blocks, which are ignored because `[models]` exists; doctor says
       nothing. Warn and say which block to delete.
-- [ ] **9. `mill task show` prints `model (mapping)`.** The header shows the placeholder; only the
+- [x] **9. `mill task show` prints `model (mapping)`.** (Fixed in `g20`, `output-fixes-doctor`.) The header shows the placeholder; only the
       attempts table names the real model. Show the model the next attempt would use and why
       (`opus (M/high)`).
-- [ ] **10. Shared files make long chains, and plan review does not show it.** `g19`'s tasks that
+- [x] **10. Shared files make long chains, and plan review does not show it.** (Fixed in `g20`, `plan-longest-chain`.) `g19`'s tasks that
       share `task.go`, `pipeline.go` and `migrations.go` were chained into a sequence of seven,
       which sets most of the goal's duration. `mill plan show` could print the longest chain
       with its estimated time, so splitting a shared file can be weighed at plan review.
@@ -1224,31 +1224,89 @@ parent merged. Opening and retargeting stacked PRs is now part of the M6 hook re
 
 Continues the numbered list in "Improvements found while watching `g19`".
 
-- [ ] **11. The owns check counts dependent tasks as siblings.** `task-list-current-first` edited
+- [x] **11. The owns check counts dependent tasks as siblings.** (Fixed in `g20`, `owns-dependents-verifier-scope`.) `task-list-current-first` edited
       README.md (the verifier asked for it); README.md belongs to `readme-followups`, which
       depends on it and builds on top, so the edit could not conflict. The owns check failed the
       attempt anyway (`internal/pipeline/owns.go` counts every sibling that has not landed).
       Exempt tasks that depend on the edited task, directly or not.
-- [ ] **12. A verifier finding about a sibling's file reaches the next attempt.** Attempt 2 then
+- [x] **12. A verifier finding about a sibling's file reaches the next attempt.** (Fixed in `g20`, `owns-dependents-verifier-scope`.) Attempt 2 then
       got "update README.md" from the verifier and "revert README.md" from mill. The verifier
       gave opposite verdicts on the same tree (fail on attempt 1, pass on attempt 3). Since `g19`
       the verifier sees the siblings; mill could also drop or flag a finding whose file another
       task owns before it reaches the implementer.
-- [ ] **13. Read-only commands migrate the database, and older mill then refuses it.** I ran a
+- [x] **13. Read-only commands migrate the database, and older mill then refuses it.** (Fixed in `g20`, `store-additive-migrations`.) I ran a
       `g19` build's `mill plan show` on the live database: it applied migrations 13–14 and the
       `master` binary then failed with "schema version 14 is newer than this mill (12)", although
       both migrations only add columns. I restored v12 by hand (backup kept). Migrate only on
       write commands or on an explicit `mill migrate`, and let an older mill open a database
       whose newer migrations are additive.
-- [ ] **14. Tokens and agent time come from the last `result` event only.** When a background
+- [x] **14. Tokens and agent time come from the last `result` event only.** (Fixed in `g20`, `runner-sum-results`.) When a background
       task wakes the agent after it finished, claude emits a second `result` covering only that
       last turn. Cost is cumulative and correct, but tokens and `duration_ms` are not:
       `pipelined-restacks` attempt 2 recorded 1,406 output tokens instead of about 35k, and
       `task-edit-accepts-show-json` attempt 1 shows 5s instead of 5m13s. 4 of 301 runs so far.
       Sum usage and durations over all `result` events.
-- [ ] **15. Small things from the review.**
+- [x] **15. Small things from the review.** (Fixed in `g20`, `review-fixes-skips-tabs` and `gate-labels-claim-activity`.)
       - The event kind `skipped_tests` uses an underscore; every other kind uses hyphens.
       - A skip removed by a later attempt still shows: nothing is recorded when there are none.
       - A claim says `gate` while the task is still waiting for a gate slot, and has no activity
         (`-`) during the combined check.
       - Recovery does not close the tabs of keeper gates (`runs/<task>/keeper`).
+
+## `g19` follow-ups: done (goal `g20` landed 2026-11-26, $13.95)
+
+Twelve tasks (PRs #136–#147), planned at $10.46–$43.34 from past tasks. Nine passed on their
+first real attempt; two attempts were lost to the five-hour usage limit right after the start
+(the run waited with `--wait-on-limit` and resumed at the reset). What changed:
+
+- Implementers run their task's checks and the tests of the packages they changed, not
+  `check_cmd`; the gate runs it (`implementer_runs_check = true` restores the old wording).
+- Agents cannot use `pkill`, `killall` or `pgrep`, get their own `TMPDIR`, and are told to wait
+  only on their own background jobs.
+- A gate command the host could not start is retried, then run on the exec host, and never
+  counted as flaky; the herdr start timeout is 30s.
+- `max_parallel` counts running agents: a task gives its agent slot back while it waits for and
+  runs its gate, and takes one again before its next agent step (tasks coming back from a gate
+  go first). `max_in_flight` (default `max_parallel + max_parallel_gates`) caps started tasks.
+- Gate tabs are named after their task; claims say `waiting for gate`, `gate` and
+  `combined check`; the run log prints `verified` once; `goal show` lists at most three
+  dependencies; `task show` names the next attempt's model; doctor warns about ignored
+  `[sizes]` blocks; `plan show` prints the longest chain and its estimated duration.
+- The owns check ignores tasks that depend on the edited task; verifier findings about another
+  task's files go to a `verifier-out-of-scope` note instead of the next attempt, and a fail
+  verdict with only such findings counts as a pass with notes.
+- An older mill opens a database whose newer migrations only add tables and columns
+  (`schema_min_reader`).
+- Usage and agent time are summed over every `result` event of a run.
+- `skipped-tests` events (the old name is still read), stale skips cleared, and recovery closes
+  herdr tabs anywhere under `.mill/runs` whose mill process is gone, never a live one.
+
+The verifiers caught two real problems: a busy-loop in the new scheduler slots (a task busy in
+another mill process woke the run loop on every poll) and three inaccurate README statements.
+
+Publishing: four stacks. I merged no stack bottom-up badly this time, but the operator merged the
+first PR of stack A before the rest were open, so its child had to target `master` directly. The
+rule: open every PR of a stack, then merge from the bottom.
+
+### Found while running and reviewing `g20`
+
+- [ ] **16. The per-attempt `TMPDIR` is inside `.mill/runs`,** where role settings deny Read,
+      Write and Edit (`.mill/**`), while the prompt tells agents to put scratch files there.
+      Shell redirection works; the tools do not. Move it outside `.mill` (e.g. next to the
+      worktrees).
+- [ ] **17. Only pipeline gates fall back to the exec host.** `gate.Options.Fallback` is set in
+      `internal/pipeline/pipeline.go`; publish/restack gates (`internal/publish/publish.go`) and
+      the combined check (`internal/keeper/combined.go`) get the retry but no fallback, although
+      they can run on herdr.
+- [ ] **18. Out-of-scope verifier findings include landed tasks.** `splitOutOfScope` matches every
+      other task of the goal; the owns check skips landed ones, so a task may edit their files,
+      and a real finding about such a file is dropped (and can turn a fail into a pass with
+      notes). Skip landed tasks there too.
+- [ ] **19. Running tasks show a redundant claim.** `mill task list` prints
+      `(claimed: mill run, held …)` for every task `mill run` is running.
+- [ ] **20. The plan warning about siblings' files fires on mentions.** In `g20` it flagged a
+      criterion that used README.md as a test scenario and one that read `config.go` to check
+      stated defaults. Warn only when the criterion asks for a change to that file, or list such
+      warnings as "check" rather than "warning".
+- [ ] **21. `blocked` is printed twice** in the run log (`<task>: blocked: ... (task total ...)`
+      and `<task>: blocked: ...`), like `verified` was.
