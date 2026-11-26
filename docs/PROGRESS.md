@@ -1284,9 +1284,10 @@ first real attempt; two attempts were lost to the five-hour usage limit right af
 The verifiers caught two real problems: a busy-loop in the new scheduler slots (a task busy in
 another mill process woke the run loop on every poll) and three inaccurate README statements.
 
-Publishing: four stacks. I merged no stack bottom-up badly this time, but the operator merged the
-first PR of stack A before the rest were open, so its child had to target `master` directly. The
-rule: open every PR of a stack, then merge from the bottom.
+Publishing: four stacks. The first PR of stack A was merged before the others were opened, and
+with "Automatically delete head branches" on, its child could no longer target the deleted
+branch, so it targeted `master` directly. The rule until the M6 hooks open PRs: open every PR of
+a stack, then merge from the bottom.
 
 ### Found while running and reviewing `g20`
 
