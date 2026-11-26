@@ -128,3 +128,44 @@ func TestModelStatsEmptyStoreReturnsNoRows(t *testing.T) {
 		t.Fatalf("stats = %+v, %v", got, err)
 	}
 }
+
+func TestGroupTaskCostsIncludeRetriesOfFinishedTasksInGroup(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newStore(t)
+	impl, ver := RoleImplementer, "verifier"
+	// a: retried once; its cost is every attempt's, the retry on another model included.
+	statsModelsTask(t, s, "a", "S", "low", TaskLanded,
+		statsModelsAttempt{1, impl, "sonnet", 1.0}, statsModelsAttempt{1, ver, "haiku", 0.5},
+		statsModelsAttempt{2, impl, "opus", 3.0})
+	statsModelsTask(t, s, "b", "S", "low", TaskFailed, statsModelsAttempt{1, impl, "sonnet", 0.75})
+	statsModelsTask(t, s, "c", "S", "low", TaskBlocked, statsModelsAttempt{1, impl, "sonnet", 0.25})
+	// Left out: unfinished, other model, other complexity, other size, no implementer attempt.
+	statsModelsTask(t, s, "d", "S", "low", TaskRunning, statsModelsAttempt{1, impl, "sonnet", 9})
+	statsModelsTask(t, s, "e", "S", "low", TaskVerified, statsModelsAttempt{1, impl, "opus", 9})
+	statsModelsTask(t, s, "f", "S", "high", TaskVerified, statsModelsAttempt{1, impl, "sonnet", 9})
+	statsModelsTask(t, s, "g", "M", "low", TaskVerified, statsModelsAttempt{1, impl, "sonnet", 9})
+	statsModelsTask(t, s, "h", "S", "low", TaskVerified, statsModelsAttempt{1, ver, "sonnet", 9})
+
+	got, err := s.GroupTaskCosts(ctx, "S", "low", "sonnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []float64{0.25, 0.75, 4.5}
+	if len(got) != len(want) {
+		t.Fatalf("costs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if !statsModelsNear(got[i], want[i]) {
+			t.Fatalf("costs = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestGroupTaskCostsEmptyGroupReturnsNone(t *testing.T) {
+	t.Parallel()
+	got, err := newStore(t).GroupTaskCosts(context.Background(), "S", "low", "sonnet")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("costs = %v, %v", got, err)
+	}
+}

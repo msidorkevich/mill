@@ -48,13 +48,13 @@ func TestPlanShowModelsTextListsComplexityModelAndCost(t *testing.T) {
 	for _, want := range []string{
 		"kind        implement, size S",
 		"complexity  low (one small function)",
-		"model       haiku (mapping S/low), est. $0.38–$5.08",
+		"model       haiku (mapping S/low), est. $0.38–$5.08 (from budget limits)",
 		"kind        implement, size M",
 		"complexity  high (tricky)",
-		"model       opus (override), est. $4.32–$8.00",
+		"model       opus (override), est. $4.32–$8.00 (from budget limits)",
 		"complexity  medium (no reason given)",
 		"model       gpt-x (override), est. unknown",
-		"Estimated cost: $4.70–$13.08, excluding 1 task(s) with unknown cost",
+		"Estimated cost: $4.70–$13.08 (0 from past tasks, 2 from budget limits), excluding 1 task(s) with unknown cost",
 	} {
 		if !strings.Contains(r.stdout, want) {
 			t.Errorf("output missing %q:\n%s", want, r.stdout)
