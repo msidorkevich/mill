@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 	"github.com/msidorkevich/mill/internal/taskspec"
 )
@@ -243,6 +246,113 @@ func TestTaskListJSONIsCompleteWithClaims(t *testing.T) {
 	}
 	if len(doc.Tasks) != 2 || doc.Tasks[0].ID != "r1" || doc.Tasks[1].ID != "c1" {
 		t.Errorf("running --json = %+v", doc.Tasks)
+	}
+}
+
+// liveClaimant starts a process whose command line ends in command, so that a claim with
+// that pid and command counts as alive. It is killed when the test ends.
+func liveClaimant(t *testing.T, command string) int {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", "sleep 300; :", command)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			t.Errorf("kill claimant %d: %v", cmd.Process.Pid, err)
+		}
+		cmd.Wait() // reports the kill signal, which is expected
+	})
+	return cmd.Process.Pid
+}
+
+// addRepoTask creates task id in the store at path with status, and claims it for the
+// process pid as command. A claim is taken while the task is still pending, as mill does,
+// because a running task cannot be claimed.
+func addRepoTask(t *testing.T, s *store.Store, id, status string, pid int, command string) {
+	t.Helper()
+	ctx := context.Background()
+	spec := taskspec.Spec{ID: id, Title: "title " + id, Kind: "implement", Spec: "do it", Acceptance: []string{"done"},
+		Checks: []string{}, Owns: []string{}, Size: "S", DependsOn: []string{}}
+	if err := s.CreateTask(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if pid != 0 {
+		c := store.Claimer{Owner: "owner-" + id, PID: pid, Command: command, Executable: "sh"}
+		if err := s.ClaimTasks(ctx, c, []string{id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if status != store.TaskPending {
+		if err := s.SetTaskStatus(ctx, id, status, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestTaskListHidesRunClaimOnRunningTaskOnly(t *testing.T) {
+	t.Parallel()
+	root := gitRepo(t)
+	if r := run(t, root, nil, "init"); r.code != ExitOK {
+		t.Fatalf("init: %+v", r)
+	}
+	paths, err := project.FindContext(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(context.Background(), paths.DB, store.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	addRepoTask(t, s, "r1", store.TaskRunning, liveClaimant(t, "run"), "run")
+	addRepoTask(t, s, "v1", store.TaskVerified, liveClaimant(t, "keep"), "keep")
+	addRepoTask(t, s, "p1", store.TaskPending, liveClaimant(t, "run"), "run")
+
+	r := run(t, root, nil, "task", "list")
+	if r.code != ExitOK {
+		t.Fatalf("task list: %+v", r)
+	}
+	rows := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(r.stdout), "\n") {
+		if f := strings.Fields(l); len(f) > 0 {
+			rows[f[0]] = l
+		}
+	}
+	if strings.Contains(rows["r1"], "claimed:") {
+		t.Errorf("running task claimed by run shows its claim: %q", rows["r1"])
+	}
+	if !strings.Contains(rows["v1"], "(claimed: mill keep, held ") {
+		t.Errorf("verified task claimed by keep lacks the claim: %q", rows["v1"])
+	}
+	if !strings.Contains(rows["p1"], "(claimed: mill run, held ") {
+		t.Errorf("pending task claimed by run lacks the claim: %q", rows["p1"])
+	}
+
+	r = run(t, root, nil, "task", "list", "--json")
+	if r.code != ExitOK {
+		t.Fatalf("task list --json: %+v", r)
+	}
+	var doc struct {
+		Tasks []struct {
+			ID    string `json:"id"`
+			Claim *struct {
+				Command string `json:"command"`
+			} `json:"claim"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal([]byte(r.stdout), &doc); err != nil {
+		t.Fatalf("%v\n%s", err, r.stdout)
+	}
+	claims := map[string]string{}
+	for _, tk := range doc.Tasks {
+		if tk.Claim != nil {
+			claims[tk.ID] = tk.Claim.Command
+		}
+	}
+	if claims["r1"] != "run" || claims["v1"] != "keep" || claims["p1"] != "run" || len(claims) != 3 {
+		t.Errorf("--json claims = %v, want r1 run, v1 keep, p1 run", claims)
 	}
 }
 

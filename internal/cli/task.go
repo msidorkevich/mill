@@ -702,7 +702,8 @@ func renderTaskList(ctx context.Context, w io.Writer, s *store.Store, opts taskL
 		if t.Phase != "" {
 			st += " (" + t.Phase + ")"
 		}
-		if c := t.Claim; c != nil {
+		// A running task claimed by mill run is already shown as running; the claim adds nothing.
+		if c := t.Claim; c != nil && !(c.Command == "run" && t.Status == store.TaskRunning) {
 			doing := c.Activity
 			if doing == "" {
 				doing = "mill " + c.Command
