@@ -202,6 +202,7 @@ type Options struct {
 	LogDir         string
 	ProtectedPaths []string
 	Env            []string
+	TmpDir         string        // the planner agent's TMPDIR, outside the repository
 	Timeout        time.Duration // per agent call; 0 means no limit
 }
 
@@ -301,6 +302,7 @@ func runOnce(ctx context.Context, o Options, call int, promptText, logDir string
 		Role: runner.RolePlanner, Prompt: promptText, Dir: o.Root, Schema: PlanSchema,
 		Tools: append([]string(nil), Tools...), Model: o.Model, Budget: o.Budget, Count: o.Count,
 		Name: "planner", LogDir: logDir, ProtectedPaths: o.ProtectedPaths, Env: o.Env,
+		TmpDir: o.TmpDir,
 		OnUsage: func(d budget.Usage) {
 			mu.Lock()
 			defer mu.Unlock()

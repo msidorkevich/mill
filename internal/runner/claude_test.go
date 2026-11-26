@@ -59,6 +59,7 @@ func baseReq(t *testing.T) Request {
 		Prompt: "do the thing",
 		Dir:    t.TempDir(),
 		LogDir: t.TempDir(),
+		TmpDir: filepath.Join(t.TempDir(), "worktrees", ".tmp", "task", "a1-implementer"),
 		Env:    host.WorkerEnv(),
 	}
 }
@@ -706,7 +707,7 @@ func runRecorded(t *testing.T, req Request) *recordingHost {
 	return rh
 }
 
-func TestWorkerTMPDIRIsInsideAttemptRunDirAndExistsBeforeStart(t *testing.T) {
+func TestWorkerTMPDIRIsRequestTmpDirAndExistsAtStart(t *testing.T) {
 	t.Parallel()
 	req := baseReq(t)
 	rh := runRecorded(t, req)
@@ -716,11 +717,94 @@ func TestWorkerTMPDIRIsInsideAttemptRunDirAndExistsBeforeStart(t *testing.T) {
 			got = append(got, v)
 		}
 	}
-	if len(got) != 1 || got[0] != filepath.Join(req.LogDir, "tmp") {
-		t.Fatalf("TMPDIR entries = %v, want one pointing to %s", got, filepath.Join(req.LogDir, "tmp"))
+	if len(got) != 1 || got[0] != req.TmpDir {
+		t.Fatalf("TMPDIR entries = %v, want one pointing to %s", got, req.TmpDir)
 	}
 	if !rh.tmpExists {
 		t.Fatalf("TMPDIR %s did not exist when the worker started", got[0])
+	}
+	if _, err := os.Stat(filepath.Join(req.LogDir, "tmp")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LogDir/tmp exists or cannot be checked (%v), want nothing created there", err)
+	}
+}
+
+func TestWorkerTMPDIRIsRemovedAfterSuccessfulRun(t *testing.T) {
+	t.Parallel()
+	req := baseReq(t)
+	runRecorded(t, req)
+	if _, err := os.Stat(req.TmpDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("TMPDIR %s after a successful run: stat err = %v, want it removed", req.TmpDir, err)
+	}
+}
+
+func TestWorkerTMPDIRIsKeptAfterFailedRun(t *testing.T) {
+	t.Parallel()
+	req := baseReq(t)
+	c := NewClaude("claude", lostHost{})
+	c.Poll = 10 * time.Millisecond
+	res, err := c.Run(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusError {
+		t.Fatalf("result = %+v, want an error run", res)
+	}
+	if fi, err := os.Stat(req.TmpDir); err != nil || !fi.IsDir() {
+		t.Fatalf("TMPDIR %s after a failed run: %v, want it kept for inspection", req.TmpDir, err)
+	}
+}
+
+func TestClaudeRejectsEmptyTmpDir(t *testing.T) {
+	t.Parallel()
+	req := baseReq(t)
+	req.TmpDir = ""
+	rh := &recordingHost{}
+	_, err := NewClaude("claude", rh).Run(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "TmpDir") {
+		t.Fatalf("err = %v, want an error naming TmpDir", err)
+	}
+	if rh.spec.Argv != nil {
+		t.Fatal("worker started without a TmpDir")
+	}
+	if _, err := os.Stat(filepath.Join(req.LogDir, "tmp")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LogDir/tmp exists or cannot be checked (%v), want nothing created there", err)
+	}
+}
+
+func TestRoleSettingsHaveNoDenyRuleCoveringWorkerTMPDIR(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	tmpDir := filepath.Join(root, "worktrees", ".tmp", "task", "a1-implementer")
+	b, err := RoleSettings([]string{"Read", "Edit", "Write"}, []string{filepath.Join(repo, ".mill")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		Permissions struct {
+			Deny []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		t.Fatal(err)
+	}
+	target := "//" + strings.TrimPrefix(filepath.Clean(tmpDir), "/") + "/"
+	sawPathRule := false
+	for _, d := range s.Permissions.Deny {
+		for _, tool := range []string{"Read", "Edit", "Write"} {
+			rule, ok := strings.CutPrefix(d, tool+"(")
+			if !ok {
+				continue
+			}
+			sawPathRule = true
+			prefix := strings.TrimSuffix(strings.TrimSuffix(rule, ")"), "**")
+			if strings.HasPrefix(target, prefix) {
+				t.Errorf("deny rule %s covers the worker TMPDIR %s", d, tmpDir)
+			}
+		}
+	}
+	if !sawPathRule {
+		t.Fatalf("no path deny rules in %s; the check cannot decide", b)
 	}
 }
 
@@ -729,7 +813,7 @@ func TestWorkerTMPDIROverridesInheritedValue(t *testing.T) {
 	req := baseReq(t)
 	req.Env = []string{"PATH=/usr/bin", "TMPDIR=/inherited/tmp", "HOME=/home/x", "TMPDIR=/again"}
 	rh := runRecorded(t, req)
-	want := []string{"PATH=/usr/bin", "HOME=/home/x", "TMPDIR=" + filepath.Join(req.LogDir, "tmp")}
+	want := []string{"PATH=/usr/bin", "HOME=/home/x", "TMPDIR=" + req.TmpDir}
 	if strings.Join(rh.spec.Env, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("env = %q, want %q", rh.spec.Env, want)
 	}
@@ -742,13 +826,15 @@ func TestWorkerTMPDIRCreateFailureNamesPath(t *testing.T) {
 	t.Parallel()
 	req := baseReq(t)
 	// A file where the tmp directory should go makes creating it fail.
-	tmp := filepath.Join(req.LogDir, "tmp")
-	if err := os.WriteFile(tmp, []byte("x"), 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(req.TmpDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(req.TmpDir, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := NewClaude("claude", &recordingHost{}).Run(context.Background(), req)
-	if err == nil || !strings.Contains(err.Error(), tmp) {
-		t.Fatalf("err = %v, want an error naming %s", err, tmp)
+	if err == nil || !strings.Contains(err.Error(), req.TmpDir) {
+		t.Fatalf("err = %v, want an error naming %s", err, req.TmpDir)
 	}
 }
 

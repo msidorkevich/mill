@@ -51,6 +51,9 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 	if req.LogDir == "" {
 		return Result{}, errors.New("claude runner: request has no LogDir")
 	}
+	if req.TmpDir == "" {
+		return Result{}, errors.New("claude runner: request has no TmpDir")
+	}
 	if err := os.MkdirAll(req.LogDir, 0o755); err != nil {
 		return Result{}, err
 	}
@@ -68,9 +71,10 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 
-	// Each attempt gets its own TMPDIR inside its run dir, so workers never share or clean up
-	// another attempt's temporary files.
-	tmpDir := filepath.Join(req.LogDir, "tmp")
+	// Each run gets its own TMPDIR, outside the repository and its protected .mill/, so the
+	// worker can use it and never shares or cleans up another run's temporary files. It is
+	// removed after a successful run and kept otherwise for inspection.
+	tmpDir := req.TmpDir
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		return Result{}, fmt.Errorf("claude runner: create worker TMPDIR %s: %w", tmpDir, err)
 	}
@@ -121,6 +125,11 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 	}
 	if tailErr != nil {
 		res.Warnings = append(res.Warnings, "reading agent output: "+tailErr.Error())
+	}
+	if res.Status == StatusOK {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("remove worker TMPDIR %s: %v", tmpDir, err))
+		}
 	}
 	return res, nil
 }

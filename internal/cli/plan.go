@@ -20,6 +20,7 @@ import (
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/planner"
 	"github.com/msidorkevich/mill/internal/price"
+	"github.com/msidorkevich/mill/internal/runner"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -153,6 +154,10 @@ func printDraftGoal(env Env, g store.Goal, p plan.Plan, checkCmd string) {
 	fmt.Fprintf(env.Stdout, "\nNext: review with `mill plan show %s`, then `mill plan approve %s`.\n", g.ID, g.ID)
 }
 
+// wrapPlanRunner, when set, wraps the runner that mill plan passes to the planner. Tests use
+// it to record the planner's requests; nil uses the pipeline's runner unchanged.
+var wrapPlanRunner func(runner.Runner) runner.Runner
+
 // runPlanGoal asks the planner agent for a plan of goal and creates a draft goal from it.
 func runPlanGoal(ctx context.Context, env Env, goal string) int {
 	fail := func(err error) int {
@@ -176,13 +181,18 @@ func runPlanGoal(ctx context.Context, env Env, goal string) int {
 		return fail(err)
 	}
 	allow := append(append(append([]string{}, host.DefaultEnvAllow...), cfg.EnvAllow...), p.AgentEnvAllow...)
+	r := p.Runner
+	if wrapPlanRunner != nil {
+		r = wrapPlanRunner(r)
+	}
 
 	model := cfg.Roles.Planner
 	fmt.Fprintf(env.Stdout, "Planning (model %s, logs in %s)...\n", model, logDir)
 	res, err := planner.Generate(ctx, planner.Options{
-		Runner: p.Runner, Goal: goal, Root: paths.Root, CheckCmd: cfg.CheckCmd,
+		Runner: r, Goal: goal, Root: paths.Root, CheckCmd: cfg.CheckCmd,
 		Model: model, Budget: cfg.AttemptBudget("M"), Count: cfg.Budget.Count,
 		LogDir: logDir, ProtectedPaths: []string{paths.MillDir}, Env: host.AllowEnv(os.Environ(), allow),
+		TmpDir:  filepath.Join(cfg.Worktrees(paths.Root, p.Home), ".tmp", "plan-"+filepath.Base(logDir)),
 		Timeout: cfg.Runner.AttemptTimeout.Duration,
 	})
 	cost := fmt.Sprintf("planning cost: %s tokens (billable), $%.2f in %d agent call(s)",

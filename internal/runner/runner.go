@@ -58,6 +58,9 @@ type Request struct {
 	ProtectedPaths []string
 	// Env is the agent process's complete environment (SE3).
 	Env []string
+	// TmpDir is the agent's TMPDIR. It must lie outside the repository and outside every
+	// ProtectedPaths entry, so the role settings never deny the agent its own scratch space.
+	TmpDir string
 }
 
 // Status is how a run ended.
