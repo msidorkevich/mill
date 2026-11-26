@@ -395,7 +395,11 @@ func (p *Pipeline) verify(ctx context.Context, t store.Task, v verifyStep, out O
 	if err := writeFile(filepath.Join(v.logDir, "diff.patch"), diff); err != nil {
 		return out, nil, true, err
 	}
-	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky})
+	sibs, err := p.siblings(ctx, t)
+	if err != nil {
+		return out, nil, true, err
+	}
+	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky, Siblings: sibs})
 	verModel, verWhy := p.verifierModel(v.implModel)
 	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, v.limits, v.br.Worktree, v.logDir)
 	if err != nil {
@@ -1138,4 +1142,36 @@ func fmtTokens(n int64) string {
 		return fmt.Sprintf("%.1fk", float64(n)/1e3)
 	}
 	return fmt.Sprint(n)
+}
+
+// siblings lists the other tasks of t's goal for the verifier prompt; nil for a standalone task.
+func (p *Pipeline) siblings(ctx context.Context, t store.Task) ([]prompt.SiblingTask, error) {
+	goal, _ := store.SplitTaskID(t.ID)
+	if goal == "" {
+		return nil, nil
+	}
+	tasks, err := p.Store.GoalTasks(ctx, goal)
+	if err != nil {
+		return nil, fmt.Errorf("list the tasks of goal %s for the verifier of %s: %w", goal, t.ID, err)
+	}
+	var out []prompt.SiblingTask
+	for _, s := range tasks {
+		if s.ID == t.ID {
+			continue
+		}
+		out = append(out, prompt.SiblingTask{ID: s.ID, Title: s.Title, Owns: s.Owns, Summary: specSummary(s.Spec.Spec)})
+	}
+	return out, nil
+}
+
+// specSummary is the first sentence of a spec, cut to at most 120 characters.
+func specSummary(spec string) string {
+	s := strings.Join(strings.Fields(spec), " ")
+	if i := strings.Index(s, ". "); i >= 0 {
+		s = s[:i+1]
+	}
+	if r := []rune(s); len(r) > 120 {
+		s = string(r[:120])
+	}
+	return s
 }
