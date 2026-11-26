@@ -66,7 +66,13 @@ mill task rebase <id>                                # move a pending, blocked o
 
 `mill task edit` opens the task's current spec (id, title, kind, spec, acceptance, checks, owns,
 depends_on, size, complexity, complexity_reason, model) in `$EDITOR`, or reads `--file`. Running and verified tasks are refused. The id
-and `depends_on` cannot change. An invalid edit prints the problems and keeps the file.
+cannot change. Dependencies of a goal task can be added (same goal, no cycles; pending, blocked or
+failed tasks only) but not removed or reordered, because published stacks and branches depend on
+them. If the task already has a branch, its own commits are moved onto the new base: the new
+dependency's branch when that is the deepest, otherwise the usual rule. If the new dependency is
+not verified yet, run `mill task rebase <id>` later. A conflict blocks the task and lists the
+conflicting files. `mill task show` lists the dependencies that were added. An invalid edit prints
+the problems and keeps the file.
 
 `mill task rebase <id>` fixes a task that gate triage blocked because a check also fails on its
 starting point: after you fix the base branch, it replays only the task's own commits (from its
@@ -223,11 +229,20 @@ checks are configured, and not when the run was interrupted):
 2. Base check (`gate_check_base = true`, the default): the commands still failing run in a
    temporary detached worktree at the task's starting point, with the same environment and
    timeout (logs under `a<n>/base/`); the worktree is removed afterwards.
-   - If every one of them fails there too, the task is blocked in the gate phase with a reason
-     naming them: the task did not cause them. Mill records `gate-base-failing` and makes no
-     further attempt; fix the commands on the base branch, then `--retry`.
-   - Otherwise each command that passes on the starting point becomes a finding saying the task's
-     changes cause it, and each that also fails there becomes a finding saying it is not caused by
+   - Mill then compares each command's head and starting-point results. When both outputs are
+     `go test` failure output, it compares the failing tests rather than the whole command: the
+     task caused the failure only if some test fails on the task's head and not on the starting
+     point. For any other output it compares whole commands: the task caused the failure only if
+     the command passes on the starting point.
+   - If the task caused none of the failures, it is blocked in the gate phase with a reason
+     naming the commands. That means every one of them also fails on the starting point and, for
+     `go test` output, no test fails only on the task's head. Mill records `gate-base-failing`
+     and makes no further attempt; fix the commands on the base branch, then `--retry`.
+   - Otherwise the failures become findings and the attempt is retried. A command that passes on
+     the starting point gets a finding saying the task's changes cause it. A `go test` command
+     with tests failing only on the head gets a finding saying the task's changes cause those
+     tests to fail; it also lists the tests failing on the starting point as not the task's
+     fault. Any other command that also fails there gets a finding saying it is not caused by
      the task and should not be fixed.
    - If the base worktree cannot be created or the commands cannot run there, mill logs a warning
      and uses the plain gate findings.
@@ -334,8 +349,8 @@ the diff from where the task started, after those merges.
 Find the cause with `mill task show g1/<task>` (reason, attempts, last findings), fix it (for
 example a budget or `check_cmd` in `.mill/config.toml`), then `mill run g1 --retry-blocked` puts
 blocked and failed tasks back to pending and continues. To change a stopped goal task's spec, run
-`mill task edit g1/<task>` (it updates the task and the stored plan; the dependencies stay fixed
-once the plan is approved), then `mill run g1 --retry-blocked`.
+`mill task edit g1/<task>` (it updates the task and the stored plan; dependencies can be added
+but not removed or reordered, see `mill task edit` above), then `mill run g1 --retry-blocked`.
 Verified tasks are not run again.
 
 **Usage limits.** When an agent run hits the account's usage limit (for example Claude's
