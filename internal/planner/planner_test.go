@@ -386,6 +386,20 @@ func TestComplexityHugeIsRejectedByValidation(t *testing.T) {
 	}
 }
 
+func TestPlannerPromptPrefersParallelTasks(t *testing.T) {
+	t.Parallel()
+	p := Prompt("goal", "survey", nil)
+	for _, want := range []string{
+		"Prefer tasks that can run in parallel",
+		"Put tests that span several tasks' features in their own test task",
+		"split the work by file where possible",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+}
+
 func TestPromptAsksForNarrowChecksAndFastPolling(t *testing.T) {
 	t.Parallel()
 	p := Prompt("goal", "survey", nil)
