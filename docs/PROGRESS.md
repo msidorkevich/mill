@@ -1132,3 +1132,54 @@ verified, one agent mid-attempt). `mill run g18` recovered it: it recorded the i
 attempt's tokens, committed the work the agent had left uncommitted and resumed the task. Usage
 then reached 97% of the five-hour limit; the rest ran after the reset.
 
+
+## Improvements found while watching `g19` (2026-11-26)
+
+Seen from outside while `g19` ran (two agents, one gate slot, herdr host). Items 1–4 cost the most
+time; together they are a candidate for the next goal.
+
+- [ ] **1. Implementers run the whole gate themselves.** The implementer prompt lists
+      `check_cmd` under "Gate (must pass; run these yourself before you finish)", so every
+      implementer ran `make check` (one ran it three times), outside the gate slots and next to
+      other tasks' gates. Load average reached 82, `skipped-tests-detect`'s gate took 3m22s
+      instead of about 1m45s, and implementers took 13–18 minutes. The habit pays off: only 5
+      of 204 gates ever failed. So keep the early check but run it through mill: the agent asks
+      for it, it waits for a gate slot, runs under `nice`, and its result is stored by tree
+      fingerprint, so the gate reuses it when the tree is unchanged (reuse exists since `g15`).
+      Cheaper alternative: the prompt asks only for the task's checks and the tests of the
+      changed packages, and leaves `check_cmd` to the gate.
+- [ ] **2. Agents act on machine-wide processes and shared temp files.** One implementer waited
+      with `pgrep -f "go test"` (which also matches other tasks' gates), ran
+      `pkill -f "until \[ -s"` (which can kill a sibling worker's shell) and wrote to
+      `/tmp/g19check.log` (a name two agents can share). Role settings do not deny `pkill` or
+      `killall`. Wanted: deny them, give each attempt its own `TMPDIR` in its run directory, and
+      tell agents to wait on their own background jobs only.
+- [ ] **3. A host start failure is reported as a flaky gate.** In `g18/readme-triage-and-deps`
+      attempt 2 the herdr wrapper did not write its pid within 10s under load; the gate counted
+      the command as failed (`could not run`), the re-run passed, and the command was recorded as
+      `gate-flaky`, so the verifier was told the tests are flaky. The passing result was also
+      recorded twice. Wanted: a command the host could not start is retried (or run on the exec
+      host) and never counted as flaky; the pid wait allows for load.
+- [ ] **4. `max_parallel` slots idle during gates.** A task in `gate` or "waiting for a free gate
+      slot" holds one of the `max_parallel` slots although no agent runs; with two slots and one
+      gate slot, one agent slot is often empty for the 2–4 minutes of a gate. Count only agent
+      runs (implementer, verifier, resolver, fixer) against `max_parallel`; gates are already
+      limited by `max_parallel_gates`. Best done together with item 1, or load rises further.
+- [ ] **5. `mill goal show` gets very wide.** DEPENDS ON lists every dependency;
+      `readme-followups` has nine, which makes a line of about 230 columns. Show a count or the
+      first few, or wrap.
+- [ ] **6. Duplicate lines.** The run log prints `verified at <sha> (...)` and then `verified` for
+      every task; one of them is enough.
+- [ ] **7. Gate tabs have no task name.** The herdr tab of a gate is labelled `mill gate 1`;
+      agent tabs say `mill g19/<task> a1 implementer`. Label gates the same way
+      (`mill g19/<task> a1 gate`).
+- [ ] **8. `mill doctor` does not report ignored config.** `.mill/config.toml` still has legacy
+      `[sizes.S]`/`[sizes.M]` blocks, which are ignored because `[models]` exists; doctor says
+      nothing. Warn and say which block to delete.
+- [ ] **9. `mill task show` prints `model (mapping)`.** The header shows the placeholder; only the
+      attempts table names the real model. Show the model the next attempt would use and why
+      (`opus (M/high)`).
+- [ ] **10. Shared files make long chains, and plan review does not show it.** `g19`'s tasks that
+      share `task.go`, `pipeline.go` and `migrations.go` were chained into a sequence of seven,
+      which sets most of the goal's duration. `mill plan show` could print the longest chain
+      with its estimated time, so splitting a shared file can be weighed at plan review.
