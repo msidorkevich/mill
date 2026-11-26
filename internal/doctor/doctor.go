@@ -134,6 +134,18 @@ func Run(ctx context.Context, opts Options) Report {
 		}
 	}
 
+	// legacy [sizes], reported only when [models] overrides it. Neither has a default once the
+	// file sets one of them, so both being non-empty means the file has both.
+	if cfgOK && cfg.Models != nil && len(cfg.Sizes) > 0 {
+		var blocks []string
+		for _, size := range config.SizeNames {
+			if _, ok := cfg.Sizes[size]; ok {
+				blocks = append(blocks, "[sizes."+size+"]")
+			}
+		}
+		add("sizes", Warn, "[sizes] is ignored because [models] is set: delete %s from %s", strings.Join(blocks, ", "), paths.Config)
+	}
+
 	// database
 	if !initOK {
 		add("database", Skip, "needs mill init")

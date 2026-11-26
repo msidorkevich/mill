@@ -446,6 +446,10 @@ type taskView struct {
 	Findings []prompt.Finding `json:"findings,omitempty"` // last failed attempt's findings
 	Verdict  json.RawMessage  `json:"verdict,omitempty"`  // last verifier verdict
 	RunsDir  string           `json:"runs_dir"`
+	// NextModel is the model the task's next implementer attempt would run on, "" when the
+	// config maps none; NextModelWhy says where it comes from or what to add.
+	NextModel    string `json:"next_model"`
+	NextModelWhy string `json:"next_model_why"`
 	// DependsOn is a goal task's dependencies (full ids); DepsAdded lists the dependencies
 	// added after the plan was approved, oldest first.
 	DependsOn []string    `json:"depends_on,omitempty"`
@@ -518,7 +522,7 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "mill task show: %v\n", err)
 		return ExitError
 	}
-	paths, _, s, err := openProject(ctx, env)
+	paths, cfg, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
@@ -556,6 +560,13 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 			}
 			break
 		}
+	}
+	if v.NextModel, v.NextModelWhy, err = nextImplementerModel(cfg, v.Task, v.Attempts, evs); err != nil {
+		return fail(err)
+	}
+	// An override is the only reason that does not name its source on its own.
+	if v.NextModelWhy == "override" {
+		v.NextModelWhy = "task override"
 	}
 	goalID, _ := store.SplitTaskID(id)
 	if goalID != "" {
@@ -734,6 +745,42 @@ func currentFirst(tasks []listedTask) ([]listedTask, int) {
 	return append(append(current, stuck...), rest...), hidden
 }
 
+// nextImplementerModel is the model, and why, that t's next implementer attempt would run on:
+// the config's base model for t (Config.TaskModel), escalated one tier (Config.Escalate) for
+// every earlier implementer or fixer attempt with findings recorded, as the pipeline picks it.
+func nextImplementerModel(cfg config.Config, t store.Task, attempts []store.Attempt, evs []store.Event) (model, why string, err error) {
+	base, baseWhy := cfg.TaskModel(t.Size, t.Complexity, t.Model)
+	if base == "" {
+		return "", baseWhy, nil
+	}
+	withFindings := map[int]bool{}
+	for _, ev := range evs {
+		if ev.Kind != "attempt-findings" {
+			continue
+		}
+		var d struct {
+			Attempt int `json:"attempt"`
+		}
+		if err := json.Unmarshal(ev.Data, &d); err != nil {
+			return "", "", fmt.Errorf("read the findings event %d of %s: %w", ev.Seq, t.ID, err)
+		}
+		withFindings[d.Attempt] = true
+	}
+	failed := map[int]bool{}
+	last := 0
+	for _, a := range attempts {
+		if (a.Role == store.RoleImplementer || a.Role == store.RoleFixer) && withFindings[a.N] {
+			failed[a.N] = true
+			last = max(last, a.N)
+		}
+	}
+	model = cfg.Escalate(base, len(failed))
+	if model != base {
+		return model, fmt.Sprintf("escalated after attempt %d failed", last), nil
+	}
+	return base, baseWhy, nil
+}
+
 func printTask(env Env, v taskView) {
 	w := env.Stdout
 	t := v.Task
@@ -755,11 +802,11 @@ func printTask(env Env, v taskView) {
 		complexity += " (" + t.ComplexityReason + ")"
 	}
 	fmt.Fprintf(w, "  complexity  %s\n", complexity)
-	model := t.Model
+	model := v.NextModel
 	if model == "" {
-		model = "(mapping)"
+		model = "(none)"
 	}
-	fmt.Fprintf(w, "  model     %s\n", model)
+	fmt.Fprintf(w, "  model     %s (%s)\n", model, v.NextModelWhy)
 	if len(v.DependsOn) > 0 {
 		fmt.Fprintf(w, "  depends   %s\n", localIDs(v.DependsOn))
 	}

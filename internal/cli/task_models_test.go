@@ -88,7 +88,7 @@ func TestTaskShowModelListsRoleModelAndReasonPerAttempt(t *testing.T) {
 	if got := taskModelsLine(r.stdout, "complexity"); got != "complexity medium" {
 		t.Errorf("complexity line = %q", got)
 	}
-	if got := taskModelsLine(r.stdout, "model"); got != "model (mapping)" {
+	if got := taskModelsLine(r.stdout, "model"); got != "model sonnet (mapping S/medium)" {
 		t.Errorf("model line = %q", got)
 	}
 }
@@ -104,7 +104,7 @@ func TestTaskShowModelShowsOverrideAndComplexityReason(t *testing.T) {
 	if got := taskModelsLine(r.stdout, "complexity"); got != "complexity high (touches the store)" {
 		t.Errorf("complexity line = %q\n%s", got, r.stdout)
 	}
-	if got := taskModelsLine(r.stdout, "model"); got != "model opus" {
+	if got := taskModelsLine(r.stdout, "model"); got != "model opus (task override)" {
 		t.Errorf("model line = %q", got)
 	}
 }
@@ -174,5 +174,50 @@ func TestTaskEditModelRefusesInvalidComplexityAndKeepsFile(t *testing.T) {
 	tk, _ := openStore(t, root).GetTask(context.Background(), "solo")
 	if tk.Complexity != "medium" {
 		t.Errorf("complexity = %q, want unchanged", tk.Complexity)
+	}
+}
+
+func TestTaskShowModelNamesNextAttemptModelAndWhy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, extra, model, why string
+	}{
+		{"mapping", `"size": "M", "complexity": "high", "complexity_reason": "hard"`, "opus", "mapping M/high"},
+		{"override", `"size": "M", "model": "my-model"`, "my-model", "task override"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := planRepo(t)
+			spec := strings.Replace(taskModelsSpec, `"size": "S"`, tc.extra, 1)
+			if err := openStore(t, root).CreateTask(context.Background(), mustSpec(t, spec)); err != nil {
+				t.Fatal(err)
+			}
+			r := run(t, root, nil, "task", "show", "solo")
+			want := "model " + tc.model + " (" + tc.why + ")"
+			if got := taskModelsLine(r.stdout, "model"); r.code != ExitOK || got != want {
+				t.Errorf("model line = %q, want %q\n%+v", got, want, r)
+			}
+			r = run(t, root, nil, "task", "show", "solo", "--json")
+			var v struct {
+				NextModel    string `json:"next_model"`
+				NextModelWhy string `json:"next_model_why"`
+			}
+			if err := json.Unmarshal([]byte(r.stdout), &v); err != nil || v.NextModel != tc.model || v.NextModelWhy != tc.why {
+				t.Errorf("json = %+v, %v\n%s", v, err, r.stdout)
+			}
+		})
+	}
+}
+
+func TestTaskShowModelEscalatesAfterFailedAttempt(t *testing.T) {
+	t.Parallel()
+	root := taskModelsRepo(t)
+	finishTaskModelsAttempts(t, root)
+	if err := openStore(t, root).RequestChanges(context.Background(), "solo", 2, []map[string]string{}, "fix it"); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "task", "show", "solo")
+	if got := taskModelsLine(r.stdout, "model"); got != "model opus (escalated after attempt 2 failed)" {
+		t.Errorf("model line = %q\n%+v", got, r)
 	}
 }
