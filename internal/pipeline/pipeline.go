@@ -27,6 +27,7 @@ import (
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/prompt"
 	"github.com/msidorkevich/mill/internal/runner"
+	"github.com/msidorkevich/mill/internal/skiptest"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -425,6 +426,9 @@ func (p *Pipeline) verify(ctx context.Context, t store.Task, v verifyStep, out O
 	}
 	if verdict.Verdict == "pass" {
 		p.logf("%s a%d verdict   pass: %s", t.ID, n, oneLine(verdict.Summary))
+		if err := p.recordSkippedTests(ctx, t.ID, n, v.br.Worktree, v.startSHA, v.br.HeadSHA); err != nil {
+			return out, nil, true, err
+		}
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
 			return out, nil, true, err
 		}
@@ -437,6 +441,22 @@ func (p *Pipeline) verify(ctx context.Context, t store.Task, v verifyStep, out O
 		return out, nil, true, err
 	}
 	return out, findings, false, nil
+}
+
+// recordSkippedTests appends a skipped_tests event listing the test skips the task added
+// between startSHA and head, when there are any. A detection failure is returned: the task
+// is not verified without the check.
+func (p *Pipeline) recordSkippedTests(ctx context.Context, taskID string, n int, dir, startSHA, head string) error {
+	skips, err := skiptest.Added(ctx, dir, startSHA, head)
+	if err != nil {
+		return fmt.Errorf("%s: detect skipped tests: %w", taskID, err)
+	}
+	if len(skips) == 0 {
+		return nil
+	}
+	p.logf("%s a%d added %d test skip(s)", taskID, n, len(skips))
+	_, err = p.Store.AppendEvent(ctx, "skipped_tests", "", taskID, map[string]any{"attempt": n, "head": head, "skips": skips})
+	return err
 }
 
 // DefaultGateSlotPoll is how often a gate waiting for a slot checks again when
