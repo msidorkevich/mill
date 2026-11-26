@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/taskspec"
@@ -301,14 +302,15 @@ func (p Plan) WarningsFor(checkCmd string) []string {
 	return append(out, p.acceptanceWarnings()...)
 }
 
-// acceptanceWarnings warns about every acceptance criterion that names a path owned by
-// another task and not by the criterion's own task: its verifier would judge work it cannot do.
+// acceptanceWarnings warns about every acceptance criterion that asks to change a path owned
+// by another task and not by the criterion's own task: its verifier would judge work it cannot
+// do. Merely mentioning the path (a fixture, a file to read) is not warned about.
 func (p Plan) acceptanceWarnings() []string {
 	var out []string
 	for _, t := range p.Tasks {
 		for _, a := range t.Acceptance {
 			for _, path := range criterionPaths(a) {
-				if ownsOverlap(t.Owns, path) {
+				if ownsOverlap(t.Owns, path) || !asksChange(a, path) {
 					continue
 				}
 				var others []string
@@ -343,9 +345,7 @@ func criterionPaths(criterion string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, w := range strings.Fields(criterion) {
-		w = strings.Trim(w, "`'\"()[]{}<>,;:!?")
-		w = strings.TrimRight(w, ".")
-		w = strings.TrimPrefix(w, "./")
+		w = pathWord(w)
 		if w == "" || seen[w] || strings.Contains(w, "://") {
 			continue
 		}
@@ -355,6 +355,70 @@ func criterionPaths(criterion string) []string {
 		}
 	}
 	return out
+}
+
+// pathWord strips the quoting and punctuation around a word of a criterion.
+func pathWord(w string) string {
+	const punct = "`'\"()[]{}<>,;:!?"
+	w = strings.TrimRight(strings.TrimLeft(w, punct), punct+".")
+	return strings.TrimPrefix(w, "./")
+}
+
+// changeLookBack is how many words before a path may hold the verb that asks to change it.
+const changeLookBack = 4
+
+// changeVerbs are looked for before a path. In a two-word entry the second word may come
+// later than directly after the first: "add a section to README.md".
+var changeVerbs = [][]string{
+	{"update"}, {"change"}, {"modify"}, {"edit"}, {"add", "to"}, {"append", "to"},
+	{"remove", "from"}, {"delete"}, {"rename"}, {"write"}, {"create"}, {"document", "in"},
+}
+
+// changePredicates are looked for directly after a path, as consecutive words.
+var changePredicates = [][]string{
+	{"is", "updated"}, {"is", "changed"}, {"is", "edited"}, {"mentions"}, {"documents"},
+	{"lists"}, {"describes"}, {"gains"}, {"contains", "a", "new"},
+}
+
+// asksChange reports whether some mention of p in the criterion is worded as a change to it:
+// a change verb shortly before it, or a change predicate directly after it.
+func asksChange(criterion, p string) bool {
+	raw := strings.Fields(criterion)
+	words := make([]string, len(raw))
+	for i, w := range raw {
+		words[i] = strings.ToLower(pathWord(w))
+	}
+	for i, w := range raw {
+		if pathWord(w) != p {
+			continue
+		}
+		before := words[max(0, i-changeLookBack):i]
+		for _, v := range changeVerbs {
+			if containsInOrder(before, v) {
+				return true
+			}
+		}
+		// Punctuation after the path ends the clause, so what follows is not about it.
+		if strings.ContainsAny(w[len(w)-1:], ".,;:!?)") {
+			continue
+		}
+		for _, pred := range changePredicates {
+			if end := i + 1 + len(pred); end <= len(words) && slices.Equal(words[i+1:end], pred) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// containsInOrder reports whether every word of want occurs in words, in that order.
+func containsInOrder(words, want []string) bool {
+	for _, w := range words {
+		if len(want) > 0 && w == want[0] {
+			want = want[1:]
+		}
+	}
+	return len(want) == 0
 }
 
 // hasFileExt reports whether w ends in `.ext` with a non-empty name before it and an

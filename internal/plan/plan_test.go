@@ -360,3 +360,46 @@ func TestAcceptanceWarningsIgnorePathsTheTaskOwns(t *testing.T) {
 		t.Errorf("warned about a path the task owns: %v", w)
 	}
 }
+
+// siblingWarnings returns the warnings for a criterion of task a naming a path task b owns.
+func siblingWarnings(owned, criterion string) []string {
+	a := task("a")
+	a.Owns = []string{"internal/a/**"}
+	a.Acceptance = []string{criterion}
+	b := task("b")
+	b.Owns = []string{owned}
+	return mk(a, b).WarningsFor("")
+}
+
+func TestAcceptanceWarningsIgnoreMentionsThatAskNoChange(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ owned, criterion string }{
+		{"README.md", "the test plan uses README.md as the sample file and asserts the warning is printed"},
+		{"internal/config/config.go", "the defaults stated in internal/config/config.go are shown"},
+		{"README.md", "given `README.md`, lists of headings are printed"},
+		{"README.md", "update the parser so that it can read README.md"},
+		{"README.md", "the address book is loaded from README.md"},
+	} {
+		if w := siblingWarnings(c.owned, c.criterion); len(w) != 0 {
+			t.Errorf("%q warned: %v", c.criterion, w)
+		}
+	}
+}
+
+func TestAcceptanceWarningsFlagWordingThatAsksForChange(t *testing.T) {
+	t.Parallel()
+	const cfg = "internal/config/config.go"
+	for _, c := range []struct{ owned, criterion string }{
+		{"README.md", "README.md documents the new flag"},
+		{cfg, "Update internal/config/config.go to add the field"},
+		{cfg, "the field is added: EDIT the file `./internal/config/config.go`."},
+		{"README.md", "Add a section to README.md"},
+		{"README.md", "`README.md` is updated"},
+		{"README.md", "README.md contains a new usage line"},
+		{"README.md", "the flag is shown as in README.md and README.md lists it"},
+	} {
+		if w := siblingWarnings(c.owned, c.criterion); len(w) != 1 || !strings.Contains(w[0], "names "+c.owned+", owned by b") {
+			t.Errorf("%q: got %q, want one warning naming %s", c.criterion, w, c.owned)
+		}
+	}
+}
