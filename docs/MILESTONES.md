@@ -134,8 +134,10 @@ flagged correctly.
 ## M6. Extensions
 
 - Hooks (`on_publish`, `on_update`, `status`) plus example GitHub and Bitbucket scripts outside
-  the core. The Bitbucket script opens a draft PR per published task through the Bitbucket Cloud
-  REST API, targeting the parent task's review branch so a stack reviews bottom-up.
+  the core. The scripts open one draft PR per published task (or update the open one), targeting
+  the parent task's review branch so a stack reviews bottom-up, retarget it when the parent
+  lands, and name the parent PR in the body. This is the first goal of M6: everything after it is
+  reviewed through PRs the hook opens.
 - External CI signal via the `status` hook (GitHub checks, Bitbucket Pipelines build statuses).
 - `opencode` runner (any provider opencode supports) and `codex` runner. The runner is chosen per
   role, so the verifier can use a different provider than the implementer.
@@ -147,6 +149,8 @@ flagged correctly.
 **Requirements:** HK1–4, KP9, RN4–5, TC1–4, BG4
 **Exit criteria:**
 
-- a Bitbucket PR is opened by a hook with zero forge code in the core;
+- a stack of three tasks gets three PRs from the GitHub hook, each showing only its own commits,
+  and merging them bottom-up lands all three with no compare links and zero forge code in the
+  core; the same works on Bitbucket;
 - a goal on a sample Java + Gradle repo runs from plan to published branches, with an `opencode`
   implementer and a `claude` verifier.
