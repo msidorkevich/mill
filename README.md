@@ -32,6 +32,14 @@ mill init      # creates .mill/ (config.toml, .gitignore, mill.db, runs/)
 mill doctor    # checks git, repo, config, database, runner, host; --json for scripts
 ```
 
+`mill doctor` warns (`sizes`) when a legacy `[sizes]` block is ignored because `[models]` is set;
+delete the blocks it names (see [Models](#models)).
+
+The database is migrated forward when mill opens it. Each migration is either additive (a new
+table or column that older versions ignore) or not, and the database records the newest
+non-additive one. An older mill opens a newer database when its own schema reaches that
+migration; otherwise it refuses with `upgrade mill`.
+
 Set `check_cmd` in `.mill/config.toml` (your project's gate, e.g. `make check`), then write a
 task file outside the checkout:
 
@@ -149,6 +157,13 @@ without `-run` while `check_cmd` already runs `go test ./...` (or `make check`):
 those tests anyway, so the task check should be narrow, for example
 `go test -run 'TestName' ./pkg/`. The warning does not stop the plan from being created.
 
+`mill plan show` prints a `Longest chain` line after the estimated cost: the dependency chain that
+takes longest, with its task ids in order and its estimated duration. A task's estimate is the
+median duration of past implementer attempts of the same size, complexity and model, plus the
+median gate duration. When every task has an estimate, the chain with the longest estimated
+duration is shown. When some task has none, the chain with the most tasks is shown, with an unknown
+duration. `--json` carries it as `longest_chain` (`ids`, `estimate_ms`, `null` when unknown).
+
 `mill goal graph g1` draws one row per task in dependency order, with ASCII lines from each
 task to its dependencies, the status mark (landed ✓, published ↑, verified ●, running ▶,
 pending ○, blocked/failed ✗), the task id, its status and its direct dependencies after `←`, then
@@ -205,9 +220,13 @@ scheduler per repository; `mill run <goal>` does the same for one goal only. A r
 picks up goals approved with `mill plan approve` and tasks queued with `mill task run` while it
 runs; `mill task run` joins the scheduler and waits for its task's result (same exit codes as
 before). If no scheduler is running, `mill task run` starts one for that task. The scheduler
-starts a task once all its dependencies are verified, up to `max_parallel` at a time, and never
-runs two tasks whose `owns` overlap together; both limits apply across all goals. Gates are
-limited separately by `max_parallel_gates` (see gate slots below). Each task gets the branch
+starts a task once all its dependencies are verified, and never runs two tasks whose `owns`
+overlap together; both limits apply across all goals. `max_parallel` (default `2`) counts agents
+only: at most that many tasks run an agent at the same time, and a task in its gate holds no agent
+slot, so another task can run its agent meanwhile. `max_in_flight` caps the tasks started and not
+yet finished, whether they run an agent or sit in a gate. Unset, it is `max_parallel +
+max_parallel_gates` (3 with the defaults); it must be at least `max_parallel`. Gates are limited
+separately by `max_parallel_gates` (see gate slots below). Each task gets the branch
 `mill/<goal>/<task>`, built on its dependencies' branches. When every task is verified the goal
 is `done` (exit 0). When a task blocks or fails, the others continue; the goal then ends
 `blocked` with a reason naming the stopped tasks and the ones waiting on them (exit 4). Ctrl-C
@@ -269,6 +288,19 @@ on macOS and Linux and `0` elsewhere. Set `gate_nice = 0` to disable it; a negat
 refused. `mill doctor` has a `gate_nice` check: it reports `without nice` when the value is 0,
 and fails when the value is above 0 but `nice` is not on `PATH`, naming the fix (install `nice`
 or set `gate_nice = 0`).
+
+**Who runs check_cmd.** `implementer_runs_check` in `.mill/config.toml` (default `false`) says
+whether the implementer, fixer and resolver agents run `check_cmd` themselves before they finish.
+When it is `false`, they run the task's `checks` and the tests of the packages they changed, and
+only the gate runs `check_cmd`. When it is `true`, they run `check_cmd` too.
+
+**Gate start failures.** When the host cannot start a gate command, mill retries the start once on
+the same host. If that fails too, what happens depends on the gate. In a task gate (`mill run`,
+`mill task run`) on a host other than exec, the command runs on the exec host instead, and the
+gate's note says so (for example `herdr could not start it (twice: ...); ran on exec`). If the exec
+host also fails, the gate fails and reports both errors. The gates re-run by publishing or
+restacking and the `mill keep` combined check have no exec fallback: the command fails after the
+retry. A failed start never ran the command.
 
 **Gate slots.** `max_parallel_gates` in `.mill/config.toml` (default `1`, at least `1`) sets how
 many gates run at the same time across all mill processes. It is separate from `max_parallel`:
@@ -334,6 +366,11 @@ verifier_min = "sonnet"
   from the mapping (or its override), without escalation.
 - **Planner.** `mill plan "<goal>"` uses `roles.planner`.
 
+`mill task show` prints the model of the task's next implementer attempt, and in brackets where
+it comes from: `task override` (the task's `model`), `mapping S/low` (the `[models]` entry),
+`mapping S/low (sizes fallback)` (legacy `[sizes]`) or `escalated after attempt N failed`. When
+the config maps no model for the size and complexity, it shows `(none)` and the entry to add.
+
 `mill plan show` prints, for each task, a `complexity` line with its reason and a `model` line
 with the chosen model, where it came from and an estimated cost range, then a total estimated
 cost. The range's basis is shown after it: `(avg $X, from N past tasks)` when it comes from the
@@ -350,8 +387,9 @@ the wall time is `ended_at` minus `started_at`.
 **Skipped tests.** mill lists the test skips a task adds: lines added to a `*_test.go` file between
 the task's start and its head that call `t.Skip`, `t.Skipf` or `t.SkipNow`. `mill review show` and
 `mill task show` print a `Skipped tests added (N):` section with one `file:line  reason` line per
-skip, so a task that silences a test is on record. `mill task show --json` carries them as
-`skipped_tests`.
+skip, so a task that silences a test is on record. mill stores them as a `skipped-tests` event.
+Earlier versions wrote a `skipped_tests` event, which newer versions still read. `mill task show
+--json` carries them as `skipped_tests`.
 
 `mill stats models` reports first-pass rate, average attempts and average cost by size,
 complexity and first-attempt model (`--json` for scripts), to help tune the mapping.
@@ -611,7 +649,11 @@ mill run <goal> --host herdr
 `--host auto|exec|herdr` is accepted by `mill task run` and `mill run`. With the herdr host
 each worker runs in its own new herdr tab in your workspace (`HERDR_WORKSPACE_ID`), labelled
 `mill <task> <role>` (for example `mill g12/docs a1 implementer`), so you can watch agents work.
-The tab is never focused, so your focus stays where it is, and it closes when the worker ends.
+Each gate command gets a tab too. It is labelled `mill <task> a<n> gate <i>` for a task gate,
+`mill <task> <phase> gate <i>` for a gate re-run by publishing or restacking, and
+`mill combined check <i>` for the `mill keep` combined check, where `<i>` counts the gate's
+commands from 1. The tab is never focused, so your focus stays where it is, and it closes when the
+worker ends.
 When mill is killed, its workers' tabs are left open. The next `mill run` or `mill task run` (the
 one that runs crash recovery) closes the recorded tab of each killed worker and prints
 `closed herdr tab <tab> of <task> attempt <n> <role>` for each tab it closed. A tab that is
@@ -623,3 +665,13 @@ was closed or killed and the attempt is lost, and a retry continues. mill still 
 from files, never from the pane. `mill doctor` reports a `host` line with the choice
 (`auto → exec`, `auto → herdr`, `exec`, `herdr`) or the error when `host.kind = herdr` cannot
 be satisfied.
+
+When the herdr host starts a process, it waits up to 30 seconds for the wrapper to write the
+process's pid file. A start that does not get one in time fails. For gate commands the gate
+start-failure rules above apply: only task gates fall back to the exec host; the others retry once
+and then fail.
+
+**Worker environment.** Each agent attempt gets its own `TMPDIR`, inside the attempt's run
+directory under `.mill/runs/`, so workers never share or clean up one another's temporary files.
+Workers are denied `pkill`, `killall` and `pgrep`, because other agents share the machine, so
+they may only wait on and stop processes they started themselves.
