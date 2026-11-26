@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/taskspec"
 )
@@ -168,5 +171,108 @@ func (s *Store) GroupTaskCosts(ctx context.Context, size, complexity, model stri
 		return nil, fmt.Errorf("read task costs of %s/%s/%s: %w", size, complexity, model, err)
 	}
 	sort.Float64s(out)
+	return out, nil
+}
+
+// AttemptDurations returns how long, in milliseconds, each finished implementer attempt
+// ran on model for a task of the given size and complexity (a task without a stored
+// complexity counts as medium, as ModelStats). An attempt's duration is its agent-reported
+// agent_ms when present, else its wall time from start to end. Durations are in ascending
+// order. It changes nothing.
+func (s *Store) AttemptDurations(ctx context.Context, size, complexity, model string) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.complexity, a.started_at, a.ended_at, a.agent_ms
+		FROM attempts a JOIN tasks t ON t.id = a.task_id
+		WHERE a.role = ? AND a.model = ? AND t.size = ? AND a.ended_at IS NOT NULL
+		AND a.status NOT IN (?, ?)`,
+		RoleImplementer, model, size, AttemptRunning, AttemptAbandoned)
+	if err != nil {
+		return nil, fmt.Errorf("read attempt durations of %s/%s/%s: %w", size, complexity, model, err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var c, started, ended string
+		var agentMS sql.NullInt64
+		if err := rows.Scan(&c, &started, &ended, &agentMS); err != nil {
+			return nil, fmt.Errorf("read attempt durations of %s/%s/%s: %w", size, complexity, model, err)
+		}
+		if c == "" {
+			c = "medium" // as ModelStats
+		}
+		if c != complexity {
+			continue
+		}
+		if agentMS.Valid && agentMS.Int64 > 0 {
+			out = append(out, agentMS.Int64)
+			continue
+		}
+		st, err := parseTime(started)
+		if err != nil {
+			return nil, fmt.Errorf("read attempt durations of %s/%s/%s: bad start time %q: %w", size, complexity, model, started, err)
+		}
+		en, err := parseTime(ended)
+		if err != nil {
+			return nil, fmt.Errorf("read attempt durations of %s/%s/%s: bad end time %q: %w", size, complexity, model, ended, err)
+		}
+		out = append(out, en.Sub(st).Milliseconds())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read attempt durations of %s/%s/%s: %w", size, complexity, model, err)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// GateDurations returns how long, in milliseconds, each gate the pipeline ran took: from the
+// task-status event that put the task in phase gate to the task's next task-gate event.
+// Reused gates (which run no command) and gates without a recorded start are left out.
+// Durations are in ascending order. It changes nothing.
+func (s *Store) GateDurations(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT task_id, at, kind, data FROM events
+		WHERE task_id IS NOT NULL AND kind IN ('task-status', 'task-gate') ORDER BY seq`)
+	if err != nil {
+		return nil, fmt.Errorf("read gate durations: %w", err)
+	}
+	defer rows.Close()
+	started := map[string]time.Time{} // task id → when its running gate began
+	var out []int64
+	for rows.Next() {
+		var task, at, kind, data string
+		if err := rows.Scan(&task, &at, &kind, &data); err != nil {
+			return nil, fmt.Errorf("read gate durations: %w", err)
+		}
+		t, err := parseTime(at)
+		if err != nil {
+			return nil, fmt.Errorf("read gate durations: bad event time %q: %w", at, err)
+		}
+		if kind == "task-status" {
+			var d struct {
+				Phase string `json:"phase"`
+			}
+			if err := json.Unmarshal([]byte(data), &d); err != nil {
+				return nil, fmt.Errorf("read gate durations: corrupt task-status event of %s: %w", task, err)
+			}
+			if d.Phase == PhaseGate {
+				started[task] = t
+			} else {
+				delete(started, task)
+			}
+			continue
+		}
+		var d struct {
+			Reused bool `json:"reused"`
+		}
+		if err := json.Unmarshal([]byte(data), &d); err != nil {
+			return nil, fmt.Errorf("read gate durations: corrupt task-gate event of %s: %w", task, err)
+		}
+		if st, ok := started[task]; ok && !d.Reused {
+			out = append(out, t.Sub(st).Milliseconds())
+		}
+		delete(started, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read gate durations: %w", err)
+	}
+	slices.Sort(out)
 	return out, nil
 }

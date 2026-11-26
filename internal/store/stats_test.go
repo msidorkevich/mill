@@ -3,7 +3,10 @@ package store
 import (
 	"context"
 	"math"
+	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
 )
@@ -167,5 +170,116 @@ func TestGroupTaskCostsEmptyGroupReturnsNone(t *testing.T) {
 	got, err := newStore(t).GroupTaskCosts(context.Background(), "S", "low", "sonnet")
 	if err != nil || len(got) != 0 {
 		t.Fatalf("costs = %v, %v", got, err)
+	}
+}
+
+// durationStore opens a store whose clock reads *now.
+func durationStore(t *testing.T) (*Store, *time.Time) {
+	t.Helper()
+	now := fixed
+	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "mill.db"), Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s, &now
+}
+
+func TestAttemptDurationsPreferAgentMSOverWallTime(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, now := durationStore(t)
+	attempt := func(task string, n int, role, model string, wall, agent time.Duration) {
+		t.Helper()
+		*now = fixed
+		aid, err := s.StartAttempt(ctx, task, n, role)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetAttemptModel(ctx, aid, model, "test"); err != nil {
+			t.Fatal(err)
+		}
+		*now = fixed.Add(wall)
+		if err := s.FinishAttempt(ctx, aid, "ok", budget.Usage{}, false, "", "", agent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct{ id, size, complexity string }{
+		{"a", "S", "low"}, {"b", "S", "high"}, {"m", "M", "low"}, {"n", "S", ""},
+	} {
+		sp := spec(c.id)
+		sp.Size, sp.Complexity = c.size, c.complexity
+		if err := s.CreateTask(ctx, sp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attempt("a", 1, RoleImplementer, "sonnet", 10*time.Minute, 0)              // wall time: 600000
+	attempt("a", 2, RoleImplementer, "sonnet", 10*time.Minute, 90*time.Second) // agent_ms: 90000
+	attempt("a", 1, "verifier", "sonnet", time.Minute, 0)                      // not an implementer
+	attempt("a", 3, RoleImplementer, "opus", time.Minute, 0)                   // other model
+	attempt("b", 1, RoleImplementer, "sonnet", time.Minute, 0)                 // other complexity
+	attempt("m", 1, RoleImplementer, "sonnet", time.Minute, 0)                 // other size
+	attempt("n", 1, RoleImplementer, "sonnet", 2*time.Minute, 0)               // no complexity: medium
+	if _, err := s.StartAttempt(ctx, "a", 4, RoleImplementer); err != nil {    // still running
+		t.Fatal(err)
+	}
+
+	got, err := s.AttemptDurations(ctx, "S", "low", "sonnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{90000, 600000}; !slices.Equal(got, want) {
+		t.Errorf("S/low/sonnet durations = %v, want %v", got, want)
+	}
+	got, err = s.AttemptDurations(ctx, "S", "medium", "sonnet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{120000}; !slices.Equal(got, want) {
+		t.Errorf("S/medium/sonnet durations = %v, want %v", got, want)
+	}
+	got, err = s.AttemptDurations(ctx, "S", "low", "haiku")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("S/low/haiku durations = %v, want none", got)
+	}
+}
+
+func TestGateDurationsMeasureFromGatePhaseToGateResult(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, now := durationStore(t)
+	for _, id := range []string{"a", "b", "c"} {
+		if err := s.CreateTask(ctx, spec(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate := func(task string, took time.Duration, data map[string]any) {
+		t.Helper()
+		*now = fixed
+		if err := s.SetTaskStatus(ctx, task, TaskRunning, PhaseGate, ""); err != nil {
+			t.Fatal(err)
+		}
+		*now = fixed.Add(took)
+		if _, err := s.AppendEvent(ctx, "task-gate", "", task, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate("a", 2*time.Minute, map[string]any{"attempt": 1})
+	gate("b", 30*time.Second, map[string]any{"attempt": 1})
+	gate("a", time.Second, map[string]any{"attempt": 2, "reused": true}) // reused: no command ran
+	// A gate result without a gate phase before it (as publish records) has no start.
+	if _, err := s.AppendEvent(ctx, "task-gate", "", "c", map[string]any{"attempt": 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.GateDurations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{30000, 120000}; !slices.Equal(got, want) {
+		t.Errorf("gate durations = %v, want %v", got, want)
 	}
 }

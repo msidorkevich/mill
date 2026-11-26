@@ -15,6 +15,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/graph"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/planner"
@@ -356,6 +357,10 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		}
 		tasks = append(tasks, pt)
 	}
+	chain, err := longestChain(ctx, s, tasks)
+	if err != nil {
+		return fail(err)
+	}
 	warnings := p.WarningsFor(cfg.CheckCmd)
 	if warnings == nil {
 		warnings = []string{}
@@ -365,11 +370,12 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		enc := json.NewEncoder(env.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(struct {
-			Schema   string     `json:"schema"`
-			Goal     store.Goal `json:"goal"`
-			Order    []planTask `json:"order"`
-			Warnings []string   `json:"warnings"`
-		}{"mill/plan@1", g, tasks, warnings}); err != nil {
+			Schema       string     `json:"schema"`
+			Goal         store.Goal `json:"goal"`
+			Order        []planTask `json:"order"`
+			LongestChain planChain  `json:"longest_chain"`
+			Warnings     []string   `json:"warnings"`
+		}{"mill/plan@1", g, tasks, chain, warnings}); err != nil {
 			return fail(err)
 		}
 		return ExitOK
@@ -455,6 +461,17 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 	default:
 		fmt.Fprintf(w, "\nEstimated cost: $%.2f–$%.2f %s\n", lo, hi, basis)
 	}
+	if len(chain.IDs) > 0 {
+		dur := "unknown (needs past attempts of each task's size, complexity and model, and past gates)"
+		if chain.EstimateMS != nil {
+			dur = (time.Duration(*chain.EstimateMS) * time.Millisecond).Round(time.Second).String()
+		}
+		noun := "tasks"
+		if len(chain.IDs) == 1 {
+			noun = "task"
+		}
+		fmt.Fprintf(w, "Longest chain: %s (%d %s), est. duration %s\n", strings.Join(chain.IDs, " → "), len(chain.IDs), noun, dur)
+	}
 	if len(warnings) > 0 {
 		fmt.Fprintln(w, "\nWarnings:")
 		for _, x := range warnings {
@@ -465,6 +482,69 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(w, "\nNext: `mill plan edit %s` to change it, or `mill plan approve %s`.\n", g.ID, g.ID)
 	}
 	return ExitOK
+}
+
+// planChain is the plan's longest dependency chain: its task ids in order and its estimated
+// duration, nil when unknown.
+type planChain struct {
+	IDs        []string `json:"ids"`
+	EstimateMS *int64   `json:"estimate_ms"`
+}
+
+// longestChain picks the longest dependency chain of tasks. A task's estimate is the median
+// duration of past implementer attempts of its size, complexity and model plus the median
+// gate duration. When every task has an estimate the chain with the longest estimated
+// duration wins; otherwise the chain with the most tasks, with an unknown duration.
+func longestChain(ctx context.Context, s *store.Store, tasks []planTask) (planChain, error) {
+	gates, err := s.GateDurations(ctx)
+	if err != nil {
+		return planChain{}, err
+	}
+	var gr graph.Graph
+	est := map[string]int64{}
+	known := len(gates) > 0
+	for _, t := range tasks {
+		gr.Nodes = append(gr.Nodes, graph.Node{ID: t.ID, Label: t.ID})
+		for _, d := range t.DependsOn {
+			gr.Edges = append(gr.Edges, graph.Edge{From: t.ID, To: d})
+		}
+		if !known || t.Model == "" {
+			known = false
+			continue
+		}
+		past, err := s.AttemptDurations(ctx, t.Size, t.Complexity, t.Model)
+		if err != nil {
+			return planChain{}, err
+		}
+		if len(past) == 0 {
+			known = false
+			continue
+		}
+		est[t.ID] = median(past) + median(gates)
+	}
+	weight := func(string) int64 { return 1 }
+	if known {
+		weight = func(id string) int64 { return est[id] }
+	}
+	ids, total, err := graph.LongestChain(gr, weight)
+	if err != nil {
+		return planChain{}, fmt.Errorf("find the longest dependency chain: %w", err)
+	}
+	c := planChain{IDs: nz(ids)}
+	if known && len(ids) > 0 {
+		c.EstimateMS = &total
+	}
+	return c, nil
+}
+
+// median returns the median of the ascending values (the mean of the middle two for an
+// even count).
+func median(sorted []int64) int64 {
+	n := len(sorted)
+	if n%2 == 1 {
+		return sorted[n/2]
+	}
+	return (sorted[n/2-1] + sorted[n/2]) / 2
 }
 
 // minStatsTasks is how many finished past tasks of a task's size, complexity and model plan
