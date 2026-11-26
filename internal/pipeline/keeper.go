@@ -143,7 +143,13 @@ func (p *Pipeline) Verify(ctx context.Context, taskID string) (prompt.VerifierOu
 	if err != nil {
 		return prompt.VerifierOutput{}, "", err
 	}
-	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside, Siblings: sibs})
+	// The head being verified may be newer than the recorded one.
+	br.HeadSHA = head
+	bc, err := p.baseChanges(ctx, t, br, n)
+	if err != nil {
+		return prompt.VerifierOutput{}, "", err
+	}
+	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside, Siblings: sibs, BaseChanged: bc.Files, BaseChangedStat: bc.Stat})
 	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
 	if err != nil {
 		return prompt.VerifierOutput{}, "", err

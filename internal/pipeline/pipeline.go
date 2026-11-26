@@ -452,7 +452,11 @@ func (p *Pipeline) verify(ctx context.Context, t store.Task, v verifyStep, out O
 	if err != nil {
 		return out, nil, true, err
 	}
-	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky, Siblings: sibs})
+	bc, err := p.baseChanges(ctx, t, v.br, n)
+	if err != nil {
+		return out, nil, true, err
+	}
+	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky, Siblings: sibs, BaseChanged: bc.Files, BaseChangedStat: bc.Stat})
 	verModel, verWhy := p.verifierModel(v.implModel)
 	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, v.limits, v.br.Worktree, v.logDir)
 	if err != nil {
@@ -526,6 +530,19 @@ const (
 	SkippedTestsEvent    = "skipped-tests"
 	OldSkippedTestsEvent = "skipped_tests"
 )
+
+// baseChanges finds what changed on t's base since it started that concerns it, for the
+// verifier of attempt n, and records a base-changed event when there is anything.
+func (p *Pipeline) baseChanges(ctx context.Context, t store.Task, br store.Branch, n int) (BaseChanges, error) {
+	bc, err := FindBaseChanges(ctx, p.Paths.Root, p.Cfg, t, br)
+	if err != nil || len(bc.Files) == 0 {
+		return bc, err
+	}
+	if _, err := p.Store.AppendEvent(ctx, "base-changed", "", t.ID, map[string]any{"attempt": n, "base": bc.Base, "from": bc.From, "to": bc.To, "files": bc.Files}); err != nil {
+		return BaseChanges{}, fmt.Errorf("record the base changes of task %s; check the mill database and run the verification again: %w", t.ID, err)
+	}
+	return bc, nil
+}
 
 // recordSkippedTests appends a skipped-tests event listing the test skips the task added
 // between startSHA and head, when there are any. When there are none but an earlier attempt
