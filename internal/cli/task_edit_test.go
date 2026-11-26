@@ -148,7 +148,7 @@ func TestTaskEditRefusesChangedIDDependenciesAndMissingChecks(t *testing.T) {
 	base := `{"id": "c", "title": "C", "kind": "implement", "spec": "x", "acceptance": ["x"], "checks": ["true"], "owns": ["c.txt"], "depends_on": ["a", "b"], "size": "S"}`
 	cases := map[string]struct{ body, want string }{
 		"id":      {strings.Replace(base, `"id": "c"`, `"id": "z"`, 1), "id must stay"},
-		"deps":    {strings.Replace(base, `["a", "b"]`, `["a"]`, 1), "dependencies cannot change after approval"},
+		"deps":    {strings.Replace(base, `["a", "b"]`, `["a"]`, 1), "published stacks and branches depend on them"},
 		"checks":  {strings.Replace(base, `"checks": ["true"]`, `"checks": []`, 1), "needs at least one check"},
 		"unknown": {strings.Replace(base, `"size"`, `"extra": 1, "size"`, 1), "unknown field"},
 	}

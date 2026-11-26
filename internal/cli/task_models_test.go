@@ -6,6 +6,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/store"
 )
 
 const taskModelsSpec = `{"id": "solo", "title": "Solo", "kind": "docs", "spec": "write docs", "acceptance": [], "checks": [], "owns": ["d.md"], "size": "S"}`
@@ -38,6 +41,26 @@ func taskModelsRepo(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+// finishTaskModelsAttempts ends the running attempt of taskModelsRepo, so `task edit` can
+// claim the task.
+func finishTaskModelsAttempts(t *testing.T, root string) {
+	t.Helper()
+	ctx := context.Background()
+	s := openStore(t, root)
+	as, err := s.Attempts(ctx, "solo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range as {
+		if a.Status != store.AttemptRunning {
+			continue
+		}
+		if err := s.FinishAttempt(ctx, a.ID, store.AttemptAbandoned, budget.Usage{}, false, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func taskModelsLine(out, prefix string) string {
@@ -120,6 +143,7 @@ func TestTaskShowModelJSONCarriesModelAndReason(t *testing.T) {
 func TestTaskEditModelSetsModelAndComplexity(t *testing.T) {
 	t.Parallel()
 	root := taskModelsRepo(t)
+	finishTaskModelsAttempts(t, root)
 	body := strings.Replace(taskModelsSpec, `"size": "S"`, `"size": "S", "complexity": "high", "complexity_reason": "hard", "model": "opus"`, 1)
 	r := run(t, root, nil, "task", "edit", "solo", "--file", writeFile(t, body))
 	if r.code != ExitOK {
@@ -137,6 +161,7 @@ func TestTaskEditModelSetsModelAndComplexity(t *testing.T) {
 func TestTaskEditModelRefusesInvalidComplexityAndKeepsFile(t *testing.T) {
 	t.Parallel()
 	root := taskModelsRepo(t)
+	finishTaskModelsAttempts(t, root)
 	body := strings.Replace(taskModelsSpec, `"size": "S"`, `"size": "S", "complexity": "x"`, 1)
 	f := writeFile(t, body)
 	r := run(t, root, nil, "task", "edit", "solo", "--file", f)
