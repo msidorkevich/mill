@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/store"
@@ -149,6 +150,9 @@ func task(ctx context.Context, o Options, id string) (Result, error) {
 				r.Worktree = b.Worktree
 			}
 		}
+		if ok {
+			ok = removeTaskTmp(o, id, b, say, step)
+		}
 		changed = true
 	}
 	if ok && !o.DryRun {
@@ -171,6 +175,37 @@ func task(ctx context.Context, o Options, id string) (Result, error) {
 		remote(ctx, o, b, &r, say, step)
 	}
 	return r, nil
+}
+
+// removeTaskTmp removes the attempt tmp directory of a landed task, <worktree root>/.tmp/<id>,
+// when it exists. With DryRun it only reports it. It returns false when the removal failed.
+// A worktree path that does not end in the id does not tell where the worktree root is: that
+// is recorded as a failure and nothing is removed, but the rest of the cleanup goes on.
+func removeTaskTmp(o Options, id string, b store.Branch, say func(string, ...any), step func(error, string) bool) bool {
+	suffix := string(filepath.Separator) + filepath.FromSlash(id)
+	root, found := strings.CutSuffix(filepath.Clean(b.Worktree), suffix)
+	if !found {
+		step(fmt.Errorf("worktree %s does not end in %s, so the worktree root is unknown; remove <worktree root>/.tmp/%s by hand if it exists", b.Worktree, suffix, id), "locate tmp dir")
+		return true
+	}
+	tmp := filepath.Join(root, ".tmp", id)
+	what := "remove tmp dir " + tmp
+	_, err := os.Stat(tmp)
+	if os.IsNotExist(err) {
+		return true
+	}
+	if !step(err, what) {
+		return false
+	}
+	if o.DryRun {
+		say("%s  would remove tmp dir %s\n", id, tmp)
+		return true
+	}
+	if !step(os.RemoveAll(tmp), what) {
+		return false
+	}
+	say("%s  removed tmp dir %s\n", id, tmp)
+	return true
 }
 
 // remote deletes a landed task's review branch when it is still at the published sha.
