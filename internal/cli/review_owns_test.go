@@ -72,3 +72,30 @@ func TestReviewShowJSONKeepsOwnersInEventData(t *testing.T) {
 		t.Fatalf("events = %+v\n%s", v.Events, r.stdout)
 	}
 }
+
+func TestReviewOutOfScopeFindingsShownAsNotes(t *testing.T) {
+	t.Parallel()
+	root := verifiedGoal(t)
+	s := openStore(t, root)
+	ev := map[string]any{"attempt": 1,
+		"findings": []map[string]any{{"source": "verifier", "file": "b.txt", "line": 3, "issue": "b.txt lacks a header"}},
+		"owners":   map[string][]string{"b.txt": {"g1/b"}}}
+	if _, err := s.AppendEvent(context.Background(), "verifier-out-of-scope", "", "g1/a", ev); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, root, nil, "review", "show", "g1/a")
+	if r.code != ExitOK {
+		t.Fatalf("show: %+v", r)
+	}
+	want := "Notes from attempt 1:\n  verifier-out-of-scope: [verifier] b.txt:3: b.txt lacks a header (owned by g1/b)\n"
+	if !strings.Contains(r.stdout, want) {
+		t.Fatalf("show missing %q:\n%s", want, r.stdout)
+	}
+	if strings.Contains(r.stdout, `"findings"`) {
+		t.Errorf("show printed raw event data:\n%s", r.stdout)
+	}
+	r = run(t, root, nil, "review", "show", "g1/a", "--json")
+	if r.code != ExitOK || !strings.Contains(r.stdout, `"kind": "verifier-out-of-scope"`) {
+		t.Fatalf("show --json: %+v", r)
+	}
+}
