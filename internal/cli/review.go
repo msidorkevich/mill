@@ -15,6 +15,7 @@ import (
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/prompt"
 	"github.com/msidorkevich/mill/internal/publish"
+	"github.com/msidorkevich/mill/internal/skiptest"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
@@ -155,6 +156,9 @@ type reviewView struct {
 	From     string                 `json:"from"`               // start of the diff
 	DiffStat string                 `json:"diff_stat"`
 	Diff     string                 `json:"diff,omitempty"`
+	// skipped are the test skips the latest skipped_tests event recorded; text only, so
+	// --json keeps its fields as they are.
+	skipped []skiptest.Skip
 }
 
 // reviewable loads a task and refuses one that is not verified or published.
@@ -234,6 +238,9 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 				v.Gate = &d.Result
 			}
 		}
+	}
+	if v.skipped, err = latestSkippedTests(evs); err != nil {
+		return fail(fmt.Errorf("task %s: %w", id, err))
 	}
 	for _, e := range evs {
 		switch e.Kind {
@@ -325,6 +332,7 @@ func printReview(env Env, v reviewView) {
 	} else {
 		fmt.Fprintln(w, "\nLast gate: none recorded")
 	}
+	printSkippedTests(w, v.skipped)
 	if len(v.Events) > 0 {
 		fmt.Fprintf(w, "\nNotes from attempt %d:\n", v.Attempts)
 		for _, e := range v.Events {
