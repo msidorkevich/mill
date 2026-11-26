@@ -120,7 +120,8 @@ func BranchName(taskID string) string {
 }
 
 // blockedError is returned by prepare when the task cannot start for a reason that is not a
-// mill failure (an unverified dependency, conflicting dependencies); the run loop blocks it.
+// mill failure (an unverified dependency, a dependency conflict the resolver could not
+// resolve); the run loop blocks it.
 type blockedError struct{ reason string }
 
 func (e *blockedError) Error() string { return e.reason }
@@ -174,6 +175,10 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 	var be *blockedError
 	if errors.As(err, &be) {
 		return p.block(ctx, t.ID, store.PhasePrepare, be.reason, Outcome{}, nil)
+	}
+	var se *stoppedError
+	if errors.As(err, &se) {
+		return p.block(ctx, t.ID, store.PhasePrepare, se.stop, Outcome{RateLimited: se.rateLimited, ResetsAt: se.resetsAt}, nil)
 	}
 	if err != nil {
 		return Outcome{}, fmt.Errorf("prepare worktree: %w", err)
@@ -764,23 +769,11 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 			return br, errors.Join(err, p.removeCreated(ctx, wt, name))
 		}
 		for _, m := range merges {
-			err := gitx.Merge(ctx, wt, m.rev, m.message)
-			if err == nil {
-				continue
+			// On failure mergeDependency has already removed the worktree and branch, so a
+			// retry starts clean.
+			if err := p.mergeDependency(ctx, t, wt, name, m); err != nil {
+				return br, err
 			}
-			var ce *gitx.ConflictError
-			if !errors.As(err, &ce) {
-				return fail(fmt.Errorf("merge dependency %s: %w", m.id, err))
-			}
-			// Leave nothing behind so a retry starts clean.
-			if rmErr := gitx.RemoveWorktree(ctx, p.Paths.Root, wt); rmErr != nil {
-				return br, fmt.Errorf("dependency %s conflicts in %s; removing the worktree %s failed: %w", m.id, strings.Join(ce.Files, ", "), wt, rmErr)
-			}
-			if delErr := gitx.DeleteBranch(ctx, p.Paths.Root, name); delErr != nil {
-				return br, fmt.Errorf("dependency %s conflicts in %s; deleting branch %s failed: %w", m.id, strings.Join(ce.Files, ", "), name, delErr)
-			}
-			return br, &blockedError{fmt.Sprintf("dependency %s (branch %s) conflicts with the other dependencies in %s; resolve the conflict in the plan or by hand",
-				m.id, m.branch, strings.Join(ce.Files, ", "))}
 		}
 		startSHA, err := gitx.RevParse(ctx, wt, "HEAD")
 		if err != nil {

@@ -552,6 +552,7 @@ func TestConflictingDependenciesBlockTask(t *testing.T) {
 	e := setup(t, `true`, runner.Script{
 		runner.RoleImplementer: {goalImpl("same.txt", "from a\n"), goalImpl("same.txt", "from b\n")},
 		runner.RoleVerifier:    {verdict("pass"), verdict("pass")},
+		runner.RoleResolver:    {{Error: "cannot resolve"}},
 	}, nil)
 	e.goal(t, nil, nil, []string{"a", "b"})
 	e.run(t, "g1/a")
