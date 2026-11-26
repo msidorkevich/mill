@@ -604,3 +604,13 @@ func TestCloseHerdrTabClosesOrReportsGone(t *testing.T) {
 		t.Fatalf("broken herdr: %v, %v", closed, err)
 	}
 }
+
+func TestNewHerdrDefaultStartTimeoutAllowsForLoad(t *testing.T) {
+	t.Parallel()
+	if got := NewHerdr().StartTimeout; got != 30*time.Second {
+		t.Fatalf("NewHerdr().StartTimeout = %s, want 30s", got)
+	}
+	if got := (&Herdr{}).startTimeout(); got != 30*time.Second {
+		t.Fatalf("unset StartTimeout waits %s, want 30s", got)
+	}
+}

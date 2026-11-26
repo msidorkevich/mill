@@ -25,14 +25,20 @@ type triageResult struct {
 
 // triage decides what a failed gate means: a flaky command passes on a re-run (gate_rerun);
 // a command that also fails on the task's starting point is not the task's fault
-// (gate_check_base). It runs inside the gate slot the caller holds for the gate, so its
-// re-runs take turns with other gates too. The caller checks ctx afterwards: an interrupted
-// triage is meaningless.
+// (gate_check_base). A command no host could start never ran: it is neither re-run nor
+// checked on the starting point, and never counted as flaky. It runs inside the gate slot
+// the caller holds for the gate, so its re-runs take turns with other gates too. The caller
+// checks ctx afterwards: an interrupted triage is meaningless.
 func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA string, opts gate.Options, g gate.Result) (triageResult, error) {
 	tr := triageResult{gate: g}
-	var failed []int // indexes into tr.gate.Commands
+	var failed []int    // indexes into tr.gate.Commands of commands that ran and failed
+	var unstarted []int // indexes of commands no host could start
 	for i, c := range g.Commands {
-		if !c.Passed() {
+		switch {
+		case c.Passed():
+		case c.StartFailed:
+			unstarted = append(unstarted, i)
+		default:
 			failed = append(failed, i)
 		}
 	}
@@ -65,12 +71,16 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 			}
 			p.logf("%s a%d gate      flaky (passed on a re-run): %s", t.ID, n, strings.Join(tr.flaky, "; "))
 		}
-		if len(still) == 0 {
+		if len(still) == 0 && len(unstarted) == 0 {
 			tr.gate.Passed, tr.gate.Reason = true, ""
 			return tr, nil
 		}
 		failed = still
-		tr.gate.Reason = "failed: " + strings.Join(cmdsAt(tr.gate, failed), "; ")
+		tr.gate.Reason = "failed: " + strings.Join(cmdsAt(tr.gate, slices.Sorted(slices.Values(append(slices.Clone(failed), unstarted...)))), "; ")
+		if len(failed) == 0 {
+			tr.findings = gateFindings(tr.gate)
+			return tr, nil
+		}
 	}
 
 	if !p.Cfg.GateCheckBase {
@@ -88,6 +98,11 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 	}
 
 	var causedHere, alsoOnBase []string
+	for _, i := range unstarted {
+		// It never ran, so it is the attempt's failure: the starting point cannot explain it.
+		causedHere = append(causedHere, tr.gate.Commands[i].Cmd)
+		tr.findings = append(tr.findings, cmdFinding(tr.gate.Commands[i]))
+	}
 	tests := map[string]any{} // per command compared by failing tests: head, base, head_only
 	for k, i := range failed {
 		c := tr.gate.Commands[i]
@@ -176,7 +191,7 @@ func (p *Pipeline) runOnBase(ctx context.Context, t store.Task, startSHA string,
 		return res, fmt.Errorf("ran %d of %d command(s) on the starting point: %s", len(res.Commands), len(cmds), res.Reason)
 	}
 	for _, c := range res.Commands {
-		if strings.HasPrefix(c.Error, "could not run") {
+		if c.StartFailed || strings.HasPrefix(c.Error, "could not run") {
 			return res, fmt.Errorf("`%s` on the starting point: %s", c.Cmd, c.Error)
 		}
 	}
