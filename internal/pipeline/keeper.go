@@ -138,7 +138,11 @@ func (p *Pipeline) Verify(ctx context.Context, taskID string) (prompt.VerifierOu
 		outside = plan.OutsideOwns(t.Owns, files)
 	}
 	g := gate.Result{Reason: "mill runs the gate separately on this head; review the change itself"}
-	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside})
+	sibs, err := p.siblings(ctx, t)
+	if err != nil {
+		return prompt.VerifierOutput{}, "", err
+	}
+	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: startSHA, Diff: diff, DiffStat: stat, Gate: g, OutsideOwns: outside, Siblings: sibs})
 	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, limits, br.Worktree, logDir)
 	if err != nil {
 		return prompt.VerifierOutput{}, "", err

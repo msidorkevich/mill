@@ -186,6 +186,17 @@ type VerifierInput struct {
 	OutsideOwns []string
 	// Flaky lists gate commands that failed once and passed on a re-run.
 	Flaky []string
+	// Siblings are the other tasks of the task's goal; empty for a standalone task.
+	Siblings []SiblingTask
+}
+
+// SiblingTask is another task of the same goal, shown to the verifier so it can tell which
+// work belongs elsewhere.
+type SiblingTask struct {
+	ID      string
+	Title   string
+	Owns    []string
+	Summary string
 }
 
 // Verifier builds the verifier prompt.
@@ -200,6 +211,17 @@ func Verifier(in VerifierInput) string {
 			fmt.Fprintf(&b, "%d. %s\n", i+1, a)
 		}
 		b.WriteString("\n")
+	}
+	if len(in.Siblings) > 0 {
+		b.WriteString("## Other tasks of this goal\n")
+		for _, s := range in.Siblings {
+			owns := "(none)"
+			if len(s.Owns) > 0 {
+				owns = strings.Join(s.Owns, ", ")
+			}
+			fmt.Fprintf(&b, "- %s: %s\n  Owns: %s\n  Summary: %s\n", s.ID, s.Title, owns, s.Summary)
+		}
+		b.WriteString("\nThese tasks are done separately. Work that belongs to another task's scope is out of scope here: do not fail this task for findings about it.\n\n")
 	}
 	b.WriteString("## Gate results (already run by mill on this exact change)\n")
 	if len(in.Gate.Commands) == 0 {

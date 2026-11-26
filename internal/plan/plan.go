@@ -297,7 +297,84 @@ func (p Plan) Warnings() []string {
 // WarningsFor is Warnings plus a warning for every task check that is a whole-package
 // `go test` without -run while checkCmd already runs go test over everything.
 func (p Plan) WarningsFor(checkCmd string) []string {
-	return append(p.Warnings(), p.checkWarnings(checkCmd)...)
+	out := append(p.Warnings(), p.checkWarnings(checkCmd)...)
+	return append(out, p.acceptanceWarnings()...)
+}
+
+// acceptanceWarnings warns about every acceptance criterion that names a path owned by
+// another task and not by the criterion's own task: its verifier would judge work it cannot do.
+func (p Plan) acceptanceWarnings() []string {
+	var out []string
+	for _, t := range p.Tasks {
+		for _, a := range t.Acceptance {
+			for _, path := range criterionPaths(a) {
+				if ownsOverlap(t.Owns, path) {
+					continue
+				}
+				var others []string
+				for _, o := range p.Tasks {
+					if o.ID != t.ID && ownsOverlap(o.Owns, path) {
+						others = append(others, o.ID)
+					}
+				}
+				if len(others) > 0 {
+					out = append(out, fmt.Sprintf("task %s: acceptance %q names %s, owned by %s and not by %s",
+						t.ID, a, path, strings.Join(others, ", "), t.ID))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ownsOverlap reports whether some owns pattern matches or overlaps p.
+func ownsOverlap(owns []string, p string) bool {
+	for _, o := range owns {
+		if MatchOwns(o, p) || GlobsOverlap(o, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// criterionPaths returns the distinct words of a criterion that look like paths: they contain
+// a `/` or end in a file extension.
+func criterionPaths(criterion string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, w := range strings.Fields(criterion) {
+		w = strings.Trim(w, "`'\"()[]{}<>,;:!?")
+		w = strings.TrimRight(w, ".")
+		w = strings.TrimPrefix(w, "./")
+		if w == "" || seen[w] || strings.Contains(w, "://") {
+			continue
+		}
+		if strings.Contains(w, "/") || hasFileExt(w) {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// hasFileExt reports whether w ends in `.ext` with a non-empty name before it and an
+// extension of letters and digits that is not all digits.
+func hasFileExt(w string) bool {
+	ext := path.Ext(w)
+	if len(ext) < 2 || len(ext) == len(w) {
+		return false
+	}
+	letter := false
+	for _, r := range ext[1:] {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			letter = true
+		case r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return letter
 }
 
 // coversAll reports whether checkCmd runs go test over ./... (`make check` is taken to).
