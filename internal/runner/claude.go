@@ -68,11 +68,18 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 
+	// Each attempt gets its own TMPDIR inside its run dir, so workers never share or clean up
+	// another attempt's temporary files.
+	tmpDir := filepath.Join(req.LogDir, "tmp")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		return Result{}, fmt.Errorf("claude runner: create worker TMPDIR %s: %w", tmpDir, err)
+	}
+
 	h, err := c.Host.Start(ctx, host.ProcSpec{
 		Name:       req.Name,
 		Argv:       c.argv(req, settingsPath),
 		Dir:        req.Dir,
-		Env:        req.Env,
+		Env:        setEnv(req.Env, "TMPDIR", tmpDir),
 		StdinPath:  promptPath,
 		StdoutPath: streamPath,
 		StderrPath: stderrPath,
@@ -116,6 +123,17 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 		res.Warnings = append(res.Warnings, "reading agent output: "+tailErr.Error())
 	}
 	return res, nil
+}
+
+// setEnv returns a copy of env with key set to value, replacing every inherited entry for key.
+func setEnv(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, key+"=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, key+"="+value)
 }
 
 func (c *Claude) poll() time.Duration {
@@ -171,7 +189,7 @@ func RoleSettings(tools []string, protected []string) ([]byte, error) {
 		"Bash(git push:*)", "Bash(git commit:*)", "Bash(git reset:*)", "Bash(git checkout:*)",
 		"Bash(git switch:*)", "Bash(git rebase:*)", "Bash(git merge:*)", "Bash(git branch:*)",
 		"Bash(git worktree:*)", "Bash(git tag:*)", "Bash(git remote:*)", "Bash(git config:*)",
-		"Bash(sudo:*)", "Bash(mill:*)",
+		"Bash(sudo:*)", "Bash(pkill:*)", "Bash(killall:*)", "Bash(pgrep:*)", "Bash(mill:*)",
 	}
 	for _, p := range protected {
 		// Claude permission rules use //path for absolute paths.

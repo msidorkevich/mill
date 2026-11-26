@@ -615,3 +615,124 @@ func TestClaudeRecordsHostErrorWhenWorkerPaneIsClosed(t *testing.T) {
 		t.Fatalf("result = %+v, want the closed-pane error recorded", res)
 	}
 }
+
+// recordingHost records the spec it was asked to start and whether the worker's TMPDIR existed
+// at that moment, then writes a successful result.
+type recordingHost struct {
+	mu        sync.Mutex
+	spec      host.ProcSpec
+	tmpExists bool
+}
+
+func (*recordingHost) Name() string { return "recording" }
+
+func (r *recordingHost) Start(ctx context.Context, spec host.ProcSpec) (host.Handle, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.spec = spec
+	for _, kv := range spec.Env {
+		if v, ok := strings.CutPrefix(kv, "TMPDIR="); ok {
+			if fi, err := os.Stat(v); err == nil && fi.IsDir() {
+				r.tmpExists = true
+			}
+		}
+	}
+	if err := os.WriteFile(spec.StdoutPath, []byte(lineResult+"\n"), 0o644); err != nil {
+		return nil, err
+	}
+	return okHandle{}, nil
+}
+
+type okHandle struct{}
+
+func (okHandle) PID() int                 { return 1 }
+func (okHandle) Kill() error              { return nil }
+func (okHandle) Wait() (host.Exit, error) { return host.Exit{}, nil }
+
+func runRecorded(t *testing.T, req Request) *recordingHost {
+	t.Helper()
+	rh := &recordingHost{}
+	c := NewClaude("claude", rh)
+	c.Poll = 10 * time.Millisecond
+	res, err := c.Run(context.Background(), req)
+	if err != nil || res.Status != StatusOK {
+		t.Fatalf("run = %+v, %v", res, err)
+	}
+	return rh
+}
+
+func TestWorkerTMPDIRIsInsideAttemptRunDirAndExistsBeforeStart(t *testing.T) {
+	t.Parallel()
+	req := baseReq(t)
+	rh := runRecorded(t, req)
+	var got []string
+	for _, kv := range rh.spec.Env {
+		if v, ok := strings.CutPrefix(kv, "TMPDIR="); ok {
+			got = append(got, v)
+		}
+	}
+	if len(got) != 1 || got[0] != filepath.Join(req.LogDir, "tmp") {
+		t.Fatalf("TMPDIR entries = %v, want one pointing to %s", got, filepath.Join(req.LogDir, "tmp"))
+	}
+	if !rh.tmpExists {
+		t.Fatalf("TMPDIR %s did not exist when the worker started", got[0])
+	}
+}
+
+func TestWorkerTMPDIROverridesInheritedValue(t *testing.T) {
+	t.Parallel()
+	req := baseReq(t)
+	req.Env = []string{"PATH=/usr/bin", "TMPDIR=/inherited/tmp", "HOME=/home/x", "TMPDIR=/again"}
+	rh := runRecorded(t, req)
+	want := []string{"PATH=/usr/bin", "HOME=/home/x", "TMPDIR=" + filepath.Join(req.LogDir, "tmp")}
+	if strings.Join(rh.spec.Env, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("env = %q, want %q", rh.spec.Env, want)
+	}
+	if strings.Join(req.Env, ",") != "PATH=/usr/bin,TMPDIR=/inherited/tmp,HOME=/home/x,TMPDIR=/again" {
+		t.Fatalf("request env was modified: %q", req.Env)
+	}
+}
+
+func TestWorkerTMPDIRCreateFailureNamesPath(t *testing.T) {
+	t.Parallel()
+	req := baseReq(t)
+	// A file where the tmp directory should go makes creating it fail.
+	tmp := filepath.Join(req.LogDir, "tmp")
+	if err := os.WriteFile(tmp, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewClaude("claude", &recordingHost{}).Run(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), tmp) {
+		t.Fatalf("err = %v, want an error naming %s", err, tmp)
+	}
+}
+
+func TestRoleSettingsDenyProcessKillersForEveryRole(t *testing.T) {
+	t.Parallel()
+	for _, role := range []Role{RolePlanner, RoleImplementer, RoleVerifier, RoleResolver, RoleFixer} {
+		req := baseReq(t)
+		req.Role = role
+		runRecorded(t, req)
+		b, err := os.ReadFile(filepath.Join(req.LogDir, string(role)+".settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var s struct {
+			Permissions struct {
+				Deny []string `json:"deny"`
+			} `json:"permissions"`
+		}
+		if err := json.Unmarshal(b, &s); err != nil {
+			t.Fatal(err)
+		}
+		deny := map[string]bool{}
+		for _, d := range s.Permissions.Deny {
+			deny[d] = true
+		}
+		for _, want := range []string{"Bash(pkill:*)", "Bash(killall:*)", "Bash(pgrep:*)"} {
+			if !deny[want] {
+				t.Errorf("%s settings deny = %v, missing %s", role, s.Permissions.Deny, want)
+			}
+		}
+	}
+}
