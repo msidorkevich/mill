@@ -57,15 +57,24 @@ characters saying why; `mill plan show` and `mill task show` display it. An opti
 
 ```sh
 mill task run --file ../add-reverse.json            # implement → gate → verify → retry
-mill task show add-reverse                          # status, complexity, model, attempts (with model and reason per attempt), spend, findings (--json)
-mill task list                                      # every task, oldest first (--status S, --json)
+mill task show add-reverse                          # status, complexity, model, attempts (with model, reason and time per attempt), spend, findings (--json)
+mill task list                                      # current work first, then blocked and failed, then the 20 newest others (--all: every task, oldest first; --status S, --json)
 mill task run --file ../add-reverse.json --retry    # after editing the spec or raising a budget
 mill task edit <id> [--file spec.json]              # change a pending, blocked or failed task's spec
 mill task rebase <id>                                # move a pending, blocked or failed task's own commits onto its base's current tip
 ```
 
+`mill task list` by default shows running and claimed tasks first, then blocked and failed tasks,
+both oldest first, then the 20 newest of the others. A row that a mill command holds a claim on
+shows the claim in its status, for example `claimed: approve: gate, held 2m`; the holder is
+`mill <command>` when it gave no activity. When more tasks exist, the last line says
+`… N older task(s) not shown; use --all`. `--all` lists every task oldest first, and `--json`
+lists every task oldest first too, with the claim of each claimed task.
+
 `mill task edit` opens the task's current spec (id, title, kind, spec, acceptance, checks, owns,
-depends_on, size, complexity, complexity_reason, model) in `$EDITOR`, or reads `--file`. Running and verified tasks are refused. The id
+depends_on, size, complexity, complexity_reason, model) in `$EDITOR`, or reads `--file`. `--file`
+also accepts the output of `mill task show <id> --json`: the fields that show prints and edit
+cannot change are ignored and named. Running and verified tasks are refused. The id
 cannot change. Dependencies of a goal task can be added (same goal, no cycles; pending, blocked or
 failed tasks only) but not removed or reordered, because published stacks and branches depend on
 them. If the task already has a branch, its own commits are moved onto the new base: the new
@@ -112,9 +121,9 @@ mill run                        # one scheduler: run every approved goal and que
 mill run g1                     # same scheduler, only goal g1's tasks, in dependency order
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
 mill run g1 --wait-on-limit     # on a usage limit, wait for the reset and continue instead of stopping
-mill watch [g1|g1/a]            # running attempts: task, attempt, role, elapsed, tokens, cost, latest action; redraws every 2s (--once, --interval 5s)
+mill watch [g1|g1/a]            # running attempts: task, attempt, role, elapsed, tokens, cost, latest action; tasks a command holds a claim on; redraws every 2s (--once, --interval 5s)
 mill review                     # verified and published tasks, oldest first: ID, STATUS, ATTEMPTS, COST, TITLE, BRANCH (--json)
-mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat (--diff, --json)
+mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat, skipped tests added (--diff, --json)
 mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
 mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
 mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
@@ -123,6 +132,11 @@ mill sync                       # after merges on the forge: mark landed, restac
 mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
 mill stats models               # first-pass rate, avg attempts and avg $ by size, complexity and first-attempt model (--json)
 ```
+
+`mill watch` also lists tasks that a mill command holds a claim on without running them (for
+example `mill review approve` while it gates, or `mill task edit`), one line each: the task, the
+command and pid holding it, what it says it is doing (`-` when it says nothing) and how long it
+has held the claim, for example `g1/a  claimed by review approve (pid 4242): approve: gate  held 1m`.
 
 `mill watch` shows each running attempt's stage. A task being run (`mill run`, `mill task run`)
 that is waiting for a gate slot (see `max_parallel_gates` below) shows the stage
@@ -249,6 +263,13 @@ checks are configured, and not when the run was interrupted):
 
 Set either setting to `false` to skip that step.
 
+**Gate niceness.** `gate_nice` in `.mill/config.toml` runs every gate command under
+`nice -n <value>`, so gates yield the CPU to your editor and running agents. The default is `10`
+on macOS and Linux and `0` elsewhere. Set `gate_nice = 0` to disable it; a negative value is
+refused. `mill doctor` has a `gate_nice` check: it reports `without nice` when the value is 0,
+and fails when the value is above 0 but `nice` is not on `PATH`, naming the fix (install `nice`
+or set `gate_nice = 0`).
+
 **Gate slots.** `max_parallel_gates` in `.mill/config.toml` (default `1`, at least `1`) sets how
 many gates run at the same time across all mill processes. It is separate from `max_parallel`:
 agents still run in parallel (up to `max_parallel`), while their gates take turns in the gate
@@ -315,8 +336,23 @@ verifier_min = "sonnet"
 
 `mill plan show` prints, for each task, a `complexity` line with its reason and a `model` line
 with the chosen model, where it came from and an estimated cost range, then a total estimated
-cost. The estimate is unknown when a model has no price (add `[prices.<model>]`). `mill task show`
-prints the task's complexity and model and gives each attempt a `model` and a `reason` column.
+cost. The range's basis is shown after it: `(avg $X, from N past tasks)` when it comes from the
+average cost of N past tasks of the same size, complexity and model, or `(from budget limits)`
+when no past task qualifies and it comes from the task's budget limits. The total says how many
+of the tasks came from each (`(2 from past tasks, 1 from budget limits)`). The estimate is unknown
+when a model has no price (add `[prices.<model>]`). `mill task show`
+prints the task's complexity and model and gives each attempt a `model` and a `reason` column,
+and a `time` column: the duration the agent reports for its work when it reports one, otherwise
+the wall time from start to end. `mill task show --json` carries both: `agent_ms` (the
+agent-reported duration in milliseconds, `null` when unknown) and `started_at` and `ended_at`, so
+the wall time is `ended_at` minus `started_at`.
+
+**Skipped tests.** mill lists the test skips a task adds: lines added to a `*_test.go` file between
+the task's start and its head that call `t.Skip`, `t.Skipf` or `t.SkipNow`. `mill review show` and
+`mill task show` print a `Skipped tests added (N):` section with one `file:line  reason` line per
+skip, so a task that silences a test is on record. `mill task show --json` carries them as
+`skipped_tests`.
+
 `mill stats models` reports first-pass rate, average attempts and average cost by size,
 complexity and first-attempt model (`--json` for scripts), to help tune the mapping.
 
@@ -576,6 +612,11 @@ mill run <goal> --host herdr
 each worker runs in its own new herdr tab in your workspace (`HERDR_WORKSPACE_ID`), labelled
 `mill <task> <role>` (for example `mill g12/docs a1 implementer`), so you can watch agents work.
 The tab is never focused, so your focus stays where it is, and it closes when the worker ends.
+When mill is killed, its workers' tabs are left open. The next `mill run` or `mill task run` (the
+one that runs crash recovery) closes the recorded tab of each killed worker and prints
+`closed herdr tab <tab> of <task> attempt <n> <role>` for each tab it closed. A tab that is
+already gone, or herdr not on `PATH`, prints nothing; a tab that cannot be closed fails the
+recovery and names the tab to close by hand.
 The tab's pane first prints `mill worker: <name>. Closing this tab stops the task.`: closing it
 kills the worker, mill then records the attempt as failed with the reason that the herdr pane
 was closed or killed and the attempt is lost, and a retry continues. mill still reads results
