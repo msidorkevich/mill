@@ -194,7 +194,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		implPrompt := prompt.Implementer(prompt.ImplementerInput{
-			Task: t.Spec, GateCmds: nonEmpty(gateCmds), Attempt: n - prev, MaxAttempts: p.Cfg.MaxAttempts, Findings: findings,
+			Task: t.Spec, CheckCmd: p.Cfg.CheckCmd, RunsCheck: p.Cfg.ImplementerRunsCheck, Attempt: n - prev, MaxAttempts: p.Cfg.MaxAttempts, Findings: findings,
 		})
 		ar, err := p.agent(ctx, t, n, runner.RoleImplementer, implModel, implWhy, implPrompt, prompt.ImplementerSchema, ImplementerTools, limits, br.Worktree, logDir)
 		if err != nil {

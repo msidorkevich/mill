@@ -57,6 +57,9 @@ type ResolverInput struct {
 	Conflicts   []ConflictFile
 	BaseCommits []BaseCommit
 	Onto        string // the branch or commit the task is being restacked onto
+	CheckCmd    string // the project gate (config check_cmd); the task's checks are in Task.Checks
+	// RunsCheck (config implementer_runs_check) asks the agent to run check_cmd itself.
+	RunsCheck bool
 }
 
 // Resolver builds the resolver prompt.
@@ -90,12 +93,15 @@ func Resolver(in ResolverInput) string {
 	for _, c := range in.Conflicts {
 		fmt.Fprintf(&b, "### %s\n```\n%s\n```\n\n", c.Path, strings.TrimRight(c.Hunks, "\n"))
 	}
+	writeChecks(&b, in.CheckCmd, t.Checks, in.RunsCheck)
 	b.WriteString(`## Rules
 - Edit only the conflicted files listed above.
 - Remove every conflict marker (<<<<<<<, =======, >>>>>>>) from each of them.
 - Keep both intents: the base commits' changes and this task's changes must both survive.
 - Do not run git commands that change history or the index (commit, add, rm, reset, checkout, restore --staged, rebase, merge, cherry-pick, stash): mill stages the files and continues.
-- When you are done, give your final answer as the structured output: summary, resolved (the files you resolved).
+`)
+	b.WriteString(processRules)
+	b.WriteString(`- When you are done, give your final answer as the structured output: summary, resolved (the files you resolved).
 `)
 	return b.String()
 }

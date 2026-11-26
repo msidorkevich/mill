@@ -118,10 +118,12 @@ func ParseVerifier(raw json.RawMessage) (VerifierOutput, error) {
 	return o, nil
 }
 
-// ImplementerInput is everything the implementer prompt is built from.
+// ImplementerInput is everything the implementer (and fixer) prompt is built from.
 type ImplementerInput struct {
-	Task        taskspec.Spec
-	GateCmds    []string // the commands the gate will run
+	Task     taskspec.Spec
+	CheckCmd string // the project gate (config check_cmd); the task's checks are in Task.Checks
+	// RunsCheck (config implementer_runs_check) asks the agent to run check_cmd itself.
+	RunsCheck   bool
 	Attempt     int
 	MaxAttempts int
 	Findings    []Finding // from the previous attempt; empty on the first
@@ -147,13 +149,7 @@ func Implementer(in ImplementerInput) string {
 		}
 		b.WriteString("\n")
 	}
-	if len(in.GateCmds) > 0 {
-		b.WriteString("## Gate (must pass; run these yourself before you finish)\n")
-		for _, c := range in.GateCmds {
-			fmt.Fprintf(&b, "- `%s`\n", c)
-		}
-		b.WriteString("\n")
-	}
+	writeChecks(&b, in.CheckCmd, t.Checks, in.RunsCheck)
 	if len(in.Findings) > 0 {
 		b.WriteString("## Findings from the previous attempt (fix every one)\n")
 		b.WriteString("Your previous changes are already committed in this worktree; build on them.\n")
@@ -167,9 +163,52 @@ func Implementer(in ImplementerInput) string {
 - Add or update tests that prove each acceptance criterion.
 - Work only inside this directory. Do not run git commit, push, reset, checkout, rebase or branch: mill commits your changes.
 - Do not change files outside the task's scope to make checks pass.
-- When you are done, give your final answer as the structured output: summary, files_changed, notes.
+`)
+	b.WriteString(processRules)
+	b.WriteString(`- When you are done, give your final answer as the structured output: summary, files_changed, notes.
 `)
 	return b.String()
+}
+
+// processRules are the rules on processes and scratch files shared by the implementer,
+// fixer and resolver prompts.
+const processRules = `- Wait only on processes you started yourself (your own background jobs). Never wait on, poll or kill machine-wide process patterns (pgrep, pkill, ps | grep): other agents share this machine.
+- Write scratch files under $TMPDIR, never in this directory.
+`
+
+// writeChecks writes the commands the agent runs before it finishes. With runsCheck it
+// lists check_cmd and the task's checks as the gate the agent must pass itself. Without it
+// the agent runs the task's checks and the tests of the packages it changed, and is told
+// that mill runs check_cmd in the gate, so it must not run it.
+func writeChecks(b *strings.Builder, checkCmd string, checks []string, runsCheck bool) {
+	checkCmd = strings.TrimSpace(checkCmd)
+	if runsCheck {
+		var cmds []string
+		for _, c := range append([]string{checkCmd}, checks...) {
+			if strings.TrimSpace(c) != "" {
+				cmds = append(cmds, c)
+			}
+		}
+		if len(cmds) > 0 {
+			b.WriteString("## Gate (must pass; run these yourself before you finish)\n")
+			for _, c := range cmds {
+				fmt.Fprintf(b, "- `%s`\n", c)
+			}
+			b.WriteString("\n")
+		}
+		return
+	}
+	b.WriteString("## Run these before you finish\n")
+	for _, c := range checks {
+		if strings.TrimSpace(c) != "" {
+			fmt.Fprintf(b, "- `%s`\n", c)
+		}
+	}
+	b.WriteString("- The tests of the packages you changed. For Go: `go build ./... && go vet ./...`, plus `go test` of those packages (with `-run` when the change is narrow enough).\n\n")
+	if checkCmd != "" {
+		b.WriteString("## check_cmd (mill runs it; do not run it yourself)\n")
+		fmt.Fprintf(b, "mill runs check_cmd (`%s`) in the gate after you finish and returns its failures to you as findings. Do not run check_cmd yourself.\n\n", checkCmd)
+	}
 }
 
 // MaxDiffBytes bounds the diff included in the verifier prompt.
