@@ -520,7 +520,7 @@ skipped.
 
 ### Follow-ups found while planning g10
 
-- [ ] The g10 plan is a strict chain although `keep-publishes-queue`'s code only needs the
+- [x] (done in `g22`: the planner prompt prefers parallel tasks and separate cross-feature test tasks; plan review warns when dependent tasks overlap only in test files.) The g10 plan is a strict chain although `keep-publishes-queue`'s code only needs the
       store API; it depends on `review-approve-queue` only because its end-to-end scenario test
       (a requirement from my goal text) approves tasks through the CLI. Putting that test in its
       own fourth task would have run the two middle tasks in parallel (about one task's time
@@ -719,11 +719,11 @@ More follow-ups found while landing M5:
 - [x] (done: goals end as `landed` once every task has landed.) **"done" hides unmerged work.** A goal whose tasks are all published shows `done`, and I
       reported M5 as landed while PR #39 was still open. `mill goal show` should say
       `published, not merged` until every task has landed.
-- [ ] **Branches planned against an old base.** Tasks running in parallel with merges started
+- [x] (done in `g22`: the verifier and `mill review show` list base changes to the task's files.) **Branches planned against an old base.** Tasks running in parallel with merges started
       from a base without the latest docs, so one added a second README "Hosts" section. Seen
       by hand, not by mill. When a task's owned files changed on the base branch since it
       started, mill should rebase it before the gate (or at least warn in the review).
-- [ ] **Clashes between verified branches are found by hand.** `herdr-robust` and
+- [x] (done in `g22`: `review approve --goal` runs the combined check before publishing.) **Clashes between verified branches are found by hand.** `herdr-robust` and
       `tui-herdr-e2e` each passed alone but together redeclared a test helper and disagreed on
       herdr's protocol. It happened again in `g13`: `short-locks-review-rebase` and
       `short-locks-sync-keep-clean`, built in parallel, both defined `assertNoClaims` in package
@@ -847,7 +847,7 @@ Not yet planned into a goal unless noted. Grouped by area; each names what was s
 
 ### Robustness of the graph
 
-- [ ] **Conflicts between dependencies at preparation block the task, with no resolver.** In
+- [x] (done in `g22`: they go to the resolver.) **Conflicts between dependencies at preparation block the task, with no resolver.** In
       `g13` the end-to-end task could not start because two dependencies collided; restack
       conflicts go to the resolver agent, preparation conflicts only block. Use the resolver
       there too (or at least offer it in the block message).
@@ -1339,3 +1339,22 @@ memories). Still open:
 - for M6, with the PR hooks: the fan-in publish rule makes wide graphs land in many rounds;
 - deferred: GT7 (rebuild state from git);
 - watching: "cannot lock ref" from overlapping re-publishes (not seen so far).
+
+## Open items from earlier goals: done (goal `g22` landed 2026-11-26, $4.93)
+
+Eleven tasks (PRs #160–#170), planned at $3.70–$12.38. A conflict between a task's dependencies
+at preparation now goes to the resolver agent (counted as an attempt) and blocks only when the
+resolver fails. The verifier prompt and `mill review show` list the files the task owns or
+changed that also changed on its base since it started, with the hint to rebase.
+`mill review approve --goal` runs the combined check over the verified branches before
+publishing; a clashing pair is held back, the rest are published, and nothing is published when
+the check cannot decide (`--no-combined` skips it). The planner prompt prefers parallel tasks
+and puts cross-feature tests in their own task; plan review warns when dependent tasks overlap
+only in test files. Two tasks needed a second attempt (a missing test, an imprecise README).
+
+### Found while reviewing `g22`
+
+- [ ] **22. A failure to compute base changes fails verification.** `baseChanges` in
+      `internal/pipeline/pipeline.go` returns the error of `FindBaseChanges`, so a missing base
+      record or base commit stops the verifier step. The list is advisory: log a warning and
+      verify without it.
