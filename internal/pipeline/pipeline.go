@@ -515,20 +515,56 @@ func (p *Pipeline) verify(ctx context.Context, t store.Task, v verifyStep, out O
 	return out, findings, false, nil
 }
 
-// recordSkippedTests appends a skipped_tests event listing the test skips the task added
-// between startSHA and head, when there are any. A detection failure is returned: the task
-// is not verified without the check.
+// SkippedTestsEvent is the kind of the event listing the test skips a task added.
+// OldSkippedTestsEvent is the kind earlier versions wrote; readers accept both.
+const (
+	SkippedTestsEvent    = "skipped-tests"
+	OldSkippedTestsEvent = "skipped_tests"
+)
+
+// recordSkippedTests appends a skipped-tests event listing the test skips the task added
+// between startSHA and head, when there are any. When there are none but an earlier attempt
+// recorded skips, it appends an empty event so readers stop showing the stale ones. A
+// detection failure is returned: the task is not verified without the check.
 func (p *Pipeline) recordSkippedTests(ctx context.Context, taskID string, n int, dir, startSHA, head string) error {
 	skips, err := skiptest.Added(ctx, dir, startSHA, head)
 	if err != nil {
 		return fmt.Errorf("%s: detect skipped tests: %w", taskID, err)
 	}
 	if len(skips) == 0 {
-		return nil
+		stale, err := p.hasRecordedSkips(ctx, taskID)
+		if err != nil || !stale {
+			return err
+		}
+		p.logf("%s a%d added no test skips: clearing the skips an earlier attempt recorded", taskID, n)
+		_, err = p.Store.AppendEvent(ctx, SkippedTestsEvent, "", taskID, map[string]any{"attempt": n, "head": head, "skips": []skiptest.Skip{}})
+		return err
 	}
 	p.logf("%s a%d added %d test skip(s)", taskID, n, len(skips))
-	_, err = p.Store.AppendEvent(ctx, "skipped_tests", "", taskID, map[string]any{"attempt": n, "head": head, "skips": skips})
+	_, err = p.Store.AppendEvent(ctx, SkippedTestsEvent, "", taskID, map[string]any{"attempt": n, "head": head, "skips": skips})
 	return err
+}
+
+// hasRecordedSkips reports whether the task's latest skipped-tests event (either kind) lists
+// any skips.
+func (p *Pipeline) hasRecordedSkips(ctx context.Context, taskID string) (bool, error) {
+	evs, err := p.Store.TaskEvents(ctx, taskID)
+	if err != nil {
+		return false, fmt.Errorf("%s: read skipped-tests events: %w", taskID, err)
+	}
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Kind != SkippedTestsEvent && evs[i].Kind != OldSkippedTestsEvent {
+			continue
+		}
+		var d struct {
+			Skips []skiptest.Skip `json:"skips"`
+		}
+		if err := json.Unmarshal(evs[i].Data, &d); err != nil {
+			return false, fmt.Errorf("%s: corrupt skipped-tests event %d: %w", taskID, evs[i].Seq, err)
+		}
+		return len(d.Skips) > 0, nil
+	}
+	return false, nil
 }
 
 // DefaultGateSlotPoll is how often a gate waiting for a slot checks again when

@@ -113,8 +113,9 @@ func (h *Herdr) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
 		return nil, err
 	}
 	hd := &herdrHandle{host: h, ctx: ctx, pane: pane, tab: tab, files: files, done: make(chan struct{}), watched: make(chan struct{})}
-	// The tab file lets crash recovery close a tab a killed mill left open.
-	if err := writeTabFile(files.tab, HerdrTab{Tab: tab, Workspace: h.Workspace}); err != nil {
+	// The tab file lets crash recovery close a tab a killed mill left open; the mill pid
+	// tells recovery whether the mill that started the worker is still running.
+	if err := writeTabFile(files.tab, HerdrTab{Tab: tab, Workspace: h.Workspace, MillPID: os.Getpid()}); err != nil {
 		return nil, errors.Join(err, hd.closeTab())
 	}
 
@@ -179,6 +180,9 @@ func parseTabCreate(out []byte) (pane, tab string, err error) {
 type HerdrTab struct {
 	Tab       string `json:"tab"`
 	Workspace string `json:"workspace"` // "" = herdr's default workspace
+	// MillPID is the pid of the mill process that started the worker; 0 = not recorded
+	// (tab files written before mill recorded it).
+	MillPID int `json:"mill_pid,omitempty"`
 	// Bin is the herdr binary CloseHerdrTab runs; "" resolves "herdr" on PATH. It is not
 	// recorded: the caller sets it the way it selects the herdr host.
 	Bin string `json:"-"`
@@ -186,7 +190,7 @@ type HerdrTab struct {
 	File string `json:"-"`
 }
 
-// writeTabFile records t in path as JSON {"tab": ..., "workspace": ...}.
+// writeTabFile records t in path as JSON {"tab": ..., "workspace": ..., "mill_pid": ...}.
 func writeTabFile(path string, t HerdrTab) error {
 	b, err := json.Marshal(t)
 	if err != nil {
