@@ -211,7 +211,7 @@ type streamParser struct {
 	onUsage func(budget.Usage)
 	seen    map[string]budget.Usage // usage reported so far per API message id
 	live    budget.Usage
-	final   *resultEvent
+	results []resultEvent // every result event, in stream order
 	badJSON int
 	model   string // model named by the system/init event
 
@@ -327,27 +327,47 @@ func (p *streamParser) line(b []byte) {
 			return
 		}
 		p.mu.Lock()
-		p.final = &r
+		p.results = append(p.results, r)
 		p.mu.Unlock()
 	}
 }
 
-// merged returns the usage so far: the result event's when present (authoritative, with the
+// final combines the result events, or returns nil when there is none. A run can emit several:
+// usage and duration cover one event each and are summed, while everything else, including the
+// cumulative total_cost_usd, is the last event's. Callers hold p.mu.
+func (p *streamParser) final() *resultEvent {
+	if len(p.results) == 0 {
+		return nil
+	}
+	f := p.results[len(p.results)-1]
+	f.Usage, f.DurationMS = usageJSON{}, 0
+	for _, r := range p.results {
+		f.Usage.InputTokens += r.Usage.InputTokens
+		f.Usage.OutputTokens += r.Usage.OutputTokens
+		f.Usage.CacheCreationTokens += r.Usage.CacheCreationTokens
+		f.Usage.CacheReadTokens += r.Usage.CacheReadTokens
+		f.DurationMS += r.DurationMS
+	}
+	return &f
+}
+
+// merged returns the usage so far: the result events' when present (authoritative, with the
 // cost), else the live assistant usage. Callers hold p.mu.
 func (p *streamParser) merged() budget.Usage {
-	if p.final == nil {
+	f := p.final()
+	if f == nil {
 		return p.live
 	}
-	final := p.final.Usage.usage()
-	u := maxUsage(final, p.live)
-	u.CostUSD = p.final.TotalCostUSD
+	u := maxUsage(f.Usage.usage(), p.live)
+	u.CostUSD = f.TotalCostUSD
 	return u
 }
 
 // UsageFromStream parses a claude stream-json file with the rules of the live parser and
-// returns the usage it records: assistant usage deduplicated per message id, replaced by the
-// result event's usage and cost when there is one. model is named by the system/init event;
-// finished reports whether a result event was seen. The cost is zero when !finished.
+// returns the usage it records: assistant usage deduplicated per message id, replaced when there
+// are result events by their summed usage and the last one's cost. model is named by the
+// system/init event; finished reports whether a result event was seen. The cost is zero when
+// !finished.
 func UsageFromStream(path string) (u budget.Usage, model string, finished bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -370,7 +390,7 @@ func UsageFromStream(path string) (u budget.Usage, model string, finished bool, 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.merged(), p.model, p.final != nil, nil
+	return p.merged(), p.model, len(p.results) > 0, nil
 }
 
 // result builds the Result after the process has exited.
@@ -381,23 +401,24 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	res := Result{Usage: p.live}
-	if p.final != nil {
-		// The result event's usage is authoritative (live output counts lag behind); report
+	last := p.final()
+	if last != nil {
+		// The result events' usage is authoritative (live output counts lag behind); report
 		// the difference, and the cost, which only arrives here.
-		final := p.final.Usage.usage()
-		final.CostUSD = p.final.TotalCostUSD
+		final := last.Usage.usage()
+		final.CostUSD = last.TotalCostUSD
 		if delta := positive(subtract(final, p.live)); delta != (budget.Usage{}) && p.onUsage != nil {
 			p.onUsage(delta)
 		}
 		res.Usage = p.merged()
-		if p.final.DurationMS > 0 {
-			res.Duration = time.Duration(p.final.DurationMS) * time.Millisecond
+		if last.DurationMS > 0 {
+			res.Duration = time.Duration(last.DurationMS) * time.Millisecond
 		}
-		if n := len(p.final.PermissionDenials); n > 0 {
+		if n := len(last.PermissionDenials); n > 0 {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%d tool call(s) denied by permission rules", n))
 		}
 	}
-	if p.final == nil && res.Usage != (budget.Usage{}) {
+	if last == nil && res.Usage != (budget.Usage{}) {
 		model := p.model
 		if model == "" {
 			model = reqModel
@@ -419,18 +440,18 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 	switch {
 	// A result event means claude finished: honour it even if ctx was cancelled afterwards
 	// (e.g. the final usage correction crossed a limit after the work was done).
-	case p.final == nil && ctx.Err() != nil:
+	case last == nil && ctx.Err() != nil:
 		res.Status, res.Error = StatusCancelled, ctx.Err().Error()
-	case p.final == nil:
+	case last == nil:
 		res.Status = StatusError
 		res.Error = fmt.Sprintf("claude exited (code %d) without a result", ex.Code)
 		if stderrTail != "" {
 			res.Error += ": " + stderrTail
 		}
-	case strings.Contains(p.final.Subtype, "budget"):
+	case strings.Contains(last.Subtype, "budget"):
 		res.Status = StatusBudgetExceeded
-		res.Error = "claude stopped at --max-budget-usd (" + p.final.Subtype + ")"
-	case p.final.APIErrorStatus == 429 && p.final.IsError, p.rejected != nil && (p.final.IsError || p.final.Subtype != "success"):
+		res.Error = "claude stopped at --max-budget-usd (" + last.Subtype + ")"
+	case last.APIErrorStatus == 429 && last.IsError, p.rejected != nil && (last.IsError || last.Subtype != "success"):
 		res.Status = StatusRateLimited
 		res.Error = "claude usage limit reached"
 		if p.rejected != nil {
@@ -442,16 +463,16 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 				res.Error += ", resets at " + res.ResetsAt.Local().Format(localTimeFormat)
 			}
 		}
-	case p.final.IsError || p.final.Subtype != "success":
+	case last.IsError || last.Subtype != "success":
 		res.Status = StatusError
-		res.Error = strings.TrimSpace(fmt.Sprintf("claude %s: %s %s", p.final.Subtype,
-			strings.Join(p.final.Errors, "; "), p.final.Result))
+		res.Error = strings.TrimSpace(fmt.Sprintf("claude %s: %s %s", last.Subtype,
+			strings.Join(last.Errors, "; "), last.Result))
 	default:
-		out := p.final.StructuredOutput
+		out := last.StructuredOutput
 		if len(out) == 0 || string(out) == "null" {
 			// No schema output: accept the final text if it is JSON.
-			if json.Valid([]byte(strings.TrimSpace(p.final.Result))) {
-				out = json.RawMessage(strings.TrimSpace(p.final.Result))
+			if json.Valid([]byte(strings.TrimSpace(last.Result))) {
+				out = json.RawMessage(strings.TrimSpace(last.Result))
 			}
 		}
 		if len(out) == 0 {

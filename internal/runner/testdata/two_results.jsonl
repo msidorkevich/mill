@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","model":"claude-sonnet-5-5"}
+{"type":"assistant","message":{"id":"msg_1","content":[{"type":"text","text":"working"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":1000,"cache_read_input_tokens":4000,"output_tokens":20}}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"structured_output":{"word":"first"},"duration_ms":60000,"total_cost_usd":0.03,"usage":{"input_tokens":10,"cache_creation_input_tokens":1000,"cache_read_input_tokens":4000,"output_tokens":300},"permission_denials":[{"tool_name":"Bash"}]}
+{"type":"assistant","message":{"id":"msg_2","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":7,"cache_creation_input_tokens":300,"cache_read_input_tokens":5000,"output_tokens":15}}}
+{"type":"result","subtype":"success","is_error":false,"structured_output":{"word":"second"},"duration_ms":40000,"total_cost_usd":0.05,"usage":{"input_tokens":7,"cache_creation_input_tokens":300,"cache_read_input_tokens":5000,"output_tokens":200},"permission_denials":[]}

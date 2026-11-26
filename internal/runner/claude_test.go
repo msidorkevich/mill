@@ -425,6 +425,51 @@ func TestClaudeReportedCostIsNotEstimated(t *testing.T) {
 	}
 }
 
+// twoResults reads a stream with two result events: an error one, then a successful one.
+func twoResults(t *testing.T) []string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", "two_results.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(b)), "\n")
+}
+
+func TestClaudeTwoResultEventsSumUsageAndDuration(t *testing.T) {
+	t.Parallel()
+	bin, _, _ := fakeClaude(t, twoResults(t), "")
+	req := baseReq(t)
+	var reported budget.Usage
+	req.OnUsage = func(u budget.Usage) { reported = reported.Add(u) }
+	res, err := newClaude(bin).Run(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := budget.Usage{InputTokens: 17, OutputTokens: 500, CacheWriteTokens: 1300, CacheReadTokens: 9000, CostUSD: 0.05}
+	if res.Usage != want || reported != want {
+		t.Fatalf("usage = %+v, reported = %+v, want %+v", res.Usage, reported, want)
+	}
+	if res.Duration != 100*time.Second {
+		t.Fatalf("duration = %v, want 100s", res.Duration)
+	}
+	// Status, output and denials are the last event's: the first one failed with a denial.
+	if res.Status != StatusOK || string(res.Output) != `{"word":"second"}` || res.Error != "" || len(res.Warnings) != 0 {
+		t.Fatalf("result = %+v, want the last event's outcome", res)
+	}
+}
+
+func TestUsageFromStreamSumsEveryResultEvent(t *testing.T) {
+	t.Parallel()
+	u, _, finished, err := UsageFromStream(writeStream(t, twoResults(t)...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := budget.Usage{InputTokens: 17, OutputTokens: 500, CacheWriteTokens: 1300, CacheReadTokens: 9000, CostUSD: 0.05}
+	if !finished || u != want {
+		t.Fatalf("usage = %+v, finished = %v, want %+v", u, finished, want)
+	}
+}
+
 func writeStream(t *testing.T, lines ...string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "implementer.stream.jsonl")
