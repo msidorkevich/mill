@@ -116,6 +116,23 @@ agent, and delivers each task as its own branch for a human to review and merge 
   `--json-schema` works with stream-json.
 - **RN4.** Later: a `codex` runner, e.g. so the verifier uses a different provider than the
   implementer.
+- **RN5.** An `opencode` runner, so any provider opencode supports can implement or verify:
+  - `opencode run --format json --model <provider/model>`; mill reads the JSON events as they
+    arrive for tokens and cost, so the token limit (BG1) works as with claude.
+  - opencode has no JSON-schema flag: the prompt carries the schema, mill extracts the final
+    answer's JSON and validates it; an invalid answer fails the run with the validation error.
+  - No budget flag either: mill enforces the USD and token limits itself from the live usage and
+    kills the worker. When the events carry no cost, it is estimated from token prices
+    (`[prices]`) and marked as estimated.
+  - Role permissions (SE1) become an opencode config (`permission` rules for edit, bash,
+    webfetch) written to the attempt's run directory and passed through `OPENCODE_CONFIG`,
+    never into the worktree. A run never waits for approval: a request the rules don't allow is
+    denied and reported as a warning.
+  - The runner is chosen per role (`[runner] kind` plus per-role overrides), and model names and
+    tiers are per runner (e.g. `anthropic/claude-sonnet-5-5`, `openai/…`).
+  - Provider usage limits are reported as `rate_limited` when the events identify them,
+    otherwise as errors. `mill doctor` checks the opencode version (the event format changes
+    between versions) and that the configured models exist (`opencode models`).
 
 ### Hosts (HO)
 
@@ -126,6 +143,45 @@ agent, and delivers each task as its own branch for a human to review and merge 
   Selected by `--host auto|exec|herdr`; `auto` picks herdr only when it's installed and mill
   runs inside a herdr pane.
 - **HO4.** The system is fully functional without herdr.
+
+### Project toolchains (TC)
+
+- **TC1.** Language-specific behaviour lives in toolchain adapters in code: `go` (today's
+  behaviour) and `gradle` (Java/Kotlin with Gradle). The toolchain is detected from build files
+  (`go.mod`; `settings.gradle(.kts)`, `build.gradle(.kts)`, `gradlew`) and can be set with
+  `toolchain = "go" | "gradle" | "none"` in `.mill/config.toml`. An adapter supplies:
+  - the suggested `check_cmd` for `mill init`;
+  - the planner's guidance for narrow task checks, and the plan validation that warns about a
+    task check repeating the whole gate (PL3);
+  - failing-test parsing for gate triage (TP8);
+  - detection of skipped tests added by a task;
+  - `mill doctor` checks.
+  With `none`, or a command the adapter cannot parse, mill keeps the whole-command behaviour.
+- **TC2.** Gradle gate and checks:
+  - `check_cmd` defaults to `./gradlew check` (the wrapper is required; doctor checks that
+    `./gradlew --version` runs and shows the Java it uses).
+  - Narrow task checks are `./gradlew :<module>:test --tests '<pkg.Class>'`; a Gradle test task
+    without `--tests` is warned about when `check_cmd` already runs every test.
+  - Triage reads the JUnit XML reports (`**/build/test-results/**/TEST-*.xml`, every module),
+    taking failed and errored test cases as `Class.method`. Reports older than the gate run are
+    ignored. A failure with no reports (e.g. `:app:compileJava`) is a build failure named by the
+    failing Gradle task, from the `FAILURE: Build failed` block.
+  - Added skipped tests are `@Disabled` and `@Ignore` annotations and `Assumptions.assume*` /
+    `Assume.assume*` calls added under `src/test/`.
+- **TC3.** Gradle in worktrees:
+  - build outputs (`build/`, `.gradle/`) stay in each worktree and are ignored by the owns check,
+    gate fingerprints and the unchanged-worktree check;
+  - the Gradle user home (`~/.gradle`, or `GRADLE_USER_HOME`) is shared, so dependencies are not
+    downloaded per worktree; the worker environment allowlist (SE3) passes `JAVA_HOME` and
+    `GRADLE_USER_HOME`;
+  - daemons are allowed but gates set a short daemon idle timeout, so daemons started for
+    worktrees exit on their own; mill never runs `./gradlew --stop`, which would also stop the
+    operator's daemons;
+  - role settings allow `./gradlew` for the implementer and verifier.
+- **TC4.** Tests cost nothing here too (P8): adapters are tested with recorded Gradle output and
+  XML reports, no Gradle and no network. One end-to-end test on a tiny Gradle project runs only
+  when Gradle and its dependencies are available offline, and is skipped with the reason
+  otherwise.
 
 ### Git and branches (GT)
 
@@ -196,7 +252,12 @@ agent, and delivers each task as its own branch for a human to review and merge 
 - **HK2.** Hooks receive JSON on stdin: task, branch, base, head sha, title, description,
   verifier report.
 - **HK3.** A missing hook is skipped. A failing hook is reported but never changes task state.
-- **HK4.** Example GitHub and GitLab hooks ship *outside* the core.
+- **HK4.** Example GitHub and Bitbucket hooks ship *outside* the core.
+  - GitHub: `gh pr create --draft`, base = the task's base branch.
+  - Bitbucket Cloud: REST API 2.0 pull requests (`curl` + `jq`), destination = the task's base
+    branch, draft when the workspace supports it; credentials (an API token) come from the
+    environment, never from `.mill/config.toml`. `status` reads Bitbucket Pipelines build
+    statuses for the head sha.
 
 ### Budgets (BG)
 
@@ -251,7 +312,8 @@ agent, and delivers each task as its own branch for a human to review and merge 
 
 ### Security and permissions (SE)
 
-- **SE1.** A settings file per role:
+- **SE1.** Permissions per role, in each runner's own format (a claude settings file, an opencode
+  config):
   - the verifier gets no Edit or Write;
   - no role gets `git push` (only mill pushes);
   - no role gets access to `.mill/`.
