@@ -31,7 +31,10 @@ type Config struct {
 	// MaxParallelGates bounds the gates running at the same time across every mill
 	// process on the repository.
 	MaxParallelGates int `toml:"max_parallel_gates"`
-	MaxAttempts      int `toml:"max_attempts"`
+	// MaxInFlight caps the tasks started and not yet finished, whether they run an agent or
+	// sit in a gate; unset means MaxParallel + MaxParallelGates. It must be >= MaxParallel.
+	MaxInFlight int `toml:"max_in_flight"`
+	MaxAttempts int `toml:"max_attempts"`
 	// OwnsPolicy says what happens to changes outside a task's owns: "warn", "enforce" or "off".
 	OwnsPolicy      string `toml:"owns_policy"`
 	StartChildrenOn string `toml:"start_children_on"`
@@ -155,6 +158,7 @@ func Default() Config {
 		Remote:               "origin",
 		MaxParallel:          2,
 		MaxParallelGates:     1,
+		MaxInFlight:          3,
 		MaxAttempts:          3,
 		OwnsPolicy:           "warn",
 		StartChildrenOn:      "verified",
@@ -210,8 +214,9 @@ check_cmd = ""
 
 base_branch = "main"
 remote = "origin"
-max_parallel = 2          # tasks running at the same time
+max_parallel = 2          # tasks running an agent at the same time
 max_parallel_gates = 1    # gates running at the same time, across all mill processes
+# max_in_flight = 3       # tasks started and not finished (agents and gates); default max_parallel + max_parallel_gates
 max_attempts = 3          # implement attempts per task before it is blocked
 start_children_on = "verified"   # or "published"
 owns_policy = "warn"      # changes outside a task's owns: "warn" (verifier must justify them), "enforce" (finding, no gate) or "off"
@@ -325,6 +330,9 @@ func Parse(text string) (Config, error) {
 	if !md.IsDefined("budget", "size") {
 		cfg.Budget.Size = def.Budget.Size
 	}
+	if !md.IsDefined("max_in_flight") {
+		cfg.MaxInFlight = cfg.MaxParallel + cfg.MaxParallelGates
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -347,6 +355,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxParallelGates < 1 {
 		add("max_parallel_gates must be >= 1, got %d", c.MaxParallelGates)
+	}
+	if c.MaxInFlight < c.MaxParallel {
+		add("max_in_flight must be >= max_parallel (%d), got %d; raise it or remove it to use max_parallel + max_parallel_gates", c.MaxParallel, c.MaxInFlight)
 	}
 	if c.MaxAttempts < 1 {
 		add("max_attempts must be >= 1, got %d", c.MaxAttempts)

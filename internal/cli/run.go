@@ -77,9 +77,10 @@ func runRun(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	// Agents run up to max_parallel at once; their gates take turns in max_parallel_gates slots.
+	// Agents run up to max_parallel at once; their gates take turns in max_parallel_gates slots
+	// and hold no agent slot. At most max_in_flight tasks are started and unfinished.
 	p.MaxParallelGates = cfg.MaxParallelGates
-	sch := &scheduler.Scheduler{Store: s, MaxParallel: cfg.MaxParallel, RunTask: p.Run, Out: out}
+	sch := &scheduler.Scheduler{Store: s, MaxParallel: cfg.MaxParallel, MaxInFlight: cfg.MaxInFlight, RunTask: p.Run, Out: out}
 	res, err := sch.Run(ctx, scheduler.RunOptions{
 		Options:      scheduler.Options{RetryBlocked: *retry, WaitOnLimit: *waitLimit},
 		Goal:         id,

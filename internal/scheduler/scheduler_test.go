@@ -231,10 +231,14 @@ func TestDependenciesRunBeforeDependents(t *testing.T) {
 	if gl, _ := s.GetGoal(context.Background(), g); gl.Status != store.GoalDone {
 		t.Fatalf("goal = %+v", gl)
 	}
-	for _, want := range []string{a + ": started", a + ": verified", c + ": verified", "goal " + g + ": done"} {
+	for _, want := range []string{a + ": started", c + ": started", "goal " + g + ": done"} {
 		if !strings.Contains(out.String(), want+"\n") {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
+	}
+	// The pipeline logs "<task>: verified at <sha> (...)"; the scheduler adds no second line.
+	if strings.Contains(out.String(), ": verified") {
+		t.Errorf("the scheduler logged a verified line:\n%s", out.String())
 	}
 }
 

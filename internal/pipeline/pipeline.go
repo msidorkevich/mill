@@ -80,6 +80,36 @@ type Outcome struct {
 	ResetsAt time.Time `json:"resets_at,omitempty"`
 }
 
+// AgentSlot is a task's hold on one of the scheduler's agent slots (max_parallel). A task
+// starts holding it; the pipeline releases it while the task waits for and runs its gate and
+// acquires it again before the next agent phase. Acquire waits for a free slot or for ctx to
+// end; both calls do nothing when the slot is already in that state.
+type AgentSlot interface {
+	Acquire(ctx context.Context) error
+	Release()
+}
+
+type agentSlotKey struct{}
+
+// WithAgentSlot returns ctx carrying the task's agent slot for Run.
+func WithAgentSlot(ctx context.Context, slot AgentSlot) context.Context {
+	return context.WithValue(ctx, agentSlotKey{}, slot)
+}
+
+// noSlot is the agent slot of a run without a scheduler: agents are not limited.
+type noSlot struct{}
+
+func (noSlot) Acquire(context.Context) error { return nil }
+func (noSlot) Release()                      {}
+
+// AgentSlotFrom returns the agent slot ctx carries; without one, a slot that never waits.
+func AgentSlotFrom(ctx context.Context) AgentSlot {
+	if s, ok := ctx.Value(agentSlotKey{}).(AgentSlot); ok {
+		return s
+	}
+	return noSlot{}
+}
+
 // BranchName is the git branch for a task: mill/<goal>/<task> for a goal's task,
 // mill/t/<id> for a single task.
 func BranchName(taskID string) string {
@@ -175,9 +205,18 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		findings = verFindings
 	}
 
+	slot := AgentSlotFrom(ctx)
 	for n := prev + 1; n <= prev+p.Cfg.MaxAttempts; n++ {
 		out.Attempts++
 		logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
+
+		// An attempt after a failed gate waits for an agent slot.
+		if err := slot.Acquire(ctx); err != nil {
+			if ctx.Err() != nil {
+				return p.block(ctx, t.ID, store.PhaseImplement, "interrupted", out, nil)
+			}
+			return out, fmt.Errorf("wait for an agent slot for attempt %d: %w", n, err)
+		}
 
 		// implement
 		if blocked, reason, err := p.checkBudgets(ctx, t, stepImplement); err != nil || blocked {
@@ -289,6 +328,8 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			Env: p.env(nil), Timeout: p.Cfg.GateTimeout.Duration, Nice: p.Cfg.GateNice,
 			Label: fmt.Sprintf("%s a%d gate", t.ID, n),
 		}
+		// The gate runs no agent: its agent slot is free for another task meanwhile.
+		slot.Release()
 		gr, err := p.gateInSlot(ctx, t, n, startSHA, br.HeadSHA, gopts)
 		if err != nil {
 			return out, err
@@ -334,6 +375,12 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 
 		// verify
+		if err := slot.Acquire(ctx); err != nil {
+			if ctx.Err() != nil {
+				return p.block(ctx, t.ID, store.PhaseVerify, "interrupted", out, nil)
+			}
+			return out, fmt.Errorf("wait for an agent slot for the verifier of attempt %d: %w", n, err)
+		}
 		var done bool
 		out, findings, done, err = p.verify(ctx, t, verifyStep{
 			n: n, br: br, startSHA: startSHA, logDir: logDir, gate: g, outside: outside, flaky: flaky,

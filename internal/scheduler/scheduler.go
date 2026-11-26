@@ -34,8 +34,13 @@ const (
 
 // Scheduler runs the tasks of goals and single tasks.
 type Scheduler struct {
-	Store       *store.Store
+	Store *store.Store
+	// MaxParallel bounds the tasks running an agent at the same time. A task in its gate (or
+	// waiting for a gate slot) holds no agent slot; the pipeline waits for one again before
+	// its next agent phase.
 	MaxParallel int
+	// MaxInFlight bounds the tasks started and not yet finished; zero means MaxParallel.
+	MaxInFlight int
 	// Claimer claims each task before it starts; defaults to store.NewClaimer("run").
 	Claimer store.Claimer
 	// RunTask runs one task to its end and writes its status to the store.
@@ -79,6 +84,103 @@ func (s *Scheduler) logf(format string, a ...any) {
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
 	io.WriteString(s.Out, line)
+}
+
+// agentSlots are the run's max_parallel agent slots. A task that returns from its gate and
+// waits for a slot goes before a new start.
+type agentSlots struct {
+	mu      sync.Mutex
+	max     int
+	held    int
+	waiting int
+	free    chan struct{} // closed and replaced on every release
+	wake    chan struct{} // tells the run loop a slot was released; holds at most one signal
+}
+
+func newAgentSlots(n int) *agentSlots {
+	return &agentSlots{max: n, free: make(chan struct{}), wake: make(chan struct{}, 1)}
+}
+
+// tryTake takes a slot for a new task when one is free and no running task waits for one.
+func (a *agentSlots) tryTake() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.held >= a.max || a.waiting > 0 {
+		return false
+	}
+	a.held++
+	return true
+}
+
+// take waits for a free slot or for ctx to end.
+func (a *agentSlots) take(ctx context.Context) error {
+	a.mu.Lock()
+	a.waiting++
+	for a.held >= a.max {
+		free := a.free
+		a.mu.Unlock()
+		select {
+		case <-free:
+		case <-ctx.Done():
+			a.mu.Lock()
+			a.waiting--
+			a.mu.Unlock()
+			return ctx.Err()
+		}
+		a.mu.Lock()
+	}
+	a.waiting--
+	a.held++
+	a.mu.Unlock()
+	return nil
+}
+
+// release gives a slot back and tells the run loop it can start another task.
+func (a *agentSlots) release() {
+	a.untake()
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
+}
+
+// untake gives back a slot that poll took for a task it then could not start. It wakes a
+// task waiting for the slot but not the run loop, which would only poll again at once.
+func (a *agentSlots) untake() {
+	a.mu.Lock()
+	a.held--
+	close(a.free)
+	a.free = make(chan struct{})
+	a.mu.Unlock()
+}
+
+// taskSlot is one running task's pipeline.AgentSlot.
+type taskSlot struct {
+	slots *agentSlots
+	mu    sync.Mutex
+	held  bool
+}
+
+func (t *taskSlot) Acquire(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.held {
+		return nil
+	}
+	if err := t.slots.take(ctx); err != nil {
+		return err
+	}
+	t.held = true
+	return nil
+}
+
+func (t *taskSlot) Release() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.held {
+		t.held = false
+		t.slots.release()
+	}
 }
 
 type finished struct {
@@ -176,6 +278,7 @@ type runState struct {
 	marked  map[string]bool // goals set running by this run since they were last ended
 	singles []string        // single tasks started, in start order
 	busy    map[string]bool // busy tasks already logged
+	slots   *agentSlots
 }
 
 func (st *runState) take(goalID string) {
@@ -201,6 +304,9 @@ func (s *Scheduler) Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	if s.MaxParallel < 1 {
 		return RunResult{}, fmt.Errorf("max_parallel must be >= 1, got %d", s.MaxParallel)
 	}
+	if s.MaxInFlight != 0 && s.MaxInFlight < s.MaxParallel {
+		return RunResult{}, fmt.Errorf("max_in_flight must be >= max_parallel (%d), got %d", s.MaxParallel, s.MaxInFlight)
+	}
 	if o.PollInterval <= 0 {
 		o.PollInterval = DefaultPollInterval
 	}
@@ -208,7 +314,7 @@ func (s *Scheduler) Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	bg := context.WithoutCancel(ctx)
 	st := &runState{o: o, claimer: s.Claimer, running: map[string]store.Task{}, started: map[string]bool{},
 		done: make(chan finished), open: map[string]bool{}, results: map[string]Result{},
-		marked: map[string]bool{}, busy: map[string]bool{}}
+		marked: map[string]bool{}, busy: map[string]bool{}, slots: newAgentSlots(s.MaxParallel)}
 	if st.claimer.Owner == "" {
 		st.claimer = store.NewClaimer("run")
 	}
@@ -302,10 +408,11 @@ func (s *Scheduler) Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			continue
 		}
 		var f finished
-		if loopErr == nil && ctx.Err() == nil && len(st.limit.ids) == 0 && len(st.running) < s.MaxParallel {
-			// There is room: new work found by the next poll could start before a task ends.
+		if loopErr == nil && ctx.Err() == nil && len(st.limit.ids) == 0 && len(st.running) < s.maxInFlight() {
+			// There is room: new work found by the next poll could start before a task ends, or
+			// once a task enters its gate and frees an agent slot.
 			var ok bool
-			if f, ok = s.waitOrPoll(ctx, st.done, o.PollInterval); !ok {
+			if f, ok = s.waitOrPoll(ctx, st.done, st.slots.wake, o.PollInterval); !ok {
 				continue
 			}
 		} else {
@@ -381,9 +488,16 @@ func (s *Scheduler) checkGoal(ctx context.Context, goalID string) error {
 	return nil
 }
 
-// waitOrPoll waits for a task to finish or for the poll interval, whichever comes first. ok
-// is false when the interval passed (or ctx ended) first.
-func (s *Scheduler) waitOrPoll(ctx context.Context, done <-chan finished, d time.Duration) (finished, bool) {
+func (s *Scheduler) maxInFlight() int {
+	if s.MaxInFlight > 0 {
+		return s.MaxInFlight
+	}
+	return s.MaxParallel
+}
+
+// waitOrPoll waits for a task to finish, an agent slot to be released or the poll interval,
+// whichever comes first. ok is false when no task finished first.
+func (s *Scheduler) waitOrPoll(ctx context.Context, done <-chan finished, wake <-chan struct{}, d time.Duration) (finished, bool) {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tick := make(chan struct{})
@@ -396,6 +510,10 @@ func (s *Scheduler) waitOrPoll(ctx context.Context, done <-chan finished, d time
 		cancel()
 		<-tick // Sleep is never called twice at once
 		return f, true
+	case <-wake:
+		cancel()
+		<-tick
+		return finished{}, false
 	case <-tick:
 		return finished{}, false
 	}
@@ -416,6 +534,8 @@ func (s *Scheduler) finish(bg context.Context, st *runState, f finished) error {
 	}
 	if t, terr := s.Store.GetTask(bg, f.id); terr != nil {
 		err = errors.Join(err, terr)
+	} else if t.Status == store.TaskVerified && f.err == nil {
+		// The pipeline already logged "<task>: verified at <sha> (...)".
 	} else if t.Reason != "" {
 		s.logf("%s: %s: %s", t.ID, t.Status, t.Reason)
 	} else {
@@ -424,9 +544,9 @@ func (s *Scheduler) finish(bg context.Context, st *runState, f finished) error {
 	return err
 }
 
-// poll reads the store and starts ready tasks in order while there is room. waiting reports
-// whether a ready task could not start yet: no room, its owns overlap a running task, or it is
-// busy elsewhere.
+// poll reads the store and starts ready tasks in order while there is room: fewer than
+// max_in_flight started and a free agent slot. waiting reports whether a ready task could not
+// start yet: no room, its owns overlap a running task, or it is busy elsewhere.
 func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, err error) {
 	sch, err := s.Store.ScheduleCandidates(bg)
 	if err != nil {
@@ -465,11 +585,13 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 		if !ready {
 			continue
 		}
-		if len(st.running) >= s.MaxParallel || overlapsRunning(t, st.running) {
+		if len(st.running) >= s.maxInFlight() || overlapsRunning(t, st.running) || !st.slots.tryTake() {
 			waiting = true
 			continue
 		}
+		slot := &taskSlot{slots: st.slots, held: true}
 		if err := s.Store.ClaimTasks(bg, st.claimer, []string{t.ID}); err != nil {
+			st.slots.untake()
 			var busy *store.BusyError
 			if !errors.As(err, &busy) {
 				return waiting, err
@@ -487,6 +609,7 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 			if !st.marked[t.GoalID] {
 				if goalStatus[t.GoalID] != store.GoalRunning {
 					if err := s.Store.SetGoalStatus(bg, t.GoalID, store.GoalRunning, ""); err != nil {
+						st.slots.untake()
 						return waiting, errors.Join(err, s.Store.ReleaseClaims(bg, st.claimer, []string{t.ID}))
 					}
 				}
@@ -499,7 +622,8 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 		st.started[t.ID] = true
 		s.logf("%s: started", t.ID)
 		go func(id string) {
-			out, err := s.RunTask(ctx, id)
+			out, err := s.RunTask(pipeline.WithAgentSlot(ctx, slot), id)
+			slot.Release()
 			st.done <- finished{id, out, err}
 		}(t.ID)
 	}
