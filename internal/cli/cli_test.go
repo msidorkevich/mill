@@ -93,7 +93,7 @@ func tools(have map[string]string) *doctor.Options {
 	}
 }
 
-var machine = map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)"}
+var machine = map[string]string{"git": "git version 2.50.1", "claude": "2.1.0 (Claude Code)", "nice": ""}
 
 func TestUsageAndUnknownCommand(t *testing.T) {
 	t.Parallel()

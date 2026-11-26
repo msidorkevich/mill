@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,7 @@ type Options struct {
 	LogDir  string        // gate-<i>.log files are written here; never overwritten
 	Env     []string      // complete environment for the commands
 	Timeout time.Duration // per command
+	Nice    int           // > 0 runs each command under `nice -n Nice`; 0 runs it unchanged
 }
 
 // TailLines and TailBytes bound how much output is kept for findings.
@@ -91,10 +93,14 @@ func runOne(ctx context.Context, o Options, i int, cmd string) CmdResult {
 	cr := CmdResult{Cmd: cmd, Exit: -1, LogPath: uniqueLog(o.LogDir, i)}
 	cctx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
+	// Merge stderr into stdout so the log reads in order.
+	argv := []string{"/bin/sh", "-c", "exec 2>&1\n" + cmd}
+	if o.Nice > 0 {
+		argv = append([]string{"nice", "-n", strconv.Itoa(o.Nice)}, argv...)
+	}
 	h, err := o.Host.Start(cctx, host.ProcSpec{
-		Name: fmt.Sprintf("gate %d", i),
-		// Merge stderr into stdout so the log reads in order.
-		Argv:       []string{"/bin/sh", "-c", "exec 2>&1\n" + cmd},
+		Name:       fmt.Sprintf("gate %d", i),
+		Argv:       argv,
 		Dir:        o.Dir,
 		Env:        o.Env,
 		StdoutPath: cr.LogPath,

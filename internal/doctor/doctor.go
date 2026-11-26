@@ -190,6 +190,17 @@ func Run(ctx context.Context, opts Options) Report {
 		add("host", OK, "%s", desc)
 	}
 
+	// gate_nice
+	if !cfgOK {
+		add("gate_nice", Skip, "needs a valid config")
+	} else if cfg.GateNice <= 0 {
+		add("gate_nice", OK, "gate_nice = %d: gate commands run without nice", cfg.GateNice)
+	} else if p, err := opts.LookPath("nice"); err != nil {
+		add("gate_nice", Fail, "gate_nice = %d but `nice` is not on PATH: install it or set gate_nice = 0 in .mill/config.toml", cfg.GateNice)
+	} else {
+		add("gate_nice", OK, "gate_nice = %d: gate commands run under %s -n %d", cfg.GateNice, p, cfg.GateNice)
+	}
+
 	// gitignore
 	if !initOK {
 		add("gitignore", Skip, "needs mill init")

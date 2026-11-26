@@ -117,3 +117,57 @@ func TestTailIsBounded(t *testing.T) {
 		t.Fatalf("tail has %d lines, last %q", len(lines), lines[len(lines)-1])
 	}
 }
+
+// niceness runs a gate that prints its own niceness and returns it.
+func niceness(t *testing.T, nice int) int {
+	t.Helper()
+	o := opts(t, "ps -o nice= -p $$")
+	o.Nice = nice
+	r := Run(context.Background(), o)
+	if !r.Passed {
+		t.Fatalf("gate with Nice=%d failed: %+v", nice, r)
+	}
+	var n int
+	if _, err := fmt.Sscan(strings.TrimSpace(r.Commands[0].Tail), &n); err != nil {
+		t.Fatalf("parse niceness from %q: %v", r.Commands[0].Tail, err)
+	}
+	return n
+}
+
+func TestNiceRunsCommandUnderNice(t *testing.T) {
+	t.Parallel()
+	base := niceness(t, 0)
+	if base > 14 {
+		t.Skipf("test process already at niceness %d; cannot observe +5", base)
+	}
+	if got := niceness(t, 5); got != base+5 {
+		t.Fatalf("niceness with Nice=5 = %d, want %d (base %d + 5)", got, base+5, base)
+	}
+}
+
+func TestNiceZeroRunsCommandUnchanged(t *testing.T) {
+	t.Parallel()
+	o := opts(t, "echo $0")
+	r := Run(context.Background(), o)
+	if !r.Passed || r.Commands[0].Tail != "/bin/sh" {
+		t.Fatalf("Nice=0 gate = %+v, want /bin/sh run directly", r)
+	}
+	if got, want := niceness(t, 0), parentNice(t); got != want {
+		t.Fatalf("niceness with Nice=0 = %d, want the test process's %d", got, want)
+	}
+}
+
+// parentNice returns the test process's niceness, read the same way the gate reads its own.
+func parentNice(t *testing.T) int {
+	t.Helper()
+	o := opts(t, fmt.Sprintf("ps -o nice= -p %d", os.Getpid()))
+	r := Run(context.Background(), o)
+	if !r.Passed {
+		t.Fatalf("read test niceness: %+v", r)
+	}
+	var n int
+	if _, err := fmt.Sscan(strings.TrimSpace(r.Commands[0].Tail), &n); err != nil {
+		t.Fatalf("parse niceness from %q: %v", r.Commands[0].Tail, err)
+	}
+	return n
+}
