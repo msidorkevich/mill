@@ -48,6 +48,7 @@ type Options struct {
 	Host     host.Host // runs the gate; nil means host.NewExec()
 	Pipeline *pipeline.Pipeline
 	Goal     string    // only this goal's tasks; empty means every goal
+	Tasks    []string  // only these tasks (full ids); empty means every ready task
 	Out      io.Writer // one progress line per action; nil discards
 	Force    bool      // run the combined check even when nothing changed since the last one
 	// Claimer claims each task before the pass changes it; the zero value means

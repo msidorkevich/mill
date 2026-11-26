@@ -454,7 +454,7 @@ func worktreeListed(ctx context.Context, repo, dir string) (bool, error) {
 }
 
 // readyBranches lists the verified and published tasks whose gate ran at their head, ordered
-// by goal and then by plan order.
+// by goal and then by plan order. A non-empty o.Tasks leaves out every other task.
 func readyBranches(ctx context.Context, o Options) ([]readyBranch, error) {
 	var goals []store.Goal
 	if o.Goal != "" {
@@ -493,6 +493,9 @@ func readyBranches(ctx context.Context, o Options) ([]readyBranch, error) {
 		for _, l := range locals {
 			t, ok := byID[store.TaskID(g.ID, l)]
 			if !ok || (t.Status != store.TaskVerified && t.Status != store.TaskPublished) {
+				continue
+			}
+			if len(o.Tasks) > 0 && !slices.Contains(o.Tasks, t.ID) {
 				continue
 			}
 			br, err := o.Store.GetBranch(ctx, t.ID)
