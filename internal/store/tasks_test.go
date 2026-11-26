@@ -865,3 +865,91 @@ func TestTaskBlockedByOlderRestackConflictCountsAsRestackBlocked(t *testing.T) {
 		}
 	}
 }
+
+func TestFinishAttemptStoresAgentDuration(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "mill.db"))
+	if err := s.CreateTask(ctx, spec("t1")); err != nil {
+		t.Fatal(err)
+	}
+	withAgent, err := s.StartAttempt(ctx, "t1", 1, "implementer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishAttempt(ctx, withAgent, "ok", budget.Usage{}, false, "", "", 83250*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	without, err := s.StartAttempt(ctx, "t1", 1, "verifier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishAttempt(ctx, without, "ok", budget.Usage{}, false, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var stored *int64
+	if err := s.DB().QueryRowContext(ctx, `SELECT agent_ms FROM attempts WHERE id = ?`, withAgent).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == nil || *stored != 83250 {
+		t.Fatalf("agent_ms = %v, want 83250", stored)
+	}
+	atts, err := s.Attempts(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(atts) != 2 {
+		t.Fatalf("attempts = %+v", atts)
+	}
+	if atts[0].AgentDuration != 83250*time.Millisecond || atts[0].AgentMS == nil || *atts[0].AgentMS != 83250 {
+		t.Errorf("attempt with agent duration = %+v", atts[0])
+	}
+	if atts[0].Duration() != 83250*time.Millisecond {
+		t.Errorf("Duration() = %v, want the agent's 1m23.25s", atts[0].Duration())
+	}
+	if atts[1].AgentDuration != 0 || atts[1].AgentMS != nil {
+		t.Errorf("attempt without agent duration = %+v", atts[1])
+	}
+}
+
+func TestMigrateFromV13OldAttemptsHaveNoAgentDuration(t *testing.T) {
+	// Serial: swaps the package-level migrations and LatestVersion that every Open reads.
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "mill.db")
+	saved := migrations
+	migrations = saved[:13]
+	LatestVersion = 13
+	s, err := Open(ctx, path, Options{})
+	migrations, LatestVersion = saved, len(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO tasks (id, title, kind, spec, status, created_at, updated_at)
+		VALUES ('t1', 'T', 'implement', 's', 'verified', '2026-01-01T00:00:00.000000000Z', '2026-01-01T00:00:00.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB().ExecContext(ctx, `INSERT INTO attempts (task_id, n, role, status, started_at, ended_at)
+		VALUES ('t1', 1, 'implementer', 'ok', '2026-01-01T00:00:00.000000000Z', '2026-01-01T00:10:00.000000000Z')`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2, err := Open(ctx, path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if v, _ := s2.SchemaVersion(ctx); v != LatestVersion || v < 14 {
+		t.Fatalf("schema = %d, want %d", v, LatestVersion)
+	}
+	atts, err := s2.Attempts(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(atts) != 1 || atts[0].AgentDuration != 0 || atts[0].AgentMS != nil {
+		t.Fatalf("attempts after upgrade = %+v", atts)
+	}
+	if atts[0].Duration() != 10*time.Minute {
+		t.Errorf("Duration() = %v, want the 10m wall time", atts[0].Duration())
+	}
+}

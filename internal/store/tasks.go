@@ -422,6 +422,22 @@ type Attempt struct {
 	// Model is the model the attempt ran with and ModelReason why it was chosen.
 	Model       string `json:"model,omitempty"`
 	ModelReason string `json:"model_reason,omitempty"`
+	// AgentDuration is how long the agent reports it worked; 0 when unknown.
+	AgentDuration time.Duration `json:"-"`
+	// AgentMS is AgentDuration in milliseconds for JSON output; nil when unknown.
+	AgentMS *int64 `json:"agent_ms"`
+}
+
+// Duration is how long the attempt took: the agent-reported duration when known, else the
+// wall time from start to end (0 while the attempt runs).
+func (a Attempt) Duration() time.Duration {
+	if a.AgentDuration > 0 {
+		return a.AgentDuration
+	}
+	if a.EndedAt == nil {
+		return 0
+	}
+	return a.EndedAt.Sub(a.StartedAt)
 }
 
 // Attempt statuses.
@@ -472,13 +488,18 @@ const (
 )
 
 // FinishAttempt records how an agent run ended and what it spent. costEstimated marks a cost
-// estimated from tokens rather than reported by the agent.
-func (s *Store) FinishAttempt(ctx context.Context, id int64, status string, u budget.Usage, costEstimated bool, outputPath, logPath string) error {
+// estimated from tokens rather than reported by the agent. agent, when given and positive, is
+// how long the agent reports it worked; otherwise the attempt's agent duration stays unknown.
+func (s *Store) FinishAttempt(ctx context.Context, id int64, status string, u budget.Usage, costEstimated bool, outputPath, logPath string, agent ...time.Duration) error {
+	var agentMS sql.NullInt64
+	if len(agent) > 0 && agent[0] > 0 {
+		agentMS = sql.NullInt64{Int64: agent[0].Milliseconds(), Valid: true}
+	}
 	_, err := s.db.ExecContext(ctx, `UPDATE attempts SET status = ?, ended_at = ?, cost_estimated = ?,
 		input_tokens = ?, output_tokens = ?, cache_write_tokens = ?, cache_read_tokens = ?, cost_usd = ?,
-		output_path = ?, log_path = ? WHERE id = ?`,
+		output_path = ?, log_path = ?, agent_ms = ? WHERE id = ?`,
 		status, s.ts(), costEstimated, u.InputTokens, u.OutputTokens, u.CacheWriteTokens, u.CacheReadTokens, u.CostUSD,
-		outputPath, logPath, id)
+		outputPath, logPath, agentMS, id)
 	return err
 }
 
@@ -570,7 +591,7 @@ func (s *Store) Attempts(ctx context.Context, taskID string) ([]Attempt, error) 
 func (s *Store) queryAttempts(ctx context.Context, where string, arg any) ([]Attempt, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, n, role, status, started_at, ended_at,
 		input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd, output_path, log_path,
-		pid, command, cost_estimated, model, model_reason FROM attempts `+where+` ORDER BY id`, arg)
+		pid, command, cost_estimated, model, model_reason, agent_ms FROM attempts `+where+` ORDER BY id`, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -580,11 +601,17 @@ func (s *Store) queryAttempts(ctx context.Context, where string, arg any) ([]Att
 		var a Attempt
 		var started string
 		var ended sql.NullString
+		var agentMS sql.NullInt64
 		if err := rows.Scan(&a.ID, &a.TaskID, &a.N, &a.Role, &a.Status, &started, &ended,
 			&a.Usage.InputTokens, &a.Usage.OutputTokens, &a.Usage.CacheWriteTokens, &a.Usage.CacheReadTokens,
 			&a.Usage.CostUSD, &a.OutputPath, &a.LogPath, &a.PID, &a.Command, &a.CostEstimated,
-			&a.Model, &a.ModelReason); err != nil {
+			&a.Model, &a.ModelReason, &agentMS); err != nil {
 			return nil, err
+		}
+		if agentMS.Valid {
+			ms := agentMS.Int64
+			a.AgentMS = &ms
+			a.AgentDuration = time.Duration(ms) * time.Millisecond
 		}
 		a.StartedAt, _ = parseTime(started)
 		if ended.Valid {

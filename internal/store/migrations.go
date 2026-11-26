@@ -167,6 +167,10 @@ CREATE TABLE gate_results (
 ALTER TABLE task_claims ADD COLUMN activity TEXT NOT NULL DEFAULT '';
 ALTER TABLE task_claims ADD COLUMN activity_since TEXT NULL;
 `,
+	// 14: how long the agent reports it worked on an attempt; NULL when unknown.
+	`
+ALTER TABLE attempts ADD COLUMN agent_ms INTEGER NULL;
+`,
 }
 
 // LatestVersion is the schema version this build writes.

@@ -89,6 +89,8 @@ type Result struct {
 	ResetsAt time.Time
 	// RawPath is the file holding the agent's raw output, when there is one.
 	RawPath string
+	// Duration is how long the agent reports it worked; 0 when unknown.
+	Duration time.Duration
 }
 
 // Runner executes Requests. Implementations must honour ctx cancellation and must report

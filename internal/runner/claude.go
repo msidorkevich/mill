@@ -235,6 +235,7 @@ type resultEvent struct {
 	Result            string            `json:"result"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
 	TotalCostUSD      float64           `json:"total_cost_usd"`
+	DurationMS        int64             `json:"duration_ms"`
 	Usage             usageJSON         `json:"usage"`
 	TerminalReason    string            `json:"terminal_reason"`
 	Errors            []string          `json:"errors"`
@@ -371,6 +372,9 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 			p.onUsage(delta)
 		}
 		res.Usage = p.merged()
+		if p.final.DurationMS > 0 {
+			res.Duration = time.Duration(p.final.DurationMS) * time.Millisecond
+		}
 		if n := len(p.final.PermissionDenials); n > 0 {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%d tool call(s) denied by permission rules", n))
 		}

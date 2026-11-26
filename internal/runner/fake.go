@@ -26,6 +26,8 @@ type Step struct {
 	DelayMS int `json:"delay_ms,omitempty"`
 	// RateLimit, when set, makes the run end with StatusRateLimited after reporting Usage.
 	RateLimit *RateLimit `json:"rate_limit,omitempty"`
+	// DurationMS is returned as Result.Duration on success, the agent-reported run time.
+	DurationMS int `json:"duration_ms,omitempty"`
 }
 
 // RateLimit describes the usage limit a scripted run hits.
@@ -160,5 +162,6 @@ func (f *Fake) Run(ctx context.Context, req Request) (Result, error) {
 	if out == nil {
 		out = json.RawMessage("{}")
 	}
-	return Result{Status: StatusOK, Output: out, Usage: total}, nil
+	return Result{Status: StatusOK, Output: out, Usage: total,
+		Duration: time.Duration(step.DurationMS) * time.Millisecond}, nil
 }
