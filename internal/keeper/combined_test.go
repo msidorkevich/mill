@@ -2,6 +2,7 @@ package keeper
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -306,10 +307,14 @@ func TestCombinedDoesNotRunWithFewerThanTwoReadyBranches(t *testing.T) {
 	e.assertNoThrowaway(t)
 }
 
-// failingHost cannot start any process; it cancels cancel first when set.
-type failingHost struct{ cancel context.CancelFunc }
+// failingHost cannot start any process; it cancels cancel first when set. name is its host
+// kind, "failing" when empty; "exec" leaves the gate no other host to fall back to.
+type failingHost struct {
+	cancel context.CancelFunc
+	name   string
+}
 
-func (h failingHost) Name() string { return "failing" }
+func (h failingHost) Name() string { return cmp.Or(h.name, "failing") }
 func (h failingHost) Start(ctx context.Context, spec host.ProcSpec) (host.Handle, error) {
 	if h.cancel != nil {
 		h.cancel()
@@ -320,7 +325,7 @@ func (h failingHost) Start(ctx context.Context, spec host.ProcSpec) (host.Handle
 func TestCombinedFailsWhenGateCannotRun(t *testing.T) {
 	t.Parallel()
 	e := combinedSetup(t, "true", []string{"a", "b"}, nil)
-	e.o.Host = failingHost{}
+	e.o.Host = failingHost{name: "exec"}
 	res, err := Combined(context.Background(), e.o)
 	if err == nil || res.Passed {
 		t.Fatalf("result = %+v, err = %v; want an error", res, err)
