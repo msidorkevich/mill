@@ -128,6 +128,20 @@ func (k *keeper) publishOptions(id string) publish.Options {
 		MaxParallelGates: k.MaxParallelGates, GateSlotPoll: k.GateSlotPoll}
 }
 
+// gateOptions are the publish options for re-running the gate of the claimed task id: its
+// claim reads "<command>: waiting for gate" while the gate waits for a slot and
+// "<command>: gate" once it holds one. *actErr is set when the claim could not be updated;
+// the pass stops with it.
+func (k *keeper) gateOptions(ctx context.Context, id string) (po publish.Options, actErr *error) {
+	po = k.publishOptions(id)
+	actErr = new(error)
+	po.GateActivity = func(step string) error {
+		*actErr = k.activity(ctx, id, step)
+		return *actErr
+	}
+	return po, actErr
+}
+
 func (k *keeper) logf(format string, a ...any) {
 	if k.Out != nil {
 		fmt.Fprintf(k.Out, format+"\n", a...)
@@ -682,13 +696,16 @@ func parentFailedReason(onto, parent string) string {
 func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br store.Branch, r restacked, by string, fail func(step string, files []string, detail string) error) (bool, error) {
 	newHead := br.HeadSHA
 	wasPublished := t.Status == store.TaskPublished
-	po := k.publishOptions(t.ID)
+	po, actErr := k.gateOptions(ctx, t.ID)
 	if r.agent {
 		// The agent changed code: the gate and the verifier both check it.
-		if err := k.activity(ctx, t.ID, "gate"); err != nil {
+		if err := k.activity(ctx, t.ID, "waiting for gate"); err != nil {
 			return false, err
 		}
 		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
+		if *actErr != nil {
+			return false, *actErr
+		}
 		if parent, perr := k.failedParent(ctx); perr != nil || parent != "" {
 			if perr != nil {
 				return false, errors.Join(perr, err)
@@ -742,10 +759,13 @@ func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br
 
 	if !r.agent {
 		// KP3: after a rebase without the agent the gate is re-run, the verifier is not.
-		if err := k.activity(ctx, t.ID, "gate"); err != nil {
+		if err := k.activity(ctx, t.ID, "waiting for gate"); err != nil {
 			return false, err
 		}
 		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
+		if *actErr != nil {
+			return false, *actErr
+		}
 		if parent, perr := k.failedParent(ctx); perr != nil || parent != "" {
 			if perr != nil {
 				return false, errors.Join(perr, err)

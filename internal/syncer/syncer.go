@@ -1201,11 +1201,21 @@ func (s *syncer) failedParent(ctx context.Context) (string, error) {
 // neither gated nor published: it is blocked for later syncs to retry.
 func (s *syncer) gateAndPublish(ctx, gctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
 	newHead := br.HeadSHA
-	if err := s.activity(ctx, t.ID, "gate"); err != nil {
+	if err := s.activity(ctx, t.ID, "waiting for gate"); err != nil {
 		return false, err
 	}
-	// KP3: the gate is re-run, the verifier is not.
-	g, err := publish.GateAtHead(gctx, s.publishOptions(t.ID), t, br, "sync")
+	// KP3: the gate is re-run, the verifier is not. The claim reads "waiting for gate" until
+	// the gate holds a slot, then "gate".
+	po := s.publishOptions(t.ID)
+	var actErr error
+	po.GateActivity = func(step string) error {
+		actErr = s.activity(ctx, t.ID, step)
+		return actErr
+	}
+	g, err := publish.GateAtHead(gctx, po, t, br, "sync")
+	if actErr != nil {
+		return false, actErr
+	}
 	parent, perr := s.failedParent(ctx)
 	if perr != nil {
 		return false, errors.Join(perr, err)

@@ -2,12 +2,15 @@ package keeper
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/publish"
 	"github.com/msidorkevich/mill/internal/runner"
 	"github.com/msidorkevich/mill/internal/store"
@@ -162,5 +165,98 @@ func TestKeepClaimActivityErrorStopsThePassNamingTaskAndStep(t *testing.T) {
 	}
 	if after := git(t, e.bare, "rev-parse", "refs/heads/"+publish.ReviewRef(taskID)); after != before {
 		t.Fatalf("review branch moved after the failure: %s -> %s", before, after)
+	}
+}
+
+// claimActivityUntil polls the live claim on task id until want reports true, failing the
+// test after a deadline. It returns the claim that matched.
+func (e *env) claimActivityUntil(t *testing.T, id string, what string, want func(store.TaskClaim) bool) store.TaskClaim {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Open(ctx, e.o.Paths.DB, store.Options{ClaimAlive: func(store.TaskClaim) (bool, error) { return true, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		claims, err := s.ClaimedTasks(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c, ok := claims[id]; ok && want(c) {
+			return c
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the claim on %s never showed %s; claims = %+v\n%s", id, what, claims, e.out)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestKeepClaimActivityShowsWaitingForGateUntilItHoldsASlot(t *testing.T) {
+	t.Parallel()
+	l := newClaimActivityLatch(t)
+	e := rebasedByRerere(t, l.script())
+	e.o.MaxParallelGates, e.o.GateSlotPoll = 1, gateSlotPipelinePoll
+	release := gateSlotPipelineHold(t, e.o.Store)
+	done := e.claimActivityPass()
+
+	// The task is in phase gate-wait only while the gate waits for a slot.
+	c := e.claimActivityUntil(t, taskID, "the wait for a gate slot", func(store.TaskClaim) bool {
+		tk, err := e.o.Store.GetTask(context.Background(), taskID)
+		return err == nil && tk.Phase == store.PhaseGateWait
+	})
+	if c.Command != "keep" || c.Activity != "keep: waiting for gate" {
+		t.Fatalf("claim while waiting for a gate slot = %+v, want keep: waiting for gate", c)
+	}
+	if _, err := os.Stat(l.started); !os.IsNotExist(err) {
+		t.Fatalf("the gate ran while every slot was held (stat: %v)", err)
+	}
+	release()
+	l.wait(t)
+	c = e.claimOf(t, taskID)
+	l.open(t)
+	if err := <-done; err != nil {
+		t.Fatalf("Pass: %v\n%s", err, e.out)
+	}
+	if c.Activity != "keep: gate" {
+		t.Fatalf("claim while holding the gate slot = %+v, want keep: gate", c)
+	}
+}
+
+// nameHost runs every command on the exec host and records the name it was started with,
+// as a herdr host shows it in the tab label.
+type nameHost struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (h *nameHost) Name() string { return "names" }
+
+func (h *nameHost) Start(ctx context.Context, spec host.ProcSpec) (host.Handle, error) {
+	h.mu.Lock()
+	h.names = append(h.names, spec.Name)
+	h.mu.Unlock()
+	return host.NewExec().Start(ctx, spec)
+}
+
+func (h *nameHost) started() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.names...)
+}
+
+func TestKeepGateNameCarriesTaskAndCommand(t *testing.T) {
+	t.Parallel()
+	e := rebasedByRerere(t, "true")
+	h := &nameHost{}
+	e.o.Host = h
+	if _, err := Pass(context.Background(), e.o); err != nil {
+		t.Fatalf("Pass: %v\n%s", err, e.out)
+	}
+	want := []string{taskID + " keeper gate 1"}
+	if got := h.started(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("gate names = %q, want %q\n%s", got, want, e.out)
 	}
 }

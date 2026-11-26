@@ -395,3 +395,94 @@ func TestReviewApproveClaimActivityErrorStopsTheApprovalNamingTaskAndStep(t *tes
 	}
 	assertNotApproved(t, root, "g1/a")
 }
+
+// Not parallel: it shortens approveGateSlotPoll for the package.
+func TestReviewApproveClaimActivityShowsWaitingForGateUntilItHoldsASlot(t *testing.T) {
+	defer func(d time.Duration) { approveGateSlotPoll = d }(approveGateSlotPoll)
+	approveGateSlotPoll = time.Millisecond
+	root, bare := publishedGoal(t)
+	ctx := context.Background()
+	s := openStore(t, root)
+	br, _ := s.GetBranch(ctx, "g1/a")
+	br.GateSHA = ""
+	if err := s.SaveBranch(ctx, br); err != nil {
+		t.Fatal(err)
+	}
+	l := newApproveLatch(t)
+	writeCheckCmd(t, root, l.script())
+	release, err := s.AcquireGateSlot(ctx, store.GateHolder{TaskID: "other", Attempt: 1, PID: os.Getpid()},
+		1, time.Millisecond, func() { t.Error("the test's own slot had to wait: a slot was left held") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan result, 1)
+	go func() {
+		var out, errb bytes.Buffer
+		code := Run(context.Background(), Env{Stdout: &out, Stderr: &errb, Dir: root}, []string{"review", "approve", "g1/a"})
+		done <- result{code, out.String(), errb.String()}
+	}()
+
+	// The test binary does not run a mill command, so the observer counts every claim's
+	// process as alive.
+	obs, err := store.Open(ctx, project.PathsAt(root).DB, store.Options{ClaimAlive: func(store.TaskClaim) (bool, error) { return true, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer obs.Close()
+	claim := func() (store.TaskClaim, bool) {
+		claims, err := obs.ClaimedTasks(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, ok := claims["g1/a"]
+		return c, ok
+	}
+	// The task is in phase gate-wait only while its gate waits for a slot.
+	deadline := time.Now().Add(20 * time.Second)
+	var c store.TaskClaim
+	for {
+		tk, err := obs.GetTask(ctx, "g1/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ok bool
+		if c, ok = claim(); ok && tk.Phase == store.PhaseGateWait {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the approval's gate never waited for a slot; claim = %+v", c)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if c.Command != "review approve" || c.Activity != "approve: waiting for gate" {
+		t.Fatalf("claim while waiting for a gate slot = %+v, want approve: waiting for gate", c)
+	}
+	if _, err := os.Stat(l.started); !os.IsNotExist(err) {
+		t.Fatalf("the gate ran while every slot was held (stat: %v)", err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(l.started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the gate never started after the slot was freed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	c, _ = claim()
+	if err := os.WriteFile(l.release, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-done; r.code != ExitOK {
+		t.Fatalf("approve: %+v", r)
+	}
+	if c.Activity != "approve: gate" {
+		t.Fatalf("claim while holding the gate slot = %+v, want approve: gate", c)
+	}
+	if remoteRefs(t, bare)["refs/heads/review/g1/a"] == "" {
+		t.Fatal("review/g1/a was not pushed")
+	}
+}

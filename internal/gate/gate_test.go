@@ -171,3 +171,54 @@ func parentNice(t *testing.T) int {
 	}
 	return n
 }
+
+// tabLabels are the labels of the tabs a fake herdr logged, in order.
+func tabLabels(t *testing.T, log string) []string {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labels []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(l, "tab create") {
+			continue
+		}
+		_, after, ok := strings.Cut(l, "--label ")
+		if !ok {
+			t.Fatalf("tab created without a label: %q", l)
+		}
+		label, _, _ := strings.Cut(after, " --cwd")
+		labels = append(labels, label)
+	}
+	return labels
+}
+
+func TestLabelNamesEachCommandsHerdrTab(t *testing.T) {
+	t.Parallel()
+	h, log := stuckHerdr(t)
+	o := opts(t, "true", "true")
+	o.Host, o.Fallback = h, host.NewExec()
+	o.Label = "g/t a2 gate"
+	if r := Run(context.Background(), o); !r.Passed {
+		t.Fatalf("result = %+v", r)
+	}
+	// Each command's start is tried twice on herdr before it falls back to exec.
+	want := []string{"mill g/t a2 gate 1", "mill g/t a2 gate 1", "mill g/t a2 gate 2", "mill g/t a2 gate 2"}
+	if got := tabLabels(t, log); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("tab labels = %q, want %q", got, want)
+	}
+}
+
+func TestNameWithoutLabelIsGate(t *testing.T) {
+	t.Parallel()
+	h, log := stuckHerdr(t)
+	o := opts(t, "true")
+	o.Host, o.Fallback = h, host.NewExec()
+	if r := Run(context.Background(), o); !r.Passed {
+		t.Fatalf("result = %+v", r)
+	}
+	if got := tabLabels(t, log); len(got) == 0 || got[0] != "mill gate 1" {
+		t.Fatalf("tab labels = %q, want mill gate 1", got)
+	}
+}

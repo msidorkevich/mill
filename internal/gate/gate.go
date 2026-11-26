@@ -53,6 +53,9 @@ type Options struct {
 	Env      []string      // complete environment for the commands
 	Timeout  time.Duration // per command
 	Nice     int           // > 0 runs each command under `nice -n Nice`; 0 runs it unchanged
+	// Label names the gate's commands on the host (a herdr tab): command i is "<Label> <i>".
+	// Empty means "gate".
+	Label string
 }
 
 // TailLines and TailBytes bound how much output is kept for findings.
@@ -107,7 +110,7 @@ func runOne(ctx context.Context, o Options, i int, cmd string) CmdResult {
 		argv = append([]string{"nice", "-n", strconv.Itoa(o.Nice)}, argv...)
 	}
 	h, note, err := start(cctx, o, host.ProcSpec{
-		Name:       fmt.Sprintf("gate %d", i),
+		Name:       fmt.Sprintf("%s %d", label(o), i),
 		Argv:       argv,
 		Dir:        o.Dir,
 		Env:        o.Env,
@@ -134,6 +137,14 @@ func runOne(ctx context.Context, o Options, i int, cmd string) CmdResult {
 		cr.Exit = ex.Code
 	}
 	return cr
+}
+
+// label is the name prefix of o's commands.
+func label(o Options) string {
+	if strings.TrimSpace(o.Label) == "" {
+		return "gate"
+	}
+	return o.Label
 }
 
 // start starts spec on o.Host. A start failure is retried once on the same host; when that

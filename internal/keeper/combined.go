@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -64,6 +65,31 @@ func Combined(ctx context.Context, o Options) (res CombinedResult, err error) {
 	if err != nil {
 		return res, err
 	}
+	for _, r := range ready {
+		res.Branches = append(res.Branches, r.task.ID)
+	}
+	if len(ready) < 2 {
+		return res, nil
+	}
+	claimer := o.Claimer
+	if claimer.Owner == "" {
+		claimer = store.NewClaimer("keep")
+	}
+	claimed, err := claimReady(ctx, o, claimer, ready)
+	defer func() {
+		if rerr := o.Store.ReleaseClaims(context.WithoutCancel(ctx), claimer, claimed); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("combined check: %w", rerr))
+		}
+	}()
+	if err != nil {
+		return res, err
+	}
+	// A branch may have changed before it was claimed: read the ready set again.
+	if ready, err = readyBranches(ctx, o); err != nil {
+		return res, err
+	}
+	ready = slices.DeleteFunc(ready, func(r readyBranch) bool { return !slices.Contains(claimed, r.task.ID) })
+	res.Branches = []string{}
 	for _, r := range ready {
 		res.Branches = append(res.Branches, r.task.ID)
 	}
@@ -209,6 +235,31 @@ func Combined(ctx context.Context, o Options) (res CombinedResult, err error) {
 	return res, nil
 }
 
+// claimReady claims each ready branch's task for c, so that nothing changes it during the
+// check, and records "<command>: combined check" as what c is doing with it. A busy task is
+// left out of the check. claimed lists the tasks c holds, also when err is set.
+func claimReady(ctx context.Context, o Options, c store.Claimer, ready []readyBranch) (claimed []string, err error) {
+	for _, r := range ready {
+		id := r.task.ID
+		err := o.Store.ClaimTasks(ctx, c, []string{id})
+		var busy *store.BusyError
+		if errors.As(err, &busy) {
+			if o.Out != nil {
+				fmt.Fprintf(o.Out, "combined check: %s is busy (%s); left out\n", id, busy.Doing)
+			}
+			continue
+		}
+		if err != nil {
+			return claimed, fmt.Errorf("combined check: %w", err)
+		}
+		claimed = append(claimed, id)
+		if err := o.Store.SetClaimActivity(ctx, c, id, c.Command+": combined check"); err != nil {
+			return claimed, fmt.Errorf("combined check: %s: record step %q on its claim: %w", id, "combined check", err)
+		}
+	}
+	return claimed, nil
+}
+
 // fingerprint identifies what a combined check covers: the base tip and the ready branch heads.
 func fingerprint(base string, ready []readyBranch) string {
 	parts := make([]string, 0, len(ready))
@@ -277,7 +328,7 @@ func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResu
 	}
 	g, err := c.gateInSlot(ctx, gate.Options{
 		Host: c.host, Dir: c.dir, Cmds: cmds, LogDir: filepath.Join(c.logDir, fmt.Sprintf("probe-%d", c.res.Probes)),
-		Env: c.env, Timeout: c.Cfg.GateTimeout.Duration, Nice: c.Cfg.GateNice,
+		Env: c.env, Timeout: c.Cfg.GateTimeout.Duration, Nice: c.Cfg.GateNice, Label: "combined check",
 	})
 	if err != nil {
 		return probeResult{}, err
