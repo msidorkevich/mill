@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/config"
@@ -96,14 +98,16 @@ func runTaskEdit(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	var spec taskspec.Spec
-	if err := dec.Decode(&spec); err != nil {
-		return invalid(fmt.Errorf("parse task: %w", err))
+	spec, ignored, wrapped, err := parseEditedSpec(data)
+	if err != nil {
+		return invalid(err)
 	}
-	if dec.More() {
-		return invalid(errors.New("parse task: trailing data after the task object"))
+	// show prints the full id; the spec and the plan use the local one.
+	if spec.ID == id {
+		spec.ID = local
+	}
+	if spec.DependsOn == nil {
+		spec.DependsOn = shown.DependsOn
 	}
 	spec.ApplyDefaults()
 
@@ -151,6 +155,15 @@ func runTaskEdit(ctx context.Context, env Env, args []string) int {
 		os.Remove(path)
 	}
 	fmt.Fprintf(env.Stdout, "Updated %s.\n", id)
+	if len(ignored) > 0 {
+		fmt.Fprintf(env.Stdout, "Note: ignored non-editable fields: %s.\n", strings.Join(ignored, ", "))
+	}
+	// task run reads only a plain spec, so show's output cannot be the file it re-reads.
+	if !isGoalTask && (wrapped || len(ignored) > 0) {
+		if path, err = writeSpecTemp(spec); err != nil {
+			return fail(fmt.Errorf("%s was updated, but writing its spec for `mill task run` failed: %w; run `mill task edit %s` again", id, err, id))
+		}
+	}
 	if len(addedIDs) > 0 {
 		if code := moveAfterAddedDeps(ctx, env, s, cfg, paths, id, addedIDs); code != ExitOK {
 			return code
@@ -163,6 +176,92 @@ func runTaskEdit(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stdout, "\nNext: `mill task run --file %s --retry`.\n", path)
 	}
 	return ExitOK
+}
+
+// parseEditedSpec decodes an edited spec: a plain spec object, or the output of
+// `mill task show --json`, whose "task" object is the spec (wrapped is then true). Fields
+// that show prints but edit cannot change are dropped and named in ignored; any other
+// unknown field is an error. A missing id or depends_on is left empty or nil.
+func parseEditedSpec(data []byte) (spec taskspec.Spec, ignored []string, wrapped bool, err error) {
+	bad := func(err error) (taskspec.Spec, []string, bool, error) {
+		return taskspec.Spec{}, nil, false, fmt.Errorf("parse task: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var fields map[string]json.RawMessage
+	if err := dec.Decode(&fields); err != nil {
+		return bad(err)
+	}
+	if dec.More() {
+		return bad(errors.New("trailing data after the task object"))
+	}
+	if inner, ok := fields["task"]; ok {
+		wrapped = true
+		shownFields := jsonNames(reflect.TypeFor[taskView]())
+		for name := range fields {
+			if !slices.Contains(shownFields, name) {
+				return bad(fmt.Errorf("json: unknown field %q", name))
+			}
+			switch name {
+			case "task":
+			case "depends_on":
+				// Not to be mistaken for the spec's own depends_on.
+				ignored = append(ignored, "top-level depends_on")
+			default:
+				ignored = append(ignored, name)
+			}
+		}
+		fields = nil
+		if err := json.Unmarshal(inner, &fields); err != nil {
+			return bad(err)
+		}
+	}
+	// The direct fields of store.Task are the ones outside the embedded, editable spec.
+	for _, name := range jsonNames(reflect.TypeFor[store.Task]()) {
+		if _, ok := fields[name]; ok {
+			ignored = append(ignored, name)
+			delete(fields, name)
+		}
+	}
+	rest, err := json.Marshal(fields)
+	if err != nil {
+		return bad(err)
+	}
+	dec = json.NewDecoder(bytes.NewReader(rest))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&spec); err != nil {
+		return bad(err)
+	}
+	slices.Sort(ignored)
+	return spec, ignored, wrapped, nil
+}
+
+// jsonNames lists the JSON names of t's own fields, not those of embedded structs.
+func jsonNames(t reflect.Type) []string {
+	var names []string
+	for i := range t.NumField() {
+		if f := t.Field(i); !f.Anonymous {
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// writeSpecTemp writes spec to a new temporary file and returns its path.
+func writeSpecTemp(spec taskspec.Spec) (string, error) {
+	data, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp("", "mill-task-"+spec.ID+"-*.json")
+	if err != nil {
+		return "", err
+	}
+	_, werr := f.Write(data)
+	if err := errors.Join(werr, f.Close()); err != nil {
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 // addedDeps compares an edited depends_on (want) with the current one (have, local ids).
