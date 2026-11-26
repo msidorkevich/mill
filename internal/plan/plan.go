@@ -266,7 +266,8 @@ func (p Plan) DependsOn(a, b string) bool {
 	return walk(a)
 }
 
-// Warnings lists pairs of tasks with overlapping owns and no dependency path between them.
+// Warnings lists pairs of tasks with overlapping owns and no dependency path between them,
+// followed by the direct dependencies that share only test files.
 func (p Plan) Warnings() []string {
 	var out []string
 	for i, a := range p.Tasks {
@@ -275,20 +276,61 @@ func (p Plan) Warnings() []string {
 				continue
 			}
 			var pats []string
-			for _, x := range a.Owns {
-				for _, y := range b.Owns {
-					if GlobsOverlap(x, y) {
-						if x == y {
-							pats = append(pats, fmt.Sprintf("%q", x))
-						} else {
-							pats = append(pats, fmt.Sprintf("%q and %q", x, y))
-						}
-					}
-				}
+			for _, o := range overlappingOwns(a.Owns, b.Owns) {
+				pats = append(pats, o.String())
 			}
 			if len(pats) > 0 {
 				out = append(out, fmt.Sprintf("tasks %q and %q own overlapping paths (%s) and neither depends on the other; they will not run at the same time",
 					a.ID, b.ID, strings.Join(pats, ", ")))
+			}
+		}
+	}
+	return append(out, p.testOverlapWarnings()...)
+}
+
+// testOverlapWarnings warns about every task whose owns overlap with a direct dependency
+// consists of test files only.
+func (p Plan) testOverlapWarnings() []string {
+	idx := p.index()
+	var out []string
+	for _, b := range p.Tasks {
+		for _, id := range b.DependsOn {
+			i, ok := idx[id]
+			if !ok || id == b.ID {
+				continue
+			}
+			var pats []string
+			testOnly := true
+			for _, o := range overlappingOwns(p.Tasks[i].Owns, b.Owns) {
+				pats = append(pats, o.String())
+				testOnly = testOnly && strings.HasSuffix(o.x, "_test.go") && strings.HasSuffix(o.y, "_test.go")
+			}
+			if len(pats) > 0 && testOnly {
+				out = append(out, fmt.Sprintf("%s depends on %s but they share only test files (%s); consider moving the shared test into its own task",
+					b.ID, id, strings.Join(pats, ", ")))
+			}
+		}
+	}
+	return out
+}
+
+// ownsPair is an owns pattern from each of two tasks that overlap.
+type ownsPair struct{ x, y string }
+
+func (o ownsPair) String() string {
+	if o.x == o.y {
+		return fmt.Sprintf("%q", o.x)
+	}
+	return fmt.Sprintf("%q and %q", o.x, o.y)
+}
+
+// overlappingOwns returns every pair of patterns from a and b that GlobsOverlap.
+func overlappingOwns(a, b []string) []ownsPair {
+	var out []ownsPair
+	for _, x := range a {
+		for _, y := range b {
+			if GlobsOverlap(x, y) {
+				out = append(out, ownsPair{x, y})
 			}
 		}
 	}
