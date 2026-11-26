@@ -14,6 +14,7 @@ import (
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/gate"
 	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/pipeline"
 	"github.com/msidorkevich/mill/internal/prompt"
 	"github.com/msidorkevich/mill/internal/publish"
 	"github.com/msidorkevich/mill/internal/skiptest"
@@ -172,6 +173,9 @@ type reviewView struct {
 	From     string                 `json:"from"`               // start of the diff
 	DiffStat string                 `json:"diff_stat"`
 	Diff     string                 `json:"diff,omitempty"`
+	// BaseChanged are the files changed on the base since the task started that the task
+	// owns or changed.
+	BaseChanged []string `json:"base_changed,omitempty"`
 	// skipped are the test skips the latest skipped-tests event recorded; text only, so
 	// --json keeps its fields as they are.
 	skipped []skiptest.Skip
@@ -201,7 +205,7 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "mill review show: %v\n", err)
 		return ExitError
 	}
-	paths, _, s, err := openProject(ctx, env)
+	paths, cfg, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
@@ -299,6 +303,11 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 			return fail(fmt.Errorf("diff %s: %w", rng, err))
 		}
 	}
+	bc, err := pipeline.FindBaseChanges(ctx, paths.Root, cfg, v.Task, v.Branch)
+	if err != nil {
+		return fail(err)
+	}
+	v.BaseChanged = bc.Files
 	if *asJSON {
 		return encodeJSON(env, "mill review show", v)
 	}
@@ -363,6 +372,17 @@ func printReview(env Env, v reviewView) {
 				continue
 			}
 			fmt.Fprintf(w, "  %s: %s\n", e.Kind, string(e.Data))
+		}
+	}
+	if len(v.BaseChanged) > 0 {
+		fmt.Fprintln(w, "\nChanged on the base since this task started:")
+		for _, f := range v.BaseChanged {
+			fmt.Fprintf(w, "  %s\n", f)
+		}
+		if t.Status == store.TaskPublished {
+			fmt.Fprintln(w, "Hint: `mill keep` restacks published tasks.")
+		} else {
+			fmt.Fprintf(w, "Hint: `mill task rebase %s`\n", t.ID)
 		}
 	}
 	if v.Diff != "" {
