@@ -92,9 +92,15 @@ func schedScript(files map[string]string) string {
 }
 
 // schedRepo makes an initialized repo with a commit on main, the fake script and the given
-// max_parallel (also as max_parallel_gates, so tasks can be held in their gates together),
-// without goals.
+// max_parallel (also as max_parallel_gates, so tasks can be held in their gates together, and
+// as max_in_flight, so tasks held in gates still bound the tasks started), without goals.
 func schedRepo(t *testing.T, script string, maxParallel int) string {
+	t.Helper()
+	return schedRepoCfg(t, script, "max_parallel = "+itoa(maxParallel)+"\nmax_parallel_gates = "+itoa(maxParallel)+"\nmax_in_flight = "+itoa(maxParallel)+"\n")
+}
+
+// schedRepoCfg is schedRepo with the parallelism settings given as config lines.
+func schedRepoCfg(t *testing.T, script, parallel string) string {
 	t.Helper()
 	root := gitRepo(t)
 	ctx := context.Background()
@@ -106,9 +112,7 @@ func schedRepo(t *testing.T, script string, maxParallel int) string {
 	}
 	cfg := `check_cmd = "true"
 max_attempts = 1
-max_parallel = ` + itoa(maxParallel) + `
-max_parallel_gates = ` + itoa(maxParallel) + `
-worktree_root = "` + t.TempDir() + `"
+` + parallel + `worktree_root = "` + t.TempDir() + `"
 [runner]
 kind = "fake"
 fake_script = "script.json"
@@ -220,7 +224,7 @@ func runningSet(t *testing.T, s *store.Store, ids ...string) []string {
 	return out
 }
 
-// timeline replays the scheduler's "<id>: started" and "<id>: verified|blocked" lines and
+// timeline replays the scheduler's "<id>: started" and "<id>: verified at|blocked" lines and
 // calls check with the tasks running after each start.
 func timeline(out string, ids []string, check func(running map[string]bool)) {
 	running := map[string]bool{}
@@ -234,7 +238,7 @@ func timeline(out string, ids []string, check func(running map[string]bool)) {
 			case rest == "started":
 				running[id] = true
 				check(running)
-			case rest == store.TaskVerified || strings.HasPrefix(rest, store.TaskBlocked) || strings.HasPrefix(rest, store.TaskFailed):
+			case strings.HasPrefix(rest, store.TaskVerified) || strings.HasPrefix(rest, store.TaskBlocked) || strings.HasPrefix(rest, store.TaskFailed):
 				delete(running, id)
 			}
 		}
@@ -625,5 +629,75 @@ func TestWatchAndGoalShowDuringRunListBothGoals(t *testing.T) {
 	g.release(t, "g1-a", "g2-b")
 	if code := r.finish(t); code != ExitOK {
 		t.Fatalf("run: code %d\nstdout: %s\nstderr: %s", code, r.stdout, r.stderr)
+	}
+}
+
+func TestSchedulerStartsThirdTaskWhileOneIsInGate(t *testing.T) {
+	t.Parallel()
+	g := newGates(t)
+	ids := []string{"g1/a", "g1/b", "g1/c"}
+	// max_parallel = 2 agents, max_parallel_gates = 1: max_in_flight defaults to 3.
+	root := schedRepoCfg(t, schedScript(map[string]string{"g1/a": "a.txt", "g1/b": "b.txt", "g1/c": "c.txt"}),
+		"max_parallel = 2\nmax_parallel_gates = 1\n")
+	approvePlan(t, root, "g1", schedPlan(t, g, "Three",
+		schedTask{id: "a", file: "a.txt", barrier: "a"},
+		schedTask{id: "b", file: "b.txt", barrier: "b"},
+		schedTask{id: "c", file: "c.txt", barrier: "c"}))
+	s := openTestStore(t, root)
+	r := startRun(t, root, g)
+
+	// One task holds the only gate slot; the other two left their agents and wait for it, so
+	// three tasks are in flight though max_parallel is 2.
+	waitFor(t, "a task held in its gate and the other two waiting for a gate slot", func() bool {
+		gated, waiting := 0, 0
+		for _, id := range ids {
+			switch st, ph := statusOf(t, s, id); {
+			case st == store.TaskRunning && ph == store.PhaseGate:
+				gated++
+			case st == store.TaskRunning && ph == store.PhaseGateWait:
+				waiting++
+			}
+		}
+		return gated == 1 && waiting == 2
+	})
+	out := r.stdout.String()
+	for _, id := range ids {
+		if !strings.Contains(out, id+": started\n") {
+			t.Fatalf("%s did not start:\n%s", id, out)
+		}
+		if strings.Contains(out, id+": verified") {
+			t.Fatalf("%s ended before all three started:\n%s", id, out)
+		}
+	}
+	g.release(t, "a", "b", "c")
+	if code := r.finish(t); code != ExitOK {
+		t.Fatalf("run: code %d\nstdout: %s\nstderr: %s", code, r.stdout, r.stderr)
+	}
+	timeline(r.stdout.String(), ids, func(running map[string]bool) {
+		if len(running) > 3 {
+			t.Errorf("more than max_in_flight tasks started: %v", running)
+		}
+	})
+}
+
+func TestSchedulerLogsVerifiedOnce(t *testing.T) {
+	t.Parallel()
+	g := newGates(t)
+	root := schedRepo(t, schedScript(map[string]string{"g1/a": "a.txt"}), 1)
+	approvePlan(t, root, "g1", schedPlan(t, g, "One", schedTask{id: "a", file: "a.txt"}))
+	r := startRun(t, root, g)
+	code := r.finish(t)
+	out := r.stdout.String()
+	if code != ExitOK {
+		t.Fatalf("run: code %d\nstdout: %s\nstderr: %s", code, out, r.stderr)
+	}
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "g1/a: verified") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "g1/a: verified at ") || !strings.HasSuffix(lines[0], ")") {
+		t.Fatalf("verified lines = %q, want exactly one '<task>: verified at <sha> (...)':\n%s", lines, out)
 	}
 }

@@ -588,3 +588,30 @@ func TestImplementerRunsCheckDefaultsFalseAndParses(t *testing.T) {
 		t.Fatal(`implementer_runs_check = "yes" parsed; want a type error`)
 	}
 }
+
+func TestMaxInFlightDefaultsToAgentsPlusGates(t *testing.T) {
+	t.Parallel()
+	if got := Default().MaxInFlight; got != 3 {
+		t.Fatalf("Default().MaxInFlight = %d, want 3 (max_parallel 2 + max_parallel_gates 1)", got)
+	}
+	cfg, err := Parse("max_parallel = 4\nmax_parallel_gates = 2\n")
+	if err != nil || cfg.MaxInFlight != 6 {
+		t.Fatalf("Parse(max_parallel = 4, max_parallel_gates = 2) MaxInFlight = %d, %v; want 6", cfg.MaxInFlight, err)
+	}
+	cfg, err = Parse("max_parallel = 2\nmax_in_flight = 5\n")
+	if err != nil || cfg.MaxInFlight != 5 {
+		t.Fatalf("Parse(max_in_flight = 5) = %d, %v; want 5", cfg.MaxInFlight, err)
+	}
+	cfg, err = Parse("max_parallel = 2\nmax_in_flight = 2\n")
+	if err != nil || cfg.MaxInFlight != 2 {
+		t.Fatalf("Parse(max_in_flight = max_parallel) = %d, %v; want 2", cfg.MaxInFlight, err)
+	}
+}
+
+func TestMaxInFlightBelowMaxParallelIsRejected(t *testing.T) {
+	t.Parallel()
+	_, err := Parse("max_parallel = 3\nmax_in_flight = 2\n")
+	if err == nil || !strings.Contains(err.Error(), "max_in_flight must be >= max_parallel (3), got 2") {
+		t.Fatalf("err = %v, want a max_in_flight >= max_parallel error", err)
+	}
+}
