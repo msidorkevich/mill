@@ -331,7 +331,7 @@ func lockAndRecover(ctx context.Context, env Env, name string, paths project.Pat
 			fmt.Fprintf(env.Stderr, "mill %s: %v\n", name, err)
 		}
 	}
-	if err := killLeftoverWorkers(ctx, env.Stdout, s); err != nil {
+	if err := killLeftoverWorkers(ctx, env.Stdout, s, herdrTabs{runs: paths.Runs, lookPath: env.lookPath}); err != nil {
 		release()
 		return nil, err
 	}
@@ -730,68 +730,80 @@ func fmtInt(n int64) string {
 	return b.String()
 }
 
-// killLeftoverWorkers kills the process groups of workers that outlived a killed mill. A
-// recorded process is only killed when it is alive, leads its own group and its command line
-// contains the recorded command; anything else (gone, or pid reused) is left alone.
-func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store) error {
+// killLeftoverWorkers kills the process groups of workers that outlived a killed mill and
+// closes the herdr tabs they ran in. A recorded process is only killed when it is alive,
+// leads its own group and its command line contains the recorded command; anything else
+// (gone, or pid reused) is left alone.
+func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store, tabs herdrTabs) error {
 	running, err := s.RunningAttempts(ctx)
 	if err != nil {
 		return err
 	}
 	for _, a := range running {
-		if a.PID <= 0 {
-			continue
+		if err := killLeftoverProcesses(ctx, out, s, a); err != nil {
+			return err
 		}
-		pgid, command, alive, err := host.ProcessInfo(a.PID)
+		if err := closeRecordedTabs(out, tabs, a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// killLeftoverProcesses kills what is left of one running attempt's worker.
+func killLeftoverProcesses(ctx context.Context, out io.Writer, s *store.Store, a store.Attempt) error {
+	if a.PID <= 0 {
+		return nil
+	}
+	pgid, command, alive, err := host.ProcessInfo(a.PID)
+	if err != nil {
+		return fmt.Errorf("check leftover worker %d (%s attempt %d %s): %w; stop it by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+	}
+	if !alive {
+		// The recorded leader is gone, but the agent may have left children running in
+		// its group (e.g. a test run started from its Bash tool). The group id is not
+		// proof they are ours: if the whole group died and recovery runs much later, the
+		// pid can be reused by an unrelated process that starts its own group and exits,
+		// leaving members. What identifies the worker's children is the working
+		// directory: the agent and what it starts run inside the task's worktree, so
+		// only members whose cwd is inside it are killed, one by one.
+		members, err := host.GroupMembers(a.PID)
 		if err != nil {
-			return fmt.Errorf("check leftover worker %d (%s attempt %d %s): %w; stop it by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+			return fmt.Errorf("check leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
 		}
-		if !alive {
-			// The recorded leader is gone, but the agent may have left children running in
-			// its group (e.g. a test run started from its Bash tool). The group id is not
-			// proof they are ours: if the whole group died and recovery runs much later, the
-			// pid can be reused by an unrelated process that starts its own group and exits,
-			// leaving members. What identifies the worker's children is the working
-			// directory: the agent and what it starts run inside the task's worktree, so
-			// only members whose cwd is inside it are killed, one by one.
-			members, err := host.GroupMembers(a.PID)
-			if err != nil {
-				return fmt.Errorf("check leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
-			}
-			if len(members) == 0 {
+		if len(members) == 0 {
+			return nil
+		}
+		worktree, err := taskWorktree(ctx, s, a.TaskID)
+		if err != nil {
+			return fmt.Errorf("check leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+		}
+		killed, left := 0, 0
+		for _, m := range members {
+			if worktree == "" || !insideDir(m, worktree) {
+				left++
 				continue
 			}
-			worktree, err := taskWorktree(ctx, s, a.TaskID)
-			if err != nil {
-				return fmt.Errorf("check leftover processes of worker %d (%s attempt %d %s): %w; stop them by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+			if err := host.KillProcess(m); err != nil {
+				return fmt.Errorf("kill leftover process %d of worker %d (%s attempt %d %s): %w; stop it by hand and retry", m, a.PID, a.TaskID, a.N, a.Role, err)
 			}
-			killed, left := 0, 0
-			for _, m := range members {
-				if worktree == "" || !insideDir(m, worktree) {
-					left++
-					continue
-				}
-				if err := host.KillProcess(m); err != nil {
-					return fmt.Errorf("kill leftover process %d of worker %d (%s attempt %d %s): %w; stop it by hand and retry", m, a.PID, a.TaskID, a.N, a.Role, err)
-				}
-				killed++
-			}
-			if killed > 0 {
-				fmt.Fprintf(out, "killed %d leftover process(es) of worker %d (%s attempt %d %s), whose agent had already exited\n", killed, a.PID, a.TaskID, a.N, a.Role)
-			}
-			if left > 0 {
-				fmt.Fprintf(out, "left %d process(es) of group %d alone: not running inside the task's worktree\n", left, a.PID)
-			}
-			continue
+			killed++
 		}
-		if pgid != a.PID || a.Command == "" || !strings.Contains(command, a.Command) {
-			continue
+		if killed > 0 {
+			fmt.Fprintf(out, "killed %d leftover process(es) of worker %d (%s attempt %d %s), whose agent had already exited\n", killed, a.PID, a.TaskID, a.N, a.Role)
 		}
-		if err := host.KillGroup(pgid); err != nil {
-			return fmt.Errorf("kill leftover worker %d (%s attempt %d %s): %w; stop it by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+		if left > 0 {
+			fmt.Fprintf(out, "left %d process(es) of group %d alone: not running inside the task's worktree\n", left, a.PID)
 		}
-		fmt.Fprintf(out, "killed leftover worker %d (%s attempt %d %s)\n", a.PID, a.TaskID, a.N, a.Role)
+		return nil
 	}
+	if pgid != a.PID || a.Command == "" || !strings.Contains(command, a.Command) {
+		return nil
+	}
+	if err := host.KillGroup(pgid); err != nil {
+		return fmt.Errorf("kill leftover worker %d (%s attempt %d %s): %w; stop it by hand and retry", a.PID, a.TaskID, a.N, a.Role, err)
+	}
+	fmt.Fprintf(out, "killed leftover worker %d (%s attempt %d %s)\n", a.PID, a.TaskID, a.N, a.Role)
 	return nil
 }
 

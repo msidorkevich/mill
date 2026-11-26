@@ -113,6 +113,10 @@ func (h *Herdr) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
 		return nil, err
 	}
 	hd := &herdrHandle{host: h, ctx: ctx, pane: pane, tab: tab, files: files, done: make(chan struct{}), watched: make(chan struct{})}
+	// The tab file lets crash recovery close a tab a killed mill left open.
+	if err := writeTabFile(files.tab, HerdrTab{Tab: tab, Workspace: h.Workspace}); err != nil {
+		return nil, errors.Join(err, hd.closeTab())
+	}
 
 	if _, err := h.herdr("pane", "run", hd.pane, "sh", files.wrapper); err != nil {
 		return nil, errors.Join(err, hd.closeTab())
@@ -171,6 +175,96 @@ func parseTabCreate(out []byte) (pane, tab string, err error) {
 	return resp.Result.RootPane.PaneID, resp.Result.Tab.TabID, nil
 }
 
+// HerdrTab is a worker tab recorded in a herdr-*.tab file next to the wrapper's files.
+type HerdrTab struct {
+	Tab       string `json:"tab"`
+	Workspace string `json:"workspace"` // "" = herdr's default workspace
+	// Bin is the herdr binary CloseHerdrTab runs; "" resolves "herdr" on PATH. It is not
+	// recorded: the caller sets it the way it selects the herdr host.
+	Bin string `json:"-"`
+	// File is the herdr-*.tab file the tab was read from.
+	File string `json:"-"`
+}
+
+// writeTabFile records t in path as JSON {"tab": ..., "workspace": ...}.
+func writeTabFile(path string, t HerdrTab) error {
+	b, err := json.Marshal(t)
+	if err != nil {
+		return fmt.Errorf("herdr host: tab file %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
+		return fmt.Errorf("herdr host: write tab file %s: %w; the worker's tab was closed", path, err)
+	}
+	return nil
+}
+
+// RecordedHerdrTabs returns the tabs recorded in every herdr-*.tab file in dir, in file name
+// order. A missing dir holds none.
+func RecordedHerdrTabs(dir string) ([]HerdrTab, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("herdr host: read recorded tabs in %s: %w", dir, err)
+	}
+	var tabs []HerdrTab
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "herdr-") || !strings.HasSuffix(name, ".tab") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("herdr host: read tab file %s: %w", path, err)
+		}
+		var t HerdrTab
+		if err := json.Unmarshal(b, &t); err != nil || t.Tab == "" {
+			return nil, fmt.Errorf("herdr host: tab file %s holds %q, not {\"tab\": ..., \"workspace\": ...}: close the tab by hand and delete the file", path, strings.TrimSpace(string(b)))
+		}
+		t.File = path
+		tabs = append(tabs, t)
+	}
+	return tabs, nil
+}
+
+// CloseHerdrTab runs `herdr tab close <tab>`. It returns closed=false and no error when herdr
+// is not installed or reports that the tab does not exist (it was already closed).
+func CloseHerdrTab(t HerdrTab) (closed bool, err error) {
+	bin := t.Bin
+	if bin == "" {
+		if bin, err = exec.LookPath("herdr"); err != nil {
+			return false, nil
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, "tab", "close", t.Tab)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		msg := strings.TrimSpace(stderr.String() + " " + stdout.String())
+		if tabMissing(msg) {
+			return false, nil
+		}
+		return false, fmt.Errorf("herdr host: %s tab close %s: %w: %s; close herdr tab %s by hand", bin, t.Tab, err, msg, t.Tab)
+	}
+	return true, nil
+}
+
+// tabMissing reports whether herdr's output says the tab does not exist.
+func tabMissing(msg string) bool {
+	m := strings.ToLower(msg)
+	for _, s := range []string{"not found", "not_found", "no such", "does not exist", "doesn't exist", "unknown tab"} {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // waitPID waits for the pid file, which holds the pid of the worker's process group leader
 // and the pid of the outer wrapper that writes the exit file.
 func (h *Herdr) waitPID(path string) (pid, wrapperPID int, err error) {
@@ -194,7 +288,7 @@ func (h *Herdr) waitPID(path string) (pid, wrapperPID int, err error) {
 
 // wrapperFiles are the files one run uses to talk to mill.
 type wrapperFiles struct {
-	wrapper, pid, rc, exit string
+	wrapper, pid, rc, exit, tab string
 }
 
 // writeWrapper writes the wrapper script into the log directory. Run as `sh wrapper`, it
@@ -222,7 +316,7 @@ func writeWrapper(spec ProcSpec) (wrapperFiles, error) {
 		return wrapperFiles{}, fmt.Errorf("herdr host: wrapper: %w", err)
 	}
 	base := strings.TrimSuffix(f.Name(), ".sh")
-	files := wrapperFiles{wrapper: f.Name(), pid: base + ".pid", rc: base + ".rc", exit: base + ".exit"}
+	files := wrapperFiles{wrapper: f.Name(), pid: base + ".pid", rc: base + ".rc", exit: base + ".exit", tab: base + ".tab"}
 
 	orNull := func(p string) string {
 		if p == "" {
@@ -293,10 +387,16 @@ type herdrHandle struct {
 
 func (h *herdrHandle) PID() int { return h.pid }
 
-// closeTab closes the worker's tab once; later calls return the first result.
+// closeTab closes the worker's tab once; later calls return the first result. A closed tab's
+// tab file goes with it, so recovery never closes a later tab that reuses its id.
 func (h *herdrHandle) closeTab() error {
 	h.closeOnce.Do(func() {
-		_, h.closeErr = h.host.herdr("tab", "close", h.tab)
+		if _, h.closeErr = h.host.herdr("tab", "close", h.tab); h.closeErr != nil {
+			return
+		}
+		if err := os.Remove(h.files.tab); err != nil && !errors.Is(err, os.ErrNotExist) {
+			h.closeErr = fmt.Errorf("herdr host: remove tab file of closed tab %s: %w; delete it by hand", h.tab, err)
+		}
 	})
 	return h.closeErr
 }

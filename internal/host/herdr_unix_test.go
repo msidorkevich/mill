@@ -463,3 +463,144 @@ func TestHerdrWaitReturnsAfterCancelWhenExitFileNeverAppears(t *testing.T) {
 		t.Fatalf("herdr calls = %q, want tab close w8:t2 last", calls)
 	}
 }
+
+func TestHerdrStartRecordsTabFileInLogDir(t *testing.T) {
+	t.Parallel()
+	hh, _, _ := fakeHerdr(t, "")
+	dir := t.TempDir()
+	logs := filepath.Join(dir, "a1")
+	h, err := hh.Start(context.Background(), ProcSpec{
+		Argv: []string{"/bin/sleep", "30"}, Env: []string{"PATH=/usr/bin:/bin"},
+		StdoutPath: filepath.Join(dir, "out"), LogDir: logs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, _ := filepath.Glob(filepath.Join(logs, "herdr-*.tab"))
+	if len(files) != 1 {
+		t.Fatalf("tab files in log dir = %v, want one", files)
+	}
+	if got, want := strings.TrimSpace(read(t, files[0])), `{"tab":"w8:t2","workspace":"w8"}`; got != want {
+		t.Fatalf("tab file = %s, want %s", got, want)
+	}
+	tabs, err := RecordedHerdrTabs(logs)
+	if err != nil || len(tabs) != 1 || tabs[0].Tab != "w8:t2" || tabs[0].Workspace != "w8" || tabs[0].File != files[0] {
+		t.Fatalf("RecordedHerdrTabs = %+v, %v", tabs, err)
+	}
+	if err := h.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	waitHerdr(t, h)
+	// Once mill closed the tab, recovery has nothing left to close.
+	if tabs, err := RecordedHerdrTabs(logs); err != nil || len(tabs) != 0 {
+		t.Fatalf("after close: RecordedHerdrTabs = %+v, %v", tabs, err)
+	}
+
+	// Without a workspace the file records "".
+	hh.Workspace = ""
+	logs2 := filepath.Join(dir, "a2")
+	h, err = hh.Start(context.Background(), ProcSpec{
+		Argv: []string{"/bin/sleep", "30"}, Env: []string{"PATH=/usr/bin:/bin"},
+		StdoutPath: filepath.Join(dir, "out2"), LogDir: logs2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := h.Kill(); err != nil {
+			t.Error(err)
+		}
+		waitHerdr(t, h)
+	}()
+	files, _ = filepath.Glob(filepath.Join(logs2, "herdr-*.tab"))
+	if len(files) != 1 || strings.TrimSpace(read(t, files[0])) != `{"tab":"w8:t2","workspace":""}` {
+		t.Fatalf("tab files = %v", files)
+	}
+}
+
+func TestHerdrStartFailsAndClosesTabWhenTabFileCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	logs := filepath.Join(t.TempDir(), "logs")
+	// tab create puts a directory where the tab file goes.
+	hh, log, _ := fakeHerdr(t, `for f in `+shQuote(logs)+`/herdr-*.sh; do mkdir "${f%.sh}.tab"; done; echo '`+realTabCreate+`'`)
+	_, err := hh.Start(context.Background(), ProcSpec{Argv: []string{"/bin/true"}, LogDir: logs})
+	if err == nil || !strings.Contains(err.Error(), "tab file "+logs) || !strings.Contains(err.Error(), ".tab") {
+		t.Fatalf("err = %v, want it to name the tab file", err)
+	}
+	calls := herdrLog(t, log)
+	if len(calls) != 2 || calls[1] != "tab close w8:t2" {
+		t.Fatalf("herdr calls = %q, want the tab closed and no pane run", calls)
+	}
+}
+
+func TestRecordedHerdrTabsReadsEveryTabFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if tabs, err := RecordedHerdrTabs(dir); err != nil || len(tabs) != 0 {
+		t.Fatalf("empty dir: %+v, %v", tabs, err)
+	}
+	if tabs, err := RecordedHerdrTabs(filepath.Join(dir, "missing")); err != nil || len(tabs) != 0 {
+		t.Fatalf("missing dir: %+v, %v", tabs, err)
+	}
+	for name, body := range map[string]string{
+		"herdr-1.tab": `{"tab":"w8:t2","workspace":"w8"}`,
+		"herdr-2.tab": `{"tab":"t5","workspace":""}`,
+		"herdr-1.pid": "1 2",
+		"other.tab":   `{"tab":"nope"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tabs, err := RecordedHerdrTabs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tabs) != 2 || tabs[0].Tab != "w8:t2" || tabs[0].Workspace != "w8" || tabs[1].Tab != "t5" || tabs[1].Workspace != "" {
+		t.Fatalf("tabs = %+v", tabs)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "herdr-3.tab"), []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordedHerdrTabs(dir); err == nil || !strings.Contains(err.Error(), "herdr-3.tab") {
+		t.Fatalf("err = %v, want the bad file named", err)
+	}
+}
+
+func TestCloseHerdrTabClosesOrReportsGone(t *testing.T) {
+	t.Parallel()
+	hh, log, dir := fakeHerdr(t, "")
+	closed, err := CloseHerdrTab(HerdrTab{Tab: "w8:t2", Workspace: "w8", Bin: hh.Bin})
+	if err != nil || !closed {
+		t.Fatalf("close = %v, %v, want closed", closed, err)
+	}
+	if calls := herdrLog(t, log); len(calls) != 1 || calls[0] != "tab close w8:t2" {
+		t.Fatalf("herdr calls = %q", calls)
+	}
+
+	// herdr is not installed.
+	closed, err = CloseHerdrTab(HerdrTab{Tab: "w8:t2", Bin: filepath.Join(dir, "no-herdr")})
+	if err != nil || closed {
+		t.Fatalf("no herdr: %v, %v, want not closed and no error", closed, err)
+	}
+
+	// herdr reports the tab does not exist.
+	gone := filepath.Join(dir, "herdr-gone")
+	if err := os.WriteFile(gone, []byte("#!/bin/sh\necho \"error: tab $3 not found\" >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	closed, err = CloseHerdrTab(HerdrTab{Tab: "w8:t2", Bin: gone})
+	if err != nil || closed {
+		t.Fatalf("tab gone: %v, %v, want not closed and no error", closed, err)
+	}
+
+	// Any other failure is an error that says what to do.
+	broken := filepath.Join(dir, "herdr-broken")
+	if err := os.WriteFile(broken, []byte("#!/bin/sh\necho 'server unreachable' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	closed, err = CloseHerdrTab(HerdrTab{Tab: "w8:t2", Bin: broken})
+	if err == nil || closed || !strings.Contains(err.Error(), "server unreachable") || !strings.Contains(err.Error(), "close herdr tab w8:t2 by hand") {
+		t.Fatalf("broken herdr: %v, %v", closed, err)
+	}
+}
