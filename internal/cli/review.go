@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -21,7 +22,7 @@ import (
 	"github.com/msidorkevich/mill/internal/store"
 )
 
-const reviewUsage = "Usage: mill review [--json] | show <id> [--diff] [--json] | changes <id> (-m <text> | --file <path>) | reject <id> -m <reason> | approve (<id>... | --goal <g>)"
+const reviewUsage = "Usage: mill review [--json] | show <id> [--diff] [--json] | changes <id> (-m <text> | --file <path>) | reject <id> -m <reason> | approve (<id>... | --goal <g> [--no-combined])"
 
 func runReview(ctx context.Context, env Env, args []string) int {
 	if len(args) > 0 {
@@ -546,11 +547,12 @@ func runReviewReject(ctx context.Context, env Env, args []string) int {
 	return ExitOK
 }
 
-const approveUsage = "mill review approve (<id>... | --goal <g>)"
+const approveUsage = "mill review approve (<id>... | --goal <g> [--no-combined])"
 
 func runReviewApprove(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "review approve")
 	goalID := fs.String("goal", "", "approve every verified or published task of this goal, dependencies first")
+	noCombined := fs.Bool("no-combined", false, "skip the combined check of the verified branches before publishing")
 	var ids []string
 	for len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		ids, args = append(ids, args[0]), args[1:]
@@ -585,6 +587,16 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 		}
 	}
 	code := ExitOK
+	if *goalID != "" && !*noCombined {
+		held, err := combinedHoldBack(ctx, env, paths, cfg, s, *goalID, ids)
+		if err != nil {
+			return fail(err)
+		}
+		if len(held) > 0 {
+			ids = slices.DeleteFunc(ids, func(id string) bool { return slices.Contains(held, id) })
+			code = ExitError
+		}
+	}
 	for _, id := range ids {
 		if err := approveClaimed(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id, GateSlotPoll: approveGateSlotPoll}); err != nil {
 			fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
