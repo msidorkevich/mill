@@ -249,15 +249,44 @@ agent, and delivers each task as its own branch for a human to review and merge 
 
 - **HK1.** Optional scripts configured in `.mill/config.toml`: `on_publish`, `on_update`,
   `status`. `on_publish` is the natural place to open a draft PR in the forge.
-- **HK2.** Hooks receive JSON on stdin: task, branch, base, head sha, title, description,
-  verifier report.
+  - `on_publish` runs after a task's first publish.
+  - `on_update` runs after every later push of a published task (restack, fixer, requested
+    changes) and when its base changes, e.g. its parent landed and it now targets `main`.
+  - Within one pass, hooks run parent first, so a child's hook can find its parent's PR.
+- **HK2.** Hooks receive JSON on stdin (a versioned schema, like the `--json` outputs):
+  - `event` (`publish` / `update`), goal and task ids, title, description;
+  - the review branch, its base branch (the parent's review branch for a stacked task, otherwise
+    `main`), the previous base on `update`, head sha, remote name and URL;
+  - the parent task and its review branch, and the task's position in its stack;
+  - the verifier report, the gate result with its sha, cost, and the skipped tests the task
+    added.
 - **HK3.** A missing hook is skipped. A failing hook is reported but never changes task state.
-- **HK4.** Example GitHub and Bitbucket hooks ship *outside* the core.
-  - GitHub: `gh pr create --draft`, base = the task's base branch.
-  - Bitbucket Cloud: REST API 2.0 pull requests (`curl` + `jq`), destination = the task's base
-    branch, draft when the workspace supports it; credentials (an API token) come from the
-    environment, never from `.mill/config.toml`. `status` reads Bitbucket Pipelines build
-    statuses for the head sha.
+  - Hooks must be idempotent: mill may run the same event again (after a crash, or when the
+    operator re-runs it), and a second run must update what the first created, never duplicate
+    it.
+  - mill records each hook run (event, exit code, output tail) as an event, shown in
+    `mill task show`, so a failed hook is visible and can be re-run.
+  - `mill doctor` runs each configured hook with `MILL_HOOK_CHECK=1` and no stdin; the script
+    checks its own prerequisites (CLI installed, logged in, repository reachable) and exits 0.
+    The core never knows which forge it is.
+- **HK4.** Example GitHub and Bitbucket hooks ship *outside* the core. Both handle stacks:
+  - One PR per review branch. The script first looks for an open PR from the branch: if there is
+    one it updates its base, title and body; otherwise it creates a draft PR.
+  - The base is the parent's review branch for a stacked task, so each PR shows only its own
+    commits. On `update` with a new base (the parent landed) the PR is retargeted to it.
+  - The body carries the description and, for a stacked task, "Stacked on #N: merge that
+    first", with the parent PR found by its branch.
+  - All PRs of a stack exist before any of them can be merged: mill publishes a stack's tasks in
+    one pass (HK1). A fan-in task publishes only after its other dependencies land, so its base
+    is the one parent left or `main`.
+  - The README recommends the forge setting that deletes a branch when its PR merges (GitHub:
+    "Automatically delete head branches"; Bitbucket: "Delete source branch after merging"), so
+    the forge retargets open child PRs to `main`, and warns that a PR cannot be opened against
+    a parent branch that is already gone.
+  - GitHub: `gh pr list --head`, `gh pr create --draft`, `gh pr edit --base`.
+  - Bitbucket Cloud: REST API 2.0 pull requests (`curl` + `jq`), draft when the workspace
+    supports it; credentials (an API token) come from the environment, never from
+    `.mill/config.toml`. `status` reads Bitbucket Pipelines build statuses for the head sha.
 
 ### Budgets (BG)
 
