@@ -105,3 +105,31 @@ func TestOutOfScopeMixedFindingsOnlyInScopeReachNextAttempt(t *testing.T) {
 		t.Fatalf("log:\n%s", e.out)
 	}
 }
+
+func TestOutOfScopeFindingOnLandedSiblingFileStaysAFail(t *testing.T) {
+	t.Parallel()
+	e := setup(t, `true`, runner.Script{
+		runner.RoleImplementer: {impl(map[string]string{"a.txt": "a"}), impl(map[string]string{"a.txt": "a2"})},
+		runner.RoleVerifier: {
+			fileVerdict("fail", [2]string{"b.txt", "b.txt lacks a header"}),
+			verdict("pass"),
+		},
+	}, nil)
+	e.ownsGoal(t)
+	if err := e.p.Store.SetTaskStatus(context.Background(), "g1/b", store.TaskLanded, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if out := e.run(t, "g1/a"); out.Status != store.TaskVerified {
+		t.Fatalf("outcome = %+v\n%s", out, e.out)
+	}
+	if !strings.Contains(e.out.String(), "g1/a a1 verdict   fail: 1 finding(s)") {
+		t.Fatalf("log:\n%s", e.out)
+	}
+	ps := prompts(e.fake, runner.RoleImplementer)
+	if len(ps) != 2 || !strings.Contains(ps[1], "b.txt lacks a header") {
+		t.Fatalf("implementer prompts = %q", ps)
+	}
+	if evs := e.outOfScopeEvents(t, "g1/a"); len(evs) != 0 {
+		t.Fatalf("events = %+v", evs)
+	}
+}

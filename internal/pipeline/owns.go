@@ -73,8 +73,8 @@ func (p *Pipeline) dependents(ctx context.Context, id string, tasks []store.Task
 }
 
 // splitOutOfScope splits verifier findings of t into those for t and those about a file
-// another task of t's goal owns and t does not. owners maps each out-of-scope file to the
-// ids of the tasks owning it, in plan order.
+// another task of t's goal, not yet landed, owns and t does not. owners maps each
+// out-of-scope file to the ids of those tasks, in plan order.
 func (p *Pipeline) splitOutOfScope(ctx context.Context, t store.Task, findings []prompt.Finding) (in, out []prompt.Finding, owners map[string][]string, err error) {
 	owners = map[string][]string{}
 	if t.GoalID == "" {
@@ -91,7 +91,7 @@ func (p *Pipeline) splitOutOfScope(ctx context.Context, t store.Task, findings [
 		}
 		var ids []string
 		for _, s := range tasks {
-			if s.ID == t.ID {
+			if s.ID == t.ID || s.Status == store.TaskLanded {
 				continue
 			}
 			for _, o := range s.Owns {
