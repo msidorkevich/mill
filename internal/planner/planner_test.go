@@ -184,7 +184,8 @@ func options(t *testing.T, f *runner.Fake) Options {
 	root := gitRepo(t, map[string]string{"go.mod": "module x\n"})
 	return Options{Runner: f, Goal: "add a greeting", Root: root, CheckCmd: "go test ./...", Model: "opus",
 		Budget: budget.Limits{USD: 3}, Count: budget.CountBillable, LogDir: t.TempDir(),
-		ProtectedPaths: []string{filepath.Join(root, ".mill")}, Env: []string{"PATH=/bin"}}
+		ProtectedPaths: []string{filepath.Join(root, ".mill")}, Env: []string{"PATH=/bin"},
+		TmpDir: filepath.Join(t.TempDir(), ".tmp", "plan-x")}
 }
 
 func step(out string, usd float64) runner.Step {
@@ -209,7 +210,7 @@ func TestGenerateReturnsValidPlanFromFirstCall(t *testing.T) {
 	c := calls[0]
 	if c.Role != runner.RolePlanner || c.Dir != o.Root || string(c.Schema) != string(PlanSchema) ||
 		!slices.Equal(c.Tools, []string{"Read", "Glob", "Grep"}) || c.Model != "opus" ||
-		!slices.Equal(c.ProtectedPaths, o.ProtectedPaths) || !slices.Equal(c.Env, o.Env) || c.Budget != o.Budget {
+		!slices.Equal(c.ProtectedPaths, o.ProtectedPaths) || !slices.Equal(c.Env, o.Env) || c.Budget != o.Budget || c.TmpDir != o.TmpDir {
 		t.Errorf("request = %+v", c)
 	}
 	if !strings.Contains(c.Prompt, "add a greeting") || !strings.Contains(c.Prompt, "go.mod") {

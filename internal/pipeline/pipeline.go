@@ -878,6 +878,7 @@ func (p *Pipeline) agent(ctx context.Context, t store.Task, n int, role runner.R
 		Model: model, Budget: limits, Count: p.Cfg.Budget.Count,
 		Name:   fmt.Sprintf("%s a%d %s", t.ID, n, role),
 		LogDir: logDir, ProtectedPaths: []string{p.Paths.MillDir}, Env: p.env(p.AgentEnvAllow),
+		TmpDir: filepath.Join(p.Cfg.Worktrees(p.Paths.Root, p.Home), ".tmp", t.ID, fmt.Sprintf("a%d-%s", n, role)),
 		OnStart: func(st runner.Started) {
 			if err := p.Store.SetAttemptProcess(context.WithoutCancel(ctx), id, st.PID, st.Command, st.RawPath); err != nil {
 				mu.Lock()
