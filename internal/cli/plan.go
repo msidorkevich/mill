@@ -274,12 +274,18 @@ type planTask struct {
 	// CostLowUSD and CostHighUSD estimate the task's cost; null when a model has no rates.
 	CostLowUSD  *float64 `json:"cost_low_usd"`
 	CostHighUSD *float64 `json:"cost_high_usd"`
-	DependsOn   []string `json:"depends_on"`
-	Owns        []string `json:"owns"`
-	Checks      []string `json:"checks"`
-	Acceptance  []string `json:"acceptance"`
-	Status      string   `json:"status,omitempty"`
-	Phase       string   `json:"phase,omitempty"`
+	// CostBasis is "stats" when the estimate comes from the costs of CostTasks past tasks of
+	// the same size, complexity and model, "budget" when it comes from budget limits.
+	CostBasis string `json:"cost_basis"`
+	CostTasks int    `json:"cost_tasks"`
+	// costAvgUSD is the mean past-task cost behind a "stats" estimate.
+	costAvgUSD float64
+	DependsOn  []string `json:"depends_on"`
+	Owns       []string `json:"owns"`
+	Checks     []string `json:"checks"`
+	Acceptance []string `json:"acceptance"`
+	Status     string   `json:"status,omitempty"`
+	Phase      string   `json:"phase,omitempty"`
 }
 
 func runPlanShow(ctx context.Context, env Env, args []string) int {
@@ -321,8 +327,25 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 			Owns: nz(t.Owns), Checks: nz(t.Checks), Acceptance: nz(t.Acceptance),
 			Complexity: t.Complexity, ComplexityReason: t.ComplexityReason}
 		pt.Model, pt.ModelWhy = cfg.TaskModel(t.Size, t.Complexity, t.Model)
-		if lo, hi, ok := taskCostRange(cfg, pt.Model, t.Size); ok {
+		var past []float64
+		if pt.Model != "" {
+			if past, err = s.GroupTaskCosts(ctx, t.Size, t.Complexity, pt.Model); err != nil {
+				return fail(err)
+			}
+		}
+		if len(past) >= minStatsTasks {
+			lo, hi := percentile(past, 0.25), percentile(past, 0.90)
 			pt.CostLowUSD, pt.CostHighUSD = &lo, &hi
+			pt.CostBasis, pt.CostTasks = "stats", len(past)
+			for _, c := range past {
+				pt.costAvgUSD += c
+			}
+			pt.costAvgUSD /= float64(len(past))
+		} else {
+			pt.CostBasis = "budget"
+			if lo, hi, ok := taskCostRange(cfg, pt.Model, t.Size); ok {
+				pt.CostLowUSD, pt.CostHighUSD = &lo, &hi
+			}
 		}
 		if g.Status != store.GoalDraft {
 			st, err := s.GetTask(ctx, store.TaskID(g.ID, t.ID))
@@ -380,7 +403,14 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		if model == "" {
 			model = "(none)"
 		}
-		fmt.Fprintf(w, "   model       %s (%s), est. %s\n", model, t.ModelWhy, costRange(t.CostLowUSD, t.CostHighUSD))
+		est := costRange(t.CostLowUSD, t.CostHighUSD)
+		switch {
+		case t.CostBasis == "stats":
+			est += fmt.Sprintf(" (avg $%.2f, from %d past tasks)", t.costAvgUSD, t.CostTasks)
+		case t.CostLowUSD != nil:
+			est += " (from budget limits)"
+		}
+		fmt.Fprintf(w, "   model       %s (%s), est. %s\n", model, t.ModelWhy, est)
 		if t.Status != "" {
 			st := t.Status
 			if t.Phase != "" {
@@ -403,21 +433,27 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		}
 	}
 	var lo, hi float64
-	unpriced := 0
+	unpriced, fromStats, fromBudget := 0, 0, 0
 	for _, t := range tasks {
 		if t.CostLowUSD == nil {
 			unpriced++
 			continue
 		}
+		if t.CostBasis == "stats" {
+			fromStats++
+		} else {
+			fromBudget++
+		}
 		lo, hi = lo+*t.CostLowUSD, hi+*t.CostHighUSD
 	}
+	basis := fmt.Sprintf("(%d from past tasks, %d from budget limits)", fromStats, fromBudget)
 	switch {
 	case unpriced == len(tasks):
 		fmt.Fprintln(w, "\nEstimated cost: unknown (no task's model has prices; add [prices] to the config)")
 	case unpriced > 0:
-		fmt.Fprintf(w, "\nEstimated cost: $%.2f–$%.2f, excluding %d task(s) with unknown cost\n", lo, hi, unpriced)
+		fmt.Fprintf(w, "\nEstimated cost: $%.2f–$%.2f %s, excluding %d task(s) with unknown cost\n", lo, hi, basis, unpriced)
 	default:
-		fmt.Fprintf(w, "\nEstimated cost: $%.2f–$%.2f\n", lo, hi)
+		fmt.Fprintf(w, "\nEstimated cost: $%.2f–$%.2f %s\n", lo, hi, basis)
 	}
 	if len(warnings) > 0 {
 		fmt.Fprintln(w, "\nWarnings:")
@@ -429,6 +465,21 @@ func runPlanShow(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(w, "\nNext: `mill plan edit %s` to change it, or `mill plan approve %s`.\n", g.ID, g.ID)
 	}
 	return ExitOK
+}
+
+// minStatsTasks is how many finished past tasks of a task's size, complexity and model plan
+// show needs before it estimates the task's cost from their costs instead of budget limits.
+const minStatsTasks = 3
+
+// percentile returns the p-th (0..1) percentile of the ascending values, interpolating
+// linearly between the closest ranks.
+func percentile(sorted []float64, p float64) float64 {
+	pos := p * float64(len(sorted)-1)
+	i := int(pos)
+	if i+1 >= len(sorted) {
+		return sorted[len(sorted)-1]
+	}
+	return sorted[i] + (pos-float64(i))*(sorted[i+1]-sorted[i])
 }
 
 // taskCostRange estimates a task's cost on model. Low is one attempt using half its token

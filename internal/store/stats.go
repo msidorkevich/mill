@@ -127,3 +127,46 @@ func (s *Store) ModelStats(ctx context.Context) ([]ModelStat, error) {
 	})
 	return out, nil
 }
+
+// GroupTaskCosts returns the total cost (all attempts, retries included) of each finished
+// task (verified, published, landed, failed or blocked) with at least one implementer attempt
+// in the (size, complexity, model) group, grouped as ModelStats groups them: model is the
+// model of the task's first implementer attempt ("-" when unrecorded) and a task without a
+// stored complexity counts as medium. Costs are in ascending order. It changes nothing.
+func (s *Store) GroupTaskCosts(ctx context.Context, size, complexity, model string) ([]float64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.complexity,
+		COALESCE((SELECT a.model FROM attempts a WHERE a.task_id = t.id AND a.role = ?
+			ORDER BY a.n, a.id LIMIT 1), ''),
+		(SELECT COALESCE(SUM(a.cost_usd), 0) FROM attempts a WHERE a.task_id = t.id)
+		FROM tasks t
+		WHERE t.size = ? AND t.status IN (?, ?, ?, ?, ?)
+		AND EXISTS (SELECT 1 FROM attempts a WHERE a.task_id = t.id AND a.role = ?)`,
+		RoleImplementer, size, TaskVerified, TaskPublished, TaskLanded, TaskFailed, TaskBlocked,
+		RoleImplementer)
+	if err != nil {
+		return nil, fmt.Errorf("read task costs of %s/%s/%s: %w", size, complexity, model, err)
+	}
+	defer rows.Close()
+	var out []float64
+	for rows.Next() {
+		var c, m string
+		var cost float64
+		if err := rows.Scan(&c, &m, &cost); err != nil {
+			return nil, fmt.Errorf("read task costs of %s/%s/%s: %w", size, complexity, model, err)
+		}
+		if c == "" {
+			c = "medium" // as ModelStats
+		}
+		if m == "" {
+			m = "-"
+		}
+		if c == complexity && m == model {
+			out = append(out, cost)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read task costs of %s/%s/%s: %w", size, complexity, model, err)
+	}
+	sort.Float64s(out)
+	return out, nil
+}
