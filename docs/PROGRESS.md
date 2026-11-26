@@ -188,15 +188,15 @@ Exit criterion (toy Go repo, real agents):
 
 ### Follow-ups found in M2 reviews
 
-- [ ] A goal task's spec cannot be changed after approval; a blocked goal task can only be
+- [x] (done: `mill task edit`.) A goal task's spec cannot be changed after approval; a blocked goal task can only be
       retried as is (`mill run <goal> --retry-blocked`). Add a way to edit a task's spec.
-- [ ] The planner call has no time limit (`runner.attempt_timeout` is only applied in the
+- [x] (done: `planner.Options.Timeout`.) The planner call has no time limit (`runner.attempt_timeout` is only applied in the
       pipeline); a hung planner is stopped only by its budget.
-- [ ] Workers run in their own process groups, so `kill -9` of mill does not reach them. In the
+- [x] (done: crash recovery kills leftover workers (`killLeftoverWorkers`).) Workers run in their own process groups, so `kill -9` of mill does not reach them. In the
       real kill test no `claude` process was left 3s later, but that relies on Claude Code
       exiting by itself. Record each worker's process group and kill any survivors during
       crash recovery.
-- [ ] Attempts abandoned by a killed run record no usage (mill never saw their final result),
+- [x] (done: recovery records their usage (`interruptedUsage`).) Attempts abandoned by a killed run record no usage (mill never saw their final result),
       so goal and task spend under-count killed runs. Recovery could read the attempt's
       stream file and record the usage it reports.
 
@@ -238,20 +238,20 @@ The M2 follow-ups section above is resolved by this goal:
 
 ### Follow-ups found in the g2 reviews
 
-- [ ] Both gate failures in g2 came from the crash test written in g1, not from the code under
+- [x] (done: fixed in g2 by `worker-reaper`.) Both gate failures in g2 came from the crash test written in g1, not from the code under
       change: the test is flaky. `planner-timeout`'s retry fixed nothing (it re-ran until the
       test passed); `worker-reaper` fixed the test. Two races: (1) it killed mill while task a
       could still be running, so a reran (fixed: wait until a is verified); (2) "run lock still
       held" right after the killed process was reaped, seen twice in gates, not reproduced in 21
       local runs under load. The test now polls the lock for up to 10s, which would also hide a
       real "lock outlives its holder" bug. Watch for it.
-- [ ] `owns` is advisory: `worker-reaper` changed `internal/cli/crash_test.go`, outside its
+- [x] (done: `owns_policy`, and since `g16` an edit to another task's files fails the attempt.) `owns` is advisory: `worker-reaper` changed `internal/cli/crash_test.go`, outside its
       `owns`. Helpful here, but it is the kind of change `owns` exists to catch. Consider
       reporting changes outside `owns` as a finding, or at least showing them to the verifier.
-- [ ] The reaper only kills a group whose leader is still alive and matches. If the agent exited
+- [x] (done: recovery also kills group members running inside the task's worktree.) The reaper only kills a group whose leader is still alive and matches. If the agent exited
       but a child it started (e.g. a test run from its Bash tool) survives in the group, it is
       left alone.
-- [ ] A gate failure caused by a flaky or unrelated test makes the implementer "fix" code that
+- [x] (done: gate triage (TP8) and failing-test comparison (`g18`).) A gate failure caused by a flaky or unrelated test makes the implementer "fix" code that
       was fine, or retry until it passes. The verifier and findings could say when a failing test
       is outside the task's diff.
 
@@ -347,7 +347,7 @@ commit, rebase, squash), and mill detects each one.
 - [x] `sync` ($2.05): `mill sync`: merge detection, landed, restack (KP2, KP3), re-gate, re-publish
 - [x] `publish-e2e` ($0.28): end-to-end test with a bare remote and a forge script (merge commit,
       rebase, squash, trailer-only), SE2 test, README publishing section
-- [ ] Dogfood exit: publish M3's own branches to a local bare forge, merge them there, `mill
+- [x] (superseded: every goal since `g5` has been published to GitHub, merged there and detected by `mill sync`.) Dogfood exit: publish M3's own branches to a local bare forge, merge them there, `mill
       sync` detects each
 - [x] `publish-guards` ($1.48; found in review of g5): (1) publishing a child whose parent landed
       before `mill sync` restacked it would reuse the parent's unsquashed commits; (2) a child
@@ -372,14 +372,14 @@ commit, rebase, squash), and mill detects each one.
 
 ### Follow-ups found in M3
 
-- [ ] `mill init` writes `base_branch = "main"` regardless of the repo; it should write the
+- [x] (done: `mill init` writes the current branch.) `mill init` writes `base_branch = "main"` regardless of the repo; it should write the
       repo's current branch (this repo uses `master`).
-- [ ] The published description renders acceptance criteria as `- [ ]`; they are verified, so
+- [x] (done: they render as `- [x]`.) The published description renders acceptance criteria as `- [ ]`; they are verified, so
       `- [x]` (or plain bullets).
-- [ ] Landed tasks keep their local branches and worktrees (33 now), and `review/*` branches stay
+- [x] (done: `mill clean`.) Landed tasks keep their local branches and worktrees (33 now), and `review/*` branches stay
       on the remote after landing. Add a cleanup (`mill clean`): remove worktrees and branches of
       landed tasks, and optionally delete their review branches (allowed under SE2).
-- [ ] mill's own gate now takes ~4 minutes (many end-to-end git tests, run twice: `make check`
+- [x] (done: `g15`, plus plan warnings for task checks that repeat `check_cmd`.) mill's own gate now takes ~4 minutes (many end-to-end git tests, run twice: `make check`
       plus the task's `-race` checks). Consider sharding, or skipping the duplicate run when a
       task's checks are a subset of `check_cmd`.
 - [ ] Minor (from the verifier): if `Runner.Run` panics, the live-usage writer goroutine leaks.
@@ -527,16 +527,16 @@ skipped.
       saved). Improve the planner prompt: prefer parallelism, and put end-to-end tests that span
       several features in their own task so feature tasks do not depend on each other only for
       a test.
-- [ ] When reviewing a plan, flag dependencies that exist only because of a test, and consider
+- (part of my plan-review checklist; the planner side is in `g22`.) When reviewing a plan, flag dependencies that exist only because of a test, and consider
       splitting the test out before approving.
 
 ### Follow-ups found while landing g10
 
-- [ ] `mill keep --watch` re-runs the combined check on every pass with two or more ready
+- [x] (done: "combined check: unchanged since the last check".) `mill keep --watch` re-runs the combined check on every pass with two or more ready
       branches, even when nothing changed since the last green check; on mill that is a full
       gate (several minutes) per pass, so `--interval 1m` became 5+ minutes. Remember the last
       green result per set of ready branches and their heads; re-run only when the set changes.
-- [ ] Process note (mine): I checked GitHub once, just before the operator's merge landed, and
+- [x] (process rule, kept as a memory: check the base branch and the GitHub API before reporting merges.) Process note (mine): I checked GitHub once, just before the operator's merge landed, and
       wrongly said the wrong PR had been merged. Check what the base branch contains (which
       tasks landed), not the top PR number, and re-fetch before concluding.
 
@@ -656,7 +656,7 @@ kept focus, and the tabs closed when the workers ended.
       already in the base branch, so it needs no branch. Fix: base new branches like restacks
       already do (`internal/fanin`): landed dependencies come from the remote base tip, and only
       unlanded dependencies are merged by branch. No tokens were spent on the failed attempt.
-- [ ] **Slow gates** (measured during `g12`). A gate takes at least 5 minutes: `internal/cli`'s
+- [x] (done: goal `g15`.) **Slow gates** (measured during `g12`). A gate takes at least 5 minutes: `internal/cli`'s
       145 integration tests take ~300s, and no test in the repository uses `t.Parallel()`, so
       they use about one of 8 cores. Two gates at once, next to the agents, pushed the load
       average to 132 on 8 cores, and test file churn kept `fseventsd` near 95% CPU.
@@ -697,7 +697,7 @@ kept focus, and the tabs closed when the workers ended.
 - [x] **`mill watch` says "nothing running" during gates** (task `watch-shows-gates`, PR #40).
       It lists only agent attempts, and the gate is not one; the TUI Agents view has the same
       gap. Fix: show every running stage with elapsed time and the gate log's last line.
-- [ ] **One scheduler for all goals** (operator decision 2026-11-23; planned as the next goal,
+- [x] (done: goal `g13`.) **One scheduler for all goals** (operator decision 2026-11-23; planned as the next goal,
       before fast gates). Today each `mill run <goal>` or `mill task run` starts its own
       scheduler, and the repository lock allows one such process, so only one goal (or one
       single task) runs at a time, and work had to be queued by hand. A goal is only a group of
@@ -716,7 +716,7 @@ Order after M5: `herdr-robust`, `watch-shows-gates`, one scheduler for all goals
 
 More follow-ups found while landing M5:
 
-- [ ] **"done" hides unmerged work.** A goal whose tasks are all published shows `done`, and I
+- [x] (done: goals end as `landed` once every task has landed.) **"done" hides unmerged work.** A goal whose tasks are all published shows `done`, and I
       reported M5 as landed while PR #39 was still open. `mill goal show` should say
       `published, not merged` until every task has landed.
 - [ ] **Branches planned against an old base.** Tasks running in parallel with merges started
@@ -778,7 +778,7 @@ together: they compile and their packages pass).
       `mill task show --json` failed twice: the id must be the bare plan id
       (`run-command-one-scheduler`, not `g13/...`) and `depends_on` must be present even though
       `task show` leaves it out. `task edit` should accept what `task show --json` prints.
-- [ ] **Publish before restarting a run.** I restarted `g13` before publishing its ready tasks,
+- [x] (obsolete since one scheduler (`g13`).) **Publish before restarting a run.** I restarted `g13` before publishing its ready tasks,
       so the run's lock blocked publishing again. Goes away with this goal; until then, publish
       first.
 - [x] **Restacks replay every attempt** (task `restack-net-change`, PR #51). `mill sync`
@@ -799,7 +799,7 @@ together: they compile and their packages pass).
       inject polling intervals of milliseconds, the way tests already inject clocks, and the
       planner prompt should say so for test tasks. Part of the fast-gates goal.
       (done in `g15`: injected millisecond polls)
-- [ ] **I listed merged PRs as open** three times (#33, #37, #49). Before sending a PR link I
+- [x] (process rule, kept as a memory.) **I listed merged PRs as open** three times (#33, #37, #49). Before sending a PR link I
       check the GitHub API for its state, not only that the branch exists.
 
 - [x] **Sync never retried a task it had blocked** (task `sync-retries-restack-blocks`, PR #52,
@@ -842,7 +842,7 @@ Not yet planned into a goal unless noted. Grouped by area; each names what was s
 - [x] **Identical trees are gated again.** A restacked task whose tree equals one that already
       passed its gate should reuse that result, like the combined check's fingerprint cache.
       (done in `g15`, task `gate-result-reuse`)
-- [ ] Fast gates (A, B, E and fast end-to-end tests above) stay the biggest win: `internal/cli`
+- [x] (done: goal `g15`.) Fast gates (A, B, E and fast end-to-end tests above) stay the biggest win: `internal/cli`
       now takes about 290 seconds per gate.
 
 ### Robustness of the graph
@@ -851,14 +851,14 @@ Not yet planned into a goal unless noted. Grouped by area; each names what was s
       `g13` the end-to-end task could not start because two dependencies collided; restack
       conflicts go to the resolver agent, preparation conflicts only block. Use the resolver
       there too (or at least offer it in the block message).
-- [ ] **Re-check what a block records.** Twice a state change that recorded a problem also
+- (rule for new code.) **Re-check what a block records.** Twice a state change that recorded a problem also
       stopped mill from looking again (a blocked restack never retried; a published goal shown as
       done). Rule for new code: every blocked or terminal state names what clears it, and the
       code that can clear it re-checks it.
 
 ### Planning and review
 
-- [ ] **My plan review checks ownership, not scope.** Besides overlapping criteria (above), the
+- (my plan-review checklist; partly automated by plan warnings since `g19`.) **My plan review checks ownership, not scope.** Besides overlapping criteria (above), the
       checklist when I review a plan: every criterion can be met in the task's own files; no
       task's checks rerun a whole package that `check_cmd` covers; parallel tasks that add tests
       to the same package use task-specific helper names; docs tasks run last and own only
@@ -1326,3 +1326,17 @@ Four tasks needed a second attempt, all for real problems the verifiers found: a
 imitated the pipeline's log line instead of checking the real one, an untested planner path, a
 wrong README path, and a bug that came from the plan itself: `mill clean` derived the temp
 directory from the worktree's parent, which is wrong for goal tasks (`<root>/<goal>/<task>`).
+
+## Open items from earlier goals (reviewed 2026-11-26)
+
+Every unticked item above was checked against the code: 19 were already done, superseded or
+obsolete and are now ticked with what did it; five are process rules (two of them kept as my
+memories). Still open:
+
+- planned as `g22`: preparation conflicts go to the resolver; warn or rebase when a task's owned
+  files changed on the base; combined check over verified siblings before a batch is published;
+  the planner puts cross-feature tests in their own task; the usage writer survives a runner
+  panic;
+- for M6, with the PR hooks: the fan-in publish rule makes wide graphs land in many rounds;
+- deferred: GT7 (rebuild state from git);
+- watching: "cannot lock ref" from overlapping re-publishes (not seen so far).
