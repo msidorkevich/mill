@@ -3,8 +3,8 @@
 Requirement IDs refer to [REQUIREMENTS.md](REQUIREMENTS.md).
 
 **The MVP is M0–M3**: planning, execution, review, publishing and merge detection, all from the
-CLI. M4 makes parallel work safe at scale, M5 makes it pleasant to use, M6 connects forges and
-more providers.
+CLI. M4 makes parallel work safe at scale, M5 makes it pleasant to use, M6 connects forges, more
+agent runners and Java + Gradle projects.
 
 ## Dogfood gate
 
@@ -133,11 +133,20 @@ flagged correctly.
 
 ## M6. Extensions
 
-- Hooks (`on_publish`, `on_update`, `status`) plus example GitHub and GitLab scripts outside the
-  core.
-- External CI signal via the `status` hook.
-- `codex` runner.
+- Hooks (`on_publish`, `on_update`, `status`) plus example GitHub and Bitbucket scripts outside
+  the core. The Bitbucket script opens a draft PR per published task through the Bitbucket Cloud
+  REST API, targeting the parent task's review branch so a stack reviews bottom-up.
+- External CI signal via the `status` hook (GitHub checks, Bitbucket Pipelines build statuses).
+- `opencode` runner (any provider opencode supports) and `codex` runner. The runner is chosen per
+  role, so the verifier can use a different provider than the implementer.
+- Java + Gradle projects: a toolchain adapter for the check command, narrow test checks,
+  failing-test triage from JUnit XML reports, added skipped tests, and Gradle caches and daemons
+  across worktrees.
 - Spend reports.
 
-**Requirements:** HK1–4, KP9, RN4, BG4
-**Exit criterion:** a forge PR is opened by a hook with zero forge code in the core.
+**Requirements:** HK1–4, KP9, RN4–5, TC1–4, BG4
+**Exit criteria:**
+
+- a Bitbucket PR is opened by a hook with zero forge code in the core;
+- a goal on a sample Java + Gradle repo runs from plan to published branches, with an `opencode`
+  implementer and a `claude` verifier.
