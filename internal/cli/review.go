@@ -123,7 +123,8 @@ func encodeJSON(env Env, name string, v any) int {
 type reviewEvent struct {
 	Kind string          `json:"kind"`
 	Data json.RawMessage `json:"data"`
-	// lines is the text rendering of an owns-outside event, one line per file; unexported so
+	// lines is the text rendering of an owns-outside event, one line per file, or of a
+	// verifier-out-of-scope event, one line per finding; unexported so
 	// --json keeps Data as it is.
 	lines []string
 }
@@ -143,6 +144,20 @@ func ownsOutsideLines(files []string, owners map[string][]string) []string {
 	return lines
 }
 
+// outOfScopeLines renders a verifier-out-of-scope event: "verifier-out-of-scope: <finding>
+// (owned by <ids>)" for each verifier finding about a file another task of the goal owns.
+func outOfScopeLines(findings []prompt.Finding, owners map[string][]string) []string {
+	lines := make([]string, 0, len(findings))
+	for _, f := range findings {
+		line := "verifier-out-of-scope: " + f.String()
+		if ids := owners[f.File]; len(ids) > 0 {
+			line += " (owned by " + strings.Join(ids, ", ") + ")"
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
 type reviewView struct {
 	Schema   string                 `json:"schema"`
 	Task     store.Task             `json:"task"`
@@ -153,7 +168,7 @@ type reviewView struct {
 	Gate     *gate.Result           `json:"gate,omitempty"`
 	Approval string                 `json:"approval,omitempty"` // "approved <timestamp> at attempt <n>" while an approval stands
 	Waiting  string                 `json:"waiting,omitempty"`  // what a queued approval waits for
-	Events   []reviewEvent          `json:"events"`             // gate-flaky, owns-outside, gate-base-failing of the last attempt
+	Events   []reviewEvent          `json:"events"`             // gate-flaky, owns-outside, gate-base-failing, verifier-out-of-scope of the last attempt
 	From     string                 `json:"from"`               // start of the diff
 	DiffStat string                 `json:"diff_stat"`
 	Diff     string                 `json:"diff,omitempty"`
@@ -245,19 +260,23 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 	}
 	for _, e := range evs {
 		switch e.Kind {
-		case "gate-flaky", "owns-outside", "gate-base-failing":
+		case "gate-flaky", "owns-outside", "gate-base-failing", "verifier-out-of-scope":
 			var d struct {
-				Attempt int                 `json:"attempt"`
-				Files   []string            `json:"files"`
-				Owners  map[string][]string `json:"owners"`
+				Attempt  int                 `json:"attempt"`
+				Files    []string            `json:"files"`
+				Owners   map[string][]string `json:"owners"`
+				Findings []prompt.Finding    `json:"findings"`
 			}
 			if err := json.Unmarshal(e.Data, &d); err != nil {
 				return fail(fmt.Errorf("corrupt %s event %d: %w", e.Kind, e.Seq, err))
 			}
 			if d.Attempt == v.Attempts {
 				ev := reviewEvent{Kind: e.Kind, Data: e.Data}
-				if e.Kind == "owns-outside" {
+				switch e.Kind {
+				case "owns-outside":
 					ev.lines = ownsOutsideLines(d.Files, d.Owners)
+				case "verifier-out-of-scope":
+					ev.lines = outOfScopeLines(d.Findings, d.Owners)
 				}
 				v.Events = append(v.Events, ev)
 			}
@@ -337,7 +356,7 @@ func printReview(env Env, v reviewView) {
 	if len(v.Events) > 0 {
 		fmt.Fprintf(w, "\nNotes from attempt %d:\n", v.Attempts)
 		for _, e := range v.Events {
-			if e.Kind == "owns-outside" {
+			if e.Kind == "owns-outside" || e.Kind == "verifier-out-of-scope" {
 				for _, l := range e.lines {
 					fmt.Fprintf(w, "  %s\n", l)
 				}
