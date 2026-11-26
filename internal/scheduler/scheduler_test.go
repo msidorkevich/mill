@@ -346,7 +346,9 @@ func TestBlockedDependencyLeavesDependentsPendingAndGoalBlocked(t *testing.T) {
 	if gl.Status != store.GoalBlocked || gl.Reason != res.Reason {
 		t.Fatalf("goal = %+v", gl)
 	}
-	for _, want := range []string{e + ": mill error: disk full", a + ": blocked: gate failed", "goal " + g + ": blocked: "} {
+	// The fake logs no pipeline line, so the scheduler's blocked line is absent here; see
+	// TestBlockedTaskIsLoggedOnceByPipeline.
+	for _, want := range []string{e + ": mill error: disk full", "goal " + g + ": blocked: "} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}

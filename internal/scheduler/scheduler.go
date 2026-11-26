@@ -534,8 +534,9 @@ func (s *Scheduler) finish(bg context.Context, st *runState, f finished) error {
 	}
 	if t, terr := s.Store.GetTask(bg, f.id); terr != nil {
 		err = errors.Join(err, terr)
-	} else if t.Status == store.TaskVerified && f.err == nil {
-		// The pipeline already logged "<task>: verified at <sha> (...)".
+	} else if (t.Status == store.TaskVerified || t.Status == store.TaskBlocked) && f.err == nil {
+		// The pipeline already logged "<task>: verified at <sha> (...)" or
+		// "<task>: blocked: <reason> (task total ...)". A mill error was logged above.
 	} else if t.Reason != "" {
 		s.logf("%s: %s: %s", t.ID, t.Status, t.Reason)
 	} else {
