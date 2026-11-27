@@ -245,7 +245,10 @@ separately by `max_parallel_gates` (see gate slots below). Each task gets the br
 is `done` (exit 0). When a task blocks or fails, the others continue; the goal then ends
 `blocked` with a reason naming the stopped tasks and the ones waiting on them (exit 4). Ctrl-C
 lets running tasks stop, returns them to pending and leaves the goal blocked; run `mill run g1`
-again to continue. `start_children_on = "published"` is not supported yet; use `"verified"`.
+again to continue. A task reopened during a run (by the merge check, or by `mill review changes`
+on a verified task) goes back to pending and runs again in the same run; its dependents wait for
+it and start from its re-verified head. `start_children_on = "published"` is not supported yet;
+use `"verified"`.
 
 `owns_policy` in `.mill/config.toml` sets what happens when an attempt changes files outside the
 task's `owns` (a task with empty `owns` is never restricted):
@@ -330,6 +333,26 @@ mill prints `gate reused (tree <sha>)` and records the attempt's gate as reused.
 gates are reused; a failure always runs again, and so does a gate that passed only after a triage
 re-run. A change to `check_cmd` or to the task's checks changes the fingerprint, so the gate
 runs again.
+
+**Merge check.** `merge_check_cmd` in `.mill/config.toml` (default empty: off) is a gate command
+that checks a verified task against the tasks it can clash with:
+
+```toml
+merge_check_cmd = "go vet ./..."
+```
+
+The check runs right after a task is verified. Its siblings are the other tasks of the same goal
+that are verified or published, not landed yet, and whose changed files share a directory with the
+task's changes. A task without such siblings is not checked. Mill merges the task's verified head
+with all its siblings in a throwaway worktree (removed afterwards) and runs the command there,
+holding a gate slot (`max_parallel_gates`, see above) while it runs. When a merge conflicts or the
+command fails, the task is not published: mill sends it back to pending with a `merge-check`
+finding that names the sibling tasks, the conflicting files or the command and the tail of its
+output. When several siblings are merged together and the clash needs all of them, the finding
+names them together; otherwise it names each clashing sibling. Mill records a `merge-check-failed`
+event (attempt, head, command, siblings and findings) and logs `merge check FAIL: clashes with ...`.
+A passing check logs `merge check ok`. If the command cannot run, the check fails. The reopened task
+runs again in the same run, and its dependents wait for it.
 
 If an `$EDITOR` result is invalid, mill prints the problems and keeps the edited file; fix it and
 run `mill plan edit g1 --file <path>`.
@@ -450,6 +473,18 @@ blocked and failed tasks back to pending and continues. To change a stopped goal
 but not removed or reordered, see `mill task edit` above), then `mill run g1 --retry-blocked`.
 Verified tasks are not run again.
 
+**Re-preparation.** When `--retry-blocked` puts a task back to pending and its dependencies changed
+since it was prepared, mill re-prepares the task before it runs: it rebases the task onto its
+dependencies' current branch heads (or, for a task without dependencies, onto the base branch) and
+logs `<task>: dependencies changed since preparation; rebased`. The dependencies count as changed
+when the task's branch does not contain the current head of each dependency's branch (landed
+dependencies are skipped) or, for a task without dependencies, the current tip of the base branch.
+A task without a branch, or with a dependency that is not verified, published or landed yet, is
+retried as before. When the check cannot decide or the rebase fails (for example on a conflict),
+the task is blocked again with a reason such as
+`` dependencies changed since preparation and rebasing onto them failed: <cause>; fix it, then run `mill task rebase <task>` and `mill run --retry-blocked` ``.
+It never starts on a stale starting point.
+
 **Usage limits.** When an agent run hits the account's usage limit (for example Claude's
 `five_hour` or `seven_day` limit), mill does not burn attempts on it. The attempt is recorded as
 `rate_limited` with the usage it reported, no findings are recorded and no further attempt is
@@ -463,6 +498,20 @@ until the reset time plus one minute (15 minutes when the reset time is unknown)
 rate-limited tasks back to pending and continues; Ctrl-C during the wait stops like any other
 interruption. `mill task run` ends a rate-limited task blocked (exit 4) with the same reason, and
 a rate-limited `mill plan "<goal>"` prints the limit and its reset time and creates no goal.
+
+**API timeouts and transient errors.** `api_timeout` in the `[runner]` section of
+`.mill/config.toml` (default `"15m"`, must be above 0) bounds one API request of a claude run: mill
+passes it to claude as the environment variable `API_TIMEOUT_MS`. An agent run that ends on an API
+timeout or an overload (HTTP 408, 500, 502, 503, 504 or 529, or a result saying the request timed
+out, the API is overloaded or it hit an internal server error) is a transient agent error. It is
+shown as an error in the log and recorded as an implementer or verifier attempt with status
+`transient`. The pipeline retries it within `max_attempts`: the next attempt keeps the findings it
+started with, and no finding is written for the transient error, so the task is not failed for it.
+A transient verifier error reruns only the verifier, because the change and its gate stand. When
+the last allowed attempt ends transient, the task is blocked with a reason such as
+`` transient agent errors (API timeouts or overload) exhausted the 3 attempt(s); run again later with `mill run --retry-blocked` ``.
+The planner retries a transient error once; if the second run fails the same way, `mill plan` fails
+and asks you to wait a few minutes and run it again.
 
 **Verifier budget.** `verifier_share` in the `[budget]` section of `.mill/config.toml` (default
 `0.25`, must be above 0 and at most 1) is the share of a task size's attempt limits that mill
@@ -631,6 +680,11 @@ code. A failed hook never changes a task's state: the branch is already pushed a
 the cause, then re-run the hook with `mill hook run`. Only `mill hook run` itself exits 1 when
 the hook fails, because the re-run is what you asked for. Mill keeps the last 20 lines (at most
 4 KB) of each run's output.
+
+**When a hook succeeds with output.** The last non-empty line of its output is printed as
+`hook on_<event> for <task>: <last line>`, for example `hook on_publish for g1/a: https://example.test/pr/1`
+or `hook on_update for g1/a: ...`. `mill review approve`, `mill keep` and `mill sync` print it for
+each hook they run that exits 0 without timing out; a hook with no output prints nothing.
 
 **Seeing hook runs.** Each run is recorded. `mill task show` and `mill review show` print the
 latest run of each event after the other details, one line per event:
