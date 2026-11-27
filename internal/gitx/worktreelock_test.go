@@ -154,7 +154,7 @@ func TestWorktreeAdminLockWaitHonoursContext(t *testing.T) {
 		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 			t.Fatal(err)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), wtExclHeldWait)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		start := time.Now()
 		unlock, err := lockWorktreeAdminPoll(ctx, r, time.Millisecond)
@@ -165,8 +165,8 @@ func TestWorktreeAdminLockWaitHonoursContext(t *testing.T) {
 		if !strings.Contains(err.Error(), lockPath) {
 			t.Errorf("error %q does not name the lock file %s", err, lockPath)
 		}
-		if d := time.Since(start); d > 30*time.Second {
-			t.Errorf("wait took %v after a %v deadline", d, wtExclHeldWait)
+		if d := time.Since(start); d > 5*time.Second {
+			t.Errorf("wait took %v after a 50ms deadline", d)
 		}
 		// The in-process mutex was released on failure: once the flock is free the lock
 		// is taken again.
@@ -186,7 +186,7 @@ func TestWorktreeAdminLockWaitHonoursContext(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), wtExclHeldWait)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
 		start := time.Now()
 		if err := AddWorktree(ctx, r, filepath.Join(t.TempDir(), "wt"), "blocked", "main"); err == nil {
@@ -194,8 +194,8 @@ func TestWorktreeAdminLockWaitHonoursContext(t *testing.T) {
 		} else if !strings.Contains(err.Error(), lockPath) {
 			t.Errorf("error %q does not name the lock file %s", err, lockPath)
 		}
-		if d := time.Since(start); d > 30*time.Second {
-			t.Errorf("wait took %v after a %v deadline", d, wtExclHeldWait)
+		if d := time.Since(start); d > 5*time.Second {
+			t.Errorf("wait took %v after a 50ms deadline", d)
 		}
 	})
 }

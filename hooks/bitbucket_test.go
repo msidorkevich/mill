@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,8 +40,6 @@ type bbServer struct {
 	srv       *httptest.Server
 	wantAuth  string
 
-	// mu guards every field below. The handler holds it for each request; tests use
-	// bbSet, bbOpenPRs and recorded.
 	mu       sync.Mutex
 	open     map[string]int // review branch -> open PR id
 	noRepo   bool           // GET /repositories/{ws}/{repo} answers 404
@@ -59,9 +56,7 @@ type bbServer struct {
 func bbNewServer(t *testing.T, workspace, repo string) *bbServer {
 	t.Helper()
 	s := &bbServer{t: t, workspace: workspace, repo: repo, open: map[string]int{}, statuses: map[string][]map[string]any{}, wantAuth: "Bearer test-token"}
-	// srv is set before Start, so the handler never sees it change.
-	s.srv = httptest.NewUnstartedServer(http.HandlerFunc(s.handle))
-	s.srv.Start()
+	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.srv.Close)
 	return s
 }
@@ -186,21 +181,6 @@ func (s *bbServer) handle(w http.ResponseWriter, r *http.Request) {
 
 func (s *bbServer) html(id int) string {
 	return fmt.Sprintf("https://bitbucket.example/%s/%s/pull-requests/%d", s.workspace, s.repo, id)
-}
-
-// bbSet changes the server's scripted state under the lock the handler holds. Tests write
-// that state only through it.
-func (s *bbServer) bbSet(change func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	change()
-}
-
-// bbOpenPRs returns a copy of the open pull requests by review branch.
-func (s *bbServer) bbOpenPRs() map[string]int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return maps.Clone(s.open)
 }
 
 func (s *bbServer) recorded() []bbRequest {
@@ -415,7 +395,7 @@ func TestBitbucketCreatesDraftPRWhenNoneIsOpen(t *testing.T) {
 func TestBitbucketUpdatesExistingPRWithoutDuplicate(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.open["mill/g1/feature"] = 7 })
+	s.open["mill/g1/feature"] = 7
 	res := bbRunHook(t, t.TempDir(), bbInput(t, map[string]any{"title": "New title"}), bbEnv(s)...)
 	bbExpectSuccess(t, res, s.html(7))
 
@@ -446,7 +426,7 @@ func TestBitbucketSecondRunUpdatesWhatFirstCreated(t *testing.T) {
 func TestBitbucketUpdateRetargetsToNewBase(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.open["mill/g1/feature"] = 9 })
+	s.open["mill/g1/feature"] = 9
 	in := bbInput(t, map[string]any{"event": "update", "base_branch": "main", "previous_base_branch": "mill/g1/parent"})
 	bbExpectSuccess(t, bbRunHook(t, t.TempDir(), in, bbEnv(s)...), s.html(9))
 	puts := s.bbOnly(http.MethodPut)
@@ -458,7 +438,7 @@ func TestBitbucketUpdateRetargetsToNewBase(t *testing.T) {
 func TestBitbucketStackedDescriptionNamesParentPR(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.open["mill/g1/parent"] = 42 })
+	s.open["mill/g1/parent"] = 42
 	in := bbInput(t, map[string]any{"base_branch": "mill/g1/parent", "parent_review_branch": "mill/g1/parent"})
 	bbExpectSuccess(t, bbRunHook(t, t.TempDir(), in, bbEnv(s)...), s.html(101))
 
@@ -510,8 +490,7 @@ func TestBitbucketBearerAuthWithTokenOnly(t *testing.T) {
 func TestBitbucketBasicAuthWithUserAndToken(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:test-token"))
-	s.bbSet(func() { s.wantAuth = wantAuth })
+	s.wantAuth = "Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:test-token"))
 	res := bbRunHook(t, t.TempDir(), bbInput(t, nil), append(bbEnv(s), "BITBUCKET_USER=alice@example.com")...)
 	bbExpectSuccess(t, res, s.html(100))
 	reqs := s.recorded()
@@ -519,8 +498,8 @@ func TestBitbucketBasicAuthWithUserAndToken(t *testing.T) {
 		t.Fatal("no requests recorded")
 	}
 	for _, r := range reqs {
-		if r.Auth != wantAuth {
-			t.Fatalf("%s %s Authorization = %q, want %q", r.Method, r.Path, r.Auth, wantAuth)
+		if r.Auth != s.wantAuth {
+			t.Fatalf("%s %s Authorization = %q, want %q", r.Method, r.Path, r.Auth, s.wantAuth)
 		}
 	}
 }
@@ -548,10 +527,8 @@ func TestBitbucketHookKeepsTokenOffCurlArgs(t *testing.T) {
 			fake := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\" >>'%s'; done\nexec '%s' \"$@\"\n", argLog, realCurl)
 			testenv.WriteExecutable(t, filepath.Join(bin, "curl"), []byte(fake))
 			s := bbNewServer(t, "acme", "widgets")
-			s.bbSet(func() {
-				s.wantAuth = tc.wantAuth
-				s.open["mill/g1/feature"] = 7 // exercises a PUT with a request body too
-			})
+			s.wantAuth = tc.wantAuth
+			s.open["mill/g1/feature"] = 7 // exercises a PUT with a request body too
 			env := append([]string{
 				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 				"MILL_BITBUCKET_API=" + s.srv.URL,
@@ -643,7 +620,7 @@ func TestBitbucketCheckModeSucceedsWithRepositoryAccess(t *testing.T) {
 func TestBitbucketCheckModeFailsWithoutRepositoryAccess(t *testing.T) {
 	bbRequireTools(t, "git")
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.noRepo = true })
+	s.noRepo = true
 	dir := bbGitRepo(t, "git@bitbucket.org:acme/widgets.git")
 	res := bbRunHook(t, dir, "", append(bbEnv(s), "MILL_HOOK_CHECK=1")...)
 	if res.Code == 0 {
@@ -757,14 +734,12 @@ func bbStatus(state, key, name, url, desc string) map[string]any {
 func TestBbStatusFailedGivesFailureWithNameURLAndSummary(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.open["mill/g1/feature"] = 7 })
-	s.bbSet(func() {
-		s.statuses[bbHeadSHA] = []map[string]any{
-			bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", "ok"),
-			bbStatus("FAILED", "unit", "Unit tests", "https://ci.example/unit", "3 tests failed"),
-			bbStatus("INPROGRESS", "e2e", "", "https://ci.example/e2e", "running"),
-		}
-	})
+	s.open["mill/g1/feature"] = 7
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", "ok"),
+		bbStatus("FAILED", "unit", "Unit tests", "https://ci.example/unit", "3 tests failed"),
+		bbStatus("INPROGRESS", "e2e", "", "https://ci.example/e2e", "running"),
+	}
 	out := bbRunStatus(t, s)
 	if out.State != "failure" {
 		t.Fatalf("state = %q, want failure", out.State)
@@ -792,9 +767,7 @@ func TestBbStatusStoppedIsFailureAndSummaryIsCut(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
 	long := strings.Repeat("é", 2000) // 4000 bytes
-	s.bbSet(func() {
-		s.statuses[bbHeadSHA] = []map[string]any{bbStatus("STOPPED", "build", "Build", "https://ci.example/b", long)}
-	})
+	s.statuses[bbHeadSHA] = []map[string]any{bbStatus("STOPPED", "build", "Build", "https://ci.example/b", long)}
 	out := bbRunStatus(t, s)
 	if out.State != "failure" || len(out.Checks) != 1 || out.Checks[0].Summary == nil {
 		t.Fatalf("status = %+v, want one failed check with a summary", out)
@@ -811,12 +784,10 @@ func TestBbStatusStoppedIsFailureAndSummaryIsCut(t *testing.T) {
 func TestBbStatusInProgressAndSuccessfulGivesPending(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() {
-		s.statuses[bbHeadSHA] = []map[string]any{
-			bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", ""),
-			bbStatus("INPROGRESS", "unit", "Unit", "https://ci.example/unit", ""),
-		}
-	})
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", ""),
+		bbStatus("INPROGRESS", "unit", "Unit", "https://ci.example/unit", ""),
+	}
 	if out := bbRunStatus(t, s); out.State != "pending" {
 		t.Fatalf("state = %q, want pending", out.State)
 	}
@@ -825,12 +796,10 @@ func TestBbStatusInProgressAndSuccessfulGivesPending(t *testing.T) {
 func TestBbStatusAllSuccessfulGivesSuccess(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() {
-		s.statuses[bbHeadSHA] = []map[string]any{
-			bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", ""),
-			bbStatus("SUCCESSFUL", "unit", "Unit", "https://ci.example/unit", ""),
-		}
-	})
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", ""),
+		bbStatus("SUCCESSFUL", "unit", "Unit", "https://ci.example/unit", ""),
+	}
 	out := bbRunStatus(t, s)
 	if out.State != "success" || len(out.Checks) != 2 {
 		t.Fatalf("status = %+v, want success with two checks", out)
@@ -849,16 +818,14 @@ func TestBbStatusNoStatusesGivesNone(t *testing.T) {
 func TestBbStatusFollowsNextPages(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.pageSize = 2 })
-	s.bbSet(func() {
-		s.statuses[bbHeadSHA] = []map[string]any{
-			bbStatus("SUCCESSFUL", "a", "A", "https://ci.example/a", ""),
-			bbStatus("SUCCESSFUL", "b", "B", "https://ci.example/b", ""),
-			bbStatus("SUCCESSFUL", "c", "C", "https://ci.example/c", ""),
-			bbStatus("FAILED", "d", "D", "https://ci.example/d", "broken"),
-			bbStatus("SUCCESSFUL", "e", "E", "https://ci.example/e", ""),
-		}
-	})
+	s.pageSize = 2
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "a", "A", "https://ci.example/a", ""),
+		bbStatus("SUCCESSFUL", "b", "B", "https://ci.example/b", ""),
+		bbStatus("SUCCESSFUL", "c", "C", "https://ci.example/c", ""),
+		bbStatus("FAILED", "d", "D", "https://ci.example/d", "broken"),
+		bbStatus("SUCCESSFUL", "e", "E", "https://ci.example/e", ""),
+	}
 	out := bbRunStatus(t, s)
 	if out.State != "failure" || len(out.Checks) != 5 {
 		t.Fatalf("status = %+v, want all 5 checks across pages and failure", out)
@@ -868,7 +835,7 @@ func TestBbStatusFollowsNextPages(t *testing.T) {
 func TestBbStatusFailsWhenStatusesAreRefused(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.statusesStatus = http.StatusForbidden })
+	s.statusesStatus = http.StatusForbidden
 	res := bbRunHook(t, t.TempDir(), bbInput(t, map[string]any{"event": "status"}), bbEnv(s)...)
 	if res.Code == 0 || res.Stdout != "" || !strings.Contains(res.Stderr, "403") {
 		t.Fatalf("exit %d, stdout %q, stderr %q; want a failure naming 403 and no output", res.Code, res.Stdout, res.Stderr)
@@ -893,8 +860,8 @@ func TestBbCheckPassesOnProbeAnswered400(t *testing.T) {
 	if len(posts) != 1 || posts[0].Path != "/repositories/acme/widgets/pullrequests" || len(posts[0].Body) != 0 {
 		t.Fatalf("POSTs = %+v, want one empty {} to pullrequests", posts)
 	}
-	if open := s.bbOpenPRs(); len(open) != 0 {
-		t.Fatalf("check mode opened PRs %v, want none", open)
+	if len(s.open) != 0 {
+		t.Fatalf("check mode opened PRs %v, want none", s.open)
 	}
 }
 
@@ -903,7 +870,7 @@ func TestBbCheckFailsOnProbeRefusedWithWhatToGrant(t *testing.T) {
 	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			s := bbNewServer(t, "acme", "widgets")
-			s.bbSet(func() { s.probeStatus = code })
+			s.probeStatus = code
 			res := bbRunCheck(t, s)
 			want := "the token cannot create pull requests: give it Pull requests: Write on acme/widgets"
 			if res.Code == 0 || !strings.Contains(res.Stderr, want) {
@@ -916,7 +883,7 @@ func TestBbCheckFailsOnProbeRefusedWithWhatToGrant(t *testing.T) {
 func TestBbCheckFailsOnOtherProbeAnswerWithTheCode(t *testing.T) {
 	bbRequireTools(t, "git")
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.probeStatus = http.StatusInternalServerError })
+	s.probeStatus = http.StatusInternalServerError
 	res := bbRunCheck(t, s)
 	if res.Code == 0 || !strings.Contains(res.Stderr, "500") {
 		t.Fatalf("exit %d, stderr %q; want a failure naming 500", res.Code, res.Stderr)
@@ -944,7 +911,7 @@ func TestBbCheckStatusEventReadsDefaultBranchStatuses(t *testing.T) {
 func TestBbCheckStatusEventFailsWhenDefaultBranchStatusesRefused(t *testing.T) {
 	bbRequireTools(t, "git")
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.statusesStatus = http.StatusForbidden })
+	s.statusesStatus = http.StatusForbidden
 	res := bbRunCheck(t, s, "MILL_HOOK_EVENT=status")
 	if res.Code == 0 || !strings.Contains(res.Stderr, "Repositories: Read") ||
 		!strings.Contains(res.Stderr, "Pipelines: Read") || !strings.Contains(res.Stderr, "403") {
@@ -955,7 +922,7 @@ func TestBbCheckStatusEventFailsWhenDefaultBranchStatusesRefused(t *testing.T) {
 func TestBbCheckWithoutStatusEventSkipsStatuses(t *testing.T) {
 	bbRequireTools(t, "git")
 	s := bbNewServer(t, "acme", "widgets")
-	s.bbSet(func() { s.statusesStatus = http.StatusForbidden })
+	s.statusesStatus = http.StatusForbidden
 	if res := bbRunCheck(t, s); res.Code != 0 {
 		t.Fatalf("exit %d, want 0 when statuses are not needed\nstderr: %s", res.Code, res.Stderr)
 	}

@@ -34,20 +34,11 @@ func wtExclLock(t *testing.T, ctx context.Context, dir string) (context.Context,
 	return lctx, unlock
 }
 
-// The lock wait's deadline also covers the git run that finds the git dir, which can be
-// slow on a loaded CI runner.
-const (
-	// wtExclFreeWait is for a lock that must be taken: the try returns as soon as it is.
-	wtExclFreeWait = 10 * time.Second
-	// wtExclHeldWait is for a lock that must not be taken: the try lasts this long.
-	wtExclHeldWait = 2 * time.Second
-)
-
-// wtExclTryLock tries LockWorktree for wait and reports whether it got the lock (released
+// wtExclTryLock tries LockWorktree for 50ms and reports whether it got the lock (released
 // again at once).
-func wtExclTryLock(t *testing.T, dir string, wait time.Duration) bool {
+func wtExclTryLock(t *testing.T, dir string) bool {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	_, unlock, err := lockWorktreePoll(ctx, dir, time.Millisecond)
 	if err != nil {
@@ -146,7 +137,7 @@ func TestLockWorktreeExcludesOtherProcesses(t *testing.T) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), wtExclHeldWait)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if _, unlock, err := lockWorktreePoll(ctx, r, time.Millisecond); err == nil {
 		unlock()
@@ -157,7 +148,7 @@ func TestLockWorktreeExcludesOtherProcesses(t *testing.T) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
-	if !wtExclTryLock(t, r, wtExclFreeWait) {
+	if !wtExclTryLock(t, r) {
 		t.Fatal("lock not taken after the other descriptor released the flock")
 	}
 }
@@ -171,10 +162,10 @@ func TestLockWorktreeLeavesOtherWorktreesUnaffected(t *testing.T) {
 	}
 	_, unlock := wtExclLock(t, context.Background(), r)
 	defer unlock()
-	if !wtExclTryLock(t, wt, wtExclFreeWait) {
+	if !wtExclTryLock(t, wt) {
 		t.Fatal("locking the main worktree blocked another worktree of the same repository")
 	}
-	if wtExclTryLock(t, r, wtExclHeldWait) {
+	if wtExclTryLock(t, r) {
 		t.Fatal("main worktree locked twice")
 	}
 }
@@ -205,11 +196,11 @@ func TestLockWorktreeNestedWithReturnedContextDoesNotDeadlock(t *testing.T) {
 		t.Fatal("nested LockWorktree with the returned context deadlocked")
 	}
 	// The nested unlock was a no-op: the outer lock still excludes others.
-	if wtExclTryLock(t, r, wtExclHeldWait) {
+	if wtExclTryLock(t, r) {
 		t.Fatal("nested unlock released the outer lock")
 	}
 	unlock()
-	if !wtExclTryLock(t, r, wtExclFreeWait) {
+	if !wtExclTryLock(t, r) {
 		t.Fatal("lock not free after the outer unlock")
 	}
 }
