@@ -537,11 +537,8 @@ func (p *Pipeline) verifyRun(ctx context.Context, t store.Task, v verifyStep, ou
 		if err := p.recordSkippedTests(ctx, t.ID, n, v.br.Worktree, v.startSHA, v.br.HeadSHA); err != nil {
 			return out, nil, true, false, err
 		}
-		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
-			return out, nil, true, false, err
-		}
-		out.Status, out.HeadSHA = store.TaskVerified, v.br.HeadSHA
-		return out, nil, true, false, nil
+		out, err = p.verified(ctx, t, v, out)
+		return out, nil, true, false, err
 	}
 	findings, outScope, owners, err := p.splitOutOfScope(ctx, t, verdict.Findings)
 	if err != nil {
@@ -558,17 +555,31 @@ func (p *Pipeline) verifyRun(ctx context.Context, t store.Task, v verifyStep, ou
 		if err := p.recordSkippedTests(ctx, t.ID, n, v.br.Worktree, v.startSHA, v.br.HeadSHA); err != nil {
 			return out, nil, true, false, err
 		}
-		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
-			return out, nil, true, false, err
-		}
-		out.Status, out.HeadSHA = store.TaskVerified, v.br.HeadSHA
-		return out, nil, true, false, nil
+		out, err = p.verified(ctx, t, v, out)
+		return out, nil, true, false, err
 	}
 	p.logf("%s a%d verdict   fail: %d finding(s)", t.ID, n, len(findings))
 	if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
 		return out, nil, true, false, err
 	}
 	return out, findings, false, false, nil
+}
+
+// verified marks the task verified at v.br.HeadSHA, then runs the merge check, which may send
+// it back to pending (the outcome is then OutcomeReopened).
+func (p *Pipeline) verified(ctx context.Context, t store.Task, v verifyStep, out Outcome) (Outcome, error) {
+	if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
+		return out, err
+	}
+	out.Status, out.HeadSHA = store.TaskVerified, v.br.HeadSHA
+	reopened, reason, err := p.mergeCheck(ctx, t, v.br, v.startSHA, v.n)
+	if err != nil {
+		return out, err
+	}
+	if reopened {
+		out.Status, out.Reason = OutcomeReopened, reason
+	}
+	return out, nil
 }
 
 // SkippedTestsEvent is the kind of the event listing the test skips a task added.
