@@ -238,11 +238,13 @@ func Run(ctx context.Context, opts Options) Report {
 			add(h.name, Skip, "needs a valid config")
 			continue
 		}
-		fields := strings.Fields(h.command)
-		if len(fields) == 0 {
+		program := hookProgram(h.command)
+		if len(strings.Fields(h.command)) == 0 {
 			add(h.name, Skip, "no hook configured")
-		} else if !programFound(opts.LookPath, paths.Root, fields[0]) {
-			add(h.name, Fail, "hook %s: program %s not found; fix the command in .mill/config.toml", h.name, fields[0])
+		} else if program == "" {
+			add(h.name, Fail, "hook %s: command %q has no program after its NAME=value assignments; name the program to run in .mill/config.toml", h.name, h.command)
+		} else if !programFound(opts.LookPath, paths.Root, program) {
+			add(h.name, Fail, "hook %s: program %s not found; fix the command in .mill/config.toml", h.name, program)
 		} else if tail, err := hook.CheckEvent(ctx, cfg, paths.Root, h.command, h.event); err != nil {
 			add(h.name, Fail, "hook %s: %v; fix the command in .mill/config.toml; output: %s", h.name, err, tail)
 		} else {
@@ -257,6 +259,29 @@ func Run(ctx context.Context, opts Options) Report {
 		}
 	}
 	return r
+}
+
+var assignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// hookProgram returns the program a hook command runs. Leading NAME=value words are
+// skipped, and so is `env` with the NAME=value words after it. It returns "" when no
+// program is left.
+func hookProgram(command string) string {
+	words := strings.Fields(command)
+	i := 0
+	for i < len(words) && assignRe.MatchString(words[i]) {
+		i++
+	}
+	if i < len(words) && words[i] == "env" {
+		i++
+		for i < len(words) && assignRe.MatchString(words[i]) {
+			i++
+		}
+	}
+	if i == len(words) {
+		return ""
+	}
+	return words[i]
 }
 
 // programFound reports whether program is on PATH or is an executable file, with a
