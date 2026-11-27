@@ -15,6 +15,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/hook"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
@@ -224,6 +225,27 @@ func Run(ctx context.Context, opts Options) Report {
 		add("gitignore", OK, "%s has every required line", paths.GitIgnore)
 	}
 
+	// hooks
+	for _, h := range []struct{ name, command string }{
+		{"on_publish", cfg.OnPublish},
+		{"on_update", cfg.OnUpdate},
+	} {
+		if !cfgOK {
+			add(h.name, Skip, "needs a valid config")
+			continue
+		}
+		fields := strings.Fields(h.command)
+		if len(fields) == 0 {
+			add(h.name, Skip, "no hook configured")
+		} else if !programFound(opts.LookPath, paths.Root, fields[0]) {
+			add(h.name, Fail, "hook %s: program %s not found; fix the command in .mill/config.toml", h.name, fields[0])
+		} else if tail, err := hook.Check(ctx, cfg, paths.Root, h.command); err != nil {
+			add(h.name, Fail, "hook %s: %v; fix the command in .mill/config.toml; output: %s", h.name, err, tail)
+		} else {
+			add(h.name, OK, "%q passed in check mode", h.command)
+		}
+	}
+
 	r.OK = true
 	for _, c := range r.Checks {
 		if c.Status == Fail {
@@ -231,6 +253,23 @@ func Run(ctx context.Context, opts Options) Report {
 		}
 	}
 	return r
+}
+
+// programFound reports whether program is on PATH or is an executable file, with a
+// relative path taken from root (where hooks run).
+func programFound(lookPath func(string) (string, error), root, program string) bool {
+	// A name with a slash is a path, which LookPath would resolve against doctor's own
+	// directory instead of root.
+	if !strings.Contains(program, "/") {
+		if _, err := lookPath(program); err == nil {
+			return true
+		}
+	}
+	if !filepath.IsAbs(program) {
+		program = filepath.Join(root, program)
+	}
+	info, err := os.Stat(program)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 // GitignoreLines are the lines .mill/.gitignore must contain to keep machine-local state
