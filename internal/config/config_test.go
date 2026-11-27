@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -613,5 +614,76 @@ func TestMaxInFlightBelowMaxParallelIsRejected(t *testing.T) {
 	_, err := Parse("max_parallel = 3\nmax_in_flight = 2\n")
 	if err == nil || !strings.Contains(err.Error(), "max_in_flight must be >= max_parallel (3), got 2") {
 		t.Fatalf("err = %v, want a max_in_flight >= max_parallel error", err)
+	}
+}
+
+func TestHookSettingsDefaultToNoHooksAndSixtySecondTimeout(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OnPublish != "" || cfg.OnUpdate != "" || cfg.HookEnv != nil {
+		t.Fatalf("hooks = %q, %q, %v; want none", cfg.OnPublish, cfg.OnUpdate, cfg.HookEnv)
+	}
+	if cfg.HookTimeout.Duration != 60*time.Second {
+		t.Fatalf("hook_timeout = %v, want 60s", cfg.HookTimeout)
+	}
+}
+
+func TestHookSettingsLoadFromConfigFile(t *testing.T) {
+	t.Parallel()
+	p := filepath.Join(t.TempDir(), "config.toml")
+	text := `on_publish = "make notify"
+on_update = "./hooks/update.sh"
+hook_env = ["SLACK_WEBHOOK", "_TOKEN2"]
+hook_timeout = "5m"
+`
+	if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OnPublish != "make notify" || cfg.OnUpdate != "./hooks/update.sh" {
+		t.Fatalf("on_publish, on_update = %q, %q", cfg.OnPublish, cfg.OnUpdate)
+	}
+	if !reflect.DeepEqual(cfg.HookEnv, []string{"SLACK_WEBHOOK", "_TOKEN2"}) {
+		t.Fatalf("hook_env = %v", cfg.HookEnv)
+	}
+	if cfg.HookTimeout.Duration != 5*time.Minute {
+		t.Fatalf("hook_timeout = %v, want 5m", cfg.HookTimeout)
+	}
+}
+
+func TestHookTimeoutMustBePositiveInConfigFile(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{"0s", "-1m"} {
+		p := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(p, []byte(`hook_timeout = "`+v+`"`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(p)
+		if err == nil || !strings.Contains(err.Error(), "hook_timeout") {
+			t.Errorf("hook_timeout = %s: Load err = %v, want a hook_timeout error", v, err)
+		}
+	}
+}
+
+func TestHookEnvRejectsInvalidNamesNamingEntryAndKey(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"NOT-VALID", "1LEADING_DIGIT", "HAS SPACE", ""} {
+		_, err := Parse("hook_env = [\"" + name + "\"]")
+		if err == nil || !strings.Contains(err.Error(), "hook_env") || !strings.Contains(err.Error(), strconv.Quote(name)) {
+			t.Errorf("hook_env entry %q: err = %v, want an error naming the key and the entry", name, err)
+		}
+	}
+}
+
+func TestHookEnvAcceptsLettersDigitsAndUnderscores(t *testing.T) {
+	t.Parallel()
+	if _, err := Parse(`hook_env = ["A", "_b", "C_9"]`); err != nil {
+		t.Fatalf("valid hook_env rejected: %v", err)
 	}
 }
