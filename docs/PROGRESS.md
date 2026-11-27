@@ -1385,47 +1385,107 @@ before publishing was green on the first probe for all twelve branches.
 
 ### Found while running and reviewing `g23`
 
-- [ ] **23. A planner timeout is labelled as success.** The first `g23` planner call ended with
+- [x] **23. A planner timeout is labelled as success.** The first `g23` planner call ended with
       "claude success: Request timed out" ($1.10) and no plan. Report it as a failure (timeout)
       with what to do.
-- [ ] **24. The planner has no raised API timeout.** Large goals time out at the default; pass a
+      Done in `g24` (`runner-transient`, `planner-transient-and-rules`): the error reads
+      "claude error: ..."; API timeouts and overloads are `transient` and the planner retries
+      once.
+- [x] **24. The planner has no raised API timeout.** Large goals time out at the default; pass a
       longer `API_TIMEOUT_MS` (or the runner's equivalent) to planner runs.
-- [ ] **25. Test clones flake on `maintenance.lock`.**
+      Done in `g24` (`runner-transient`): `[runner] api_timeout` (default 15m) is passed as
+      `API_TIMEOUT_MS`.
+- [x] **25. Test clones flake on `maintenance.lock`.**
       `TestSyncChangedPatchWithTrailerLandsTaskByTrailer` failed at `git clone` of a local bare
       remote: "failed to copy file to .../objects/maintenance.lock". Git 2.56 runs automatic
       maintenance in the background after some commands; test git helpers should set
       `maintenance.auto=false` and `gc.auto=0` (or clone with `--no-local`).
-- [ ] **26. A successful hook's output is not shown during approve and keep.** The PR URL the
+      Done in `g24` (`test-hygiene`): `internal/testenv` turns off git maintenance and gc in
+      every test package's `TestMain` and in the Makefile.
+- [x] **26. A successful hook's output is not shown during approve and keep.** The PR URL the
       example hooks print is recorded but not printed; print the last line on success
       (`hook on_publish for <task>: <url>`). `mill hook run` already prints it.
-- [ ] **27. The example hooks pass the token on the curl command line.** `-H "Authorization:
+      Done in `g24` (`hook-success-line`): approve, keep and sync print `hook on_<event> for
+      <task>: <last line>`.
+- [x] **27. The example hooks pass the token on the curl command line.** `-H "Authorization:
       ..."` and `-u` are visible in `ps` while curl runs; pass headers with `curl --config -` on
       stdin.
-- [ ] **28. Triage counts a re-run that fails on other tests as a real failure.** The
+      Done in `g24` (`github-hook-token`, `bitbucket-hook-token`): credentials go to curl with
+      `-K -` on stdin.
+- [x] **28. Triage counts a re-run that fails on other tests as a real failure.** The
       `publish-hooks` gate failed one `pipeline` test; the re-run passed it but failed two
       timing-sensitive `keeper` tests, so the failure went to the implementer as a finding
       (an unneeded attempt, load average about 80). When the re-run fails only on different
       tests, treat the first failure as flaky and re-run the new failures too.
-- [ ] **29. Tests leak processes.** Five orphaned processes, 19 hours to 2 days old, were
+      Done in `g24` (`triage-disjoint-flaky`): a third run decides; only tests failing in two
+      runs are findings.
+- [x] **29. Tests leak processes.** Five orphaned processes, 19 hours to 2 days old, were
       polling for files in deleted temp directories (`TestSyncClaimActivity…`,
       `TestApproveDuringRun…`, `TestHerdrWait…`, a stuck `pre-receive` hook). Tests that start
       shells must kill their process groups in cleanup.
-- [ ] **30. Clashes between verified siblings show up only at fan-in.** Two tasks of one package
+      Done in `g24` (`test-hygiene`): waiting shells give up after 60s or when their directory
+      is gone and are killed in cleanup.
+- [x] **30. Clashes between verified siblings show up only at fan-in.** Two tasks of one package
       each declared `hookRun`; each branch was green alone. When a task is verified, build and
       vet it merged with verified siblings that touch the same packages, and send the later one
       back with the clash as a finding.
-- [ ] **31. A task reopened during a run is reported as stuck.** After `mill review changes`
+      Done in `g24` (`merge-check`): `merge_check_cmd` merges a newly verified task with its
+      siblings and sends it back on a clash.
+- [x] **31. A task reopened during a run is reported as stuck.** After `mill review changes`
       during `mill run`, the run ended with "stuck (it did not leave pending after running)";
       a later reopen in another run was picked up. Pick up reopened tasks, or report "reopened
       during the run; run again".
-- [ ] **32. `--retry-blocked` retries on a stale starting point.** A task blocked because the
+      Done in `g24` (`scheduler-reopen`).
+- [x] **32. `--retry-blocked` retries on a stale starting point.** A task blocked because the
       gate fails on its starting point was retried on the same merge after the dependency was
       fixed, and blocked again. Re-prepare (rebase and re-merge dependencies) when a dependency's
       head changed since the task's preparation.
-- [ ] **33. Dependents start while a reopened dependency is pending.** After `hook-run-cli` was
+      Done in `g24` (`retry-reprepare`).
+- [x] **33. Dependents start while a reopened dependency is pending.** After `hook-run-cli` was
       sent back, `hooks-e2e-test` and `readme-hooks` started at once on its old head instead of
       waiting for it to be verified again.
-- [ ] **34. The planner misses dependencies between behaviours.** `hook-run-cli`'s tests observe
+      Done in `g24` (`scheduler-reopen`).
+- [x] **34. The planner misses dependencies between behaviours.** `hook-run-cli`'s tests observe
       what `mill review approve` records, which `publish-hooks` changed, but the two were
       planned in parallel. The planner prompt should chain a task whose tests observe another
       task's behaviour, not only tasks that share code.
+      Done in `g24` (`planner-transient-and-rules`).
+
+## `g23` follow-ups: done (goal `g24` landed 2026-11-27, $11.32)
+
+Twelve tasks (PRs #186–#197), planned at $9.85–$40.65 (three tasks without history were priced
+from budget limits); planning cost $0.69. Transient agent errors (API timeouts, overloads) have
+their own status: the planner retries once, the pipeline retries the agent without a finding,
+and `[runner] api_timeout` reaches claude as `API_TIMEOUT_MS`. Triage runs a command a third
+time when two runs fail on different Go tests. Tests no longer start background git
+maintenance or leave shells behind. `merge_check_cmd` checks a newly verified task merged with
+its verified siblings. A task reopened during `mill run` runs again in the same run, its
+dependents wait for it, and `--retry-blocked` re-prepares a task whose dependencies moved. The
+example hooks pass credentials on curl's stdin, and approve, keep and sync print the hook's last
+output line (the PR URL).
+
+The planner's assumptions were sound and no fan-in clash occurred. Three tasks needed more than
+one attempt, all for real problems the verifiers found: `hook-success-line` missed the keeper
+and syncer publish paths (they passed no output writer); `planner-transient-and-rules` edited a
+file of its dependency; the README task needed three attempts for nested backticks and two
+statements that did not match the code.
+
+This was the first goal published with the GitHub hook on. The first `review approve` published
+all ten ready tasks but every `POST /pulls` failed with 403: the token lacked write access to
+pull requests, which `mill doctor` had not noticed. After the token was fixed, `mill hook run`
+opened the ten draft PRs with the right bases and "Stacked on #N" bodies, and `mill keep` opened
+the last two by itself and printed their URLs.
+
+### Found while publishing `g24`
+
+- [ ] **35. `mill doctor` passes a hook whose token cannot write.** The example hooks' check
+      mode only reads (`GET /repos/{o}/{r}`), which a read-only token passes on a public
+      repository. Check the token's pull-request permission (e.g. from the API's
+      `X-Accepted-GitHub-Permissions` / permission headers, or a harmless write probe), or say
+      plainly in the check output and README that write access is not checked.
+- [ ] **36. A hook's failure line comes before its task's `Published` line.** The hook runs
+      inside `publish.Publish` and reports before the caller prints `Published ...`; print the
+      publish line first.
+- [ ] **37. Draft PRs need an extra click each.** Merging a draft takes "Ready for review"
+      first. Make drafts optional in the example hooks (e.g. `MILL_GITHUB_DRAFT=0`, and the same
+      for Bitbucket).
