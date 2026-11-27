@@ -11,6 +11,7 @@ import (
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 	"github.com/msidorkevich/mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 const editedSpec = `{"id": "a", "title": "A better", "kind": "implement", "spec": "write a.txt carefully",
@@ -91,9 +92,7 @@ func TestTaskEditRunsEditorAndAppliesResult(t *testing.T) {
 	setStatus(t, root, "g1/a", store.TaskFailed)
 	ed := filepath.Join(t.TempDir(), "ed.sh")
 	script := "#!/bin/sh\nsed 's/\"title\": \"A\"/\"title\": \"Edited by editor\"/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n"
-	if err := os.WriteFile(ed, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, ed, []byte(script))
 	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": ed})}, "task", "edit", "g1/a")
 	if r.code != ExitOK {
 		t.Fatalf("edit: %+v", r)
@@ -110,9 +109,7 @@ func TestTaskEditInvalidEditorResultKeepsFileAndChangesNothing(t *testing.T) {
 	setStatus(t, root, "g1/a", store.TaskBlocked)
 	ed := filepath.Join(t.TempDir(), "ed.sh")
 	script := "#!/bin/sh\nsed 's/\"kind\": \"implement\"/\"kind\": \"bogus\"/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n"
-	if err := os.WriteFile(ed, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, ed, []byte(script))
 	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": ed})}, "task", "edit", "g1/a")
 	if r.code != ExitError || !strings.Contains(r.stderr, "kind must be one of") || !strings.Contains(r.stderr, "kept in ") {
 		t.Fatalf("edit: %+v", r)

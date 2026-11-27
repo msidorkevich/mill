@@ -14,6 +14,7 @@ import (
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/price"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // Lines shaped like real `claude -p --output-format stream-json --verbose` output.
@@ -41,9 +42,7 @@ func fakeClaude(t *testing.T, lines []string, tail string) (bin, argsFile, stdin
 	}
 	b.WriteString(tail + "\n")
 	bin = filepath.Join(dir, "claude")
-	if err := os.WriteFile(bin, []byte(b.String()), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, bin, []byte(b.String()))
 	return bin, argsFile, stdinFile
 }
 

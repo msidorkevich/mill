@@ -11,6 +11,7 @@ import (
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // specB is task b of fanInPlan with the given depends_on.
@@ -181,9 +182,7 @@ func TestTaskEditRefusesCycleAndKeepsEditFile(t *testing.T) {
 	setStatus(t, root, "g1/a", store.TaskBlocked)
 	ed := filepath.Join(t.TempDir(), "ed.sh")
 	script := "#!/bin/sh\nsed -e 's/\"depends_on\": \\[\\]/\"depends_on\": [\"c\"]/' -e 's/\"title\": \"A\"/\"title\": \"Cyclic\"/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n"
-	if err := os.WriteFile(ed, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, ed, []byte(script))
 	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": ed})}, "task", "edit", "g1/a")
 	if r.code != ExitError || !strings.Contains(r.stderr, "not valid") || !strings.Contains(r.stderr, "cycle") || !strings.Contains(r.stderr, "kept in ") {
 		t.Fatalf("edit: %+v", r)
@@ -239,9 +238,7 @@ func TestTaskEditHoldsClaimWhileEditing(t *testing.T) {
 	ed := filepath.Join(t.TempDir(), "ed.sh")
 	script := "#!/bin/sh\nset -e\nfor f in \"" + db + "\"*; do cp \"$f\" \"" + snap + "/\"; done\n" +
 		"sed 's/\"depends_on\": \\[\\]/\"depends_on\": [\"a\"]/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\n"
-	if err := os.WriteFile(ed, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, ed, []byte(script))
 	r := runEnv(t, root, Env{Getenv: fakeGetenv(map[string]string{"EDITOR": ed})}, "task", "edit", "g1/b")
 	if r.code != ExitOK || !strings.Contains(r.stdout, "Added dependencies g1/a to g1/b.") {
 		t.Fatalf("edit: %+v", r)

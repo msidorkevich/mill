@@ -9,6 +9,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/runner"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // goGateScript writes a shell script printing go-test-style output and returns the gate
@@ -17,9 +18,7 @@ import (
 func goGateScript(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "gate.sh")
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, path, []byte(body))
 	return "sh '" + path + "'"
 }
 

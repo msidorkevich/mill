@@ -109,9 +109,7 @@ func pushLatch(t *testing.T, bare string) claimActivityLatch {
 	t.Helper()
 	l := newClaimActivityLatch(t)
 	hook := filepath.Join(strings.TrimSpace(bare), "hooks", "pre-receive")
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat >/dev/null\n"+l.script()+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, hook, []byte("#!/bin/sh\ncat >/dev/null\n"+l.script()+"\n"))
 	return l
 }
 

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // repo creates a repository with one commit on main and returns its path.
@@ -376,9 +378,7 @@ func TestCommitTreeAndTreeOf(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(r, ".git", "hooks"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(r, ".git", "hooks", "commit-msg"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, filepath.Join(r, ".git", "hooks", "commit-msg"), []byte("#!/bin/sh\nexit 1\n"))
 	sha, err := CommitTree(ctx, r, tree, parent, "squash of side\n\nMill-Task: x\n")
 	if err != nil {
 		t.Fatal(err)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 const validPlan = `{
@@ -234,9 +235,7 @@ func TestPlanEditApprovedGoalFails(t *testing.T) {
 func editorScript(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "editor.sh")
-	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, p, []byte("#!/bin/sh\n"+body+"\n"))
 	return p
 }
 

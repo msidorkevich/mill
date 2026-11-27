@@ -12,6 +12,7 @@ import (
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/runner"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // runScript writes a gate script whose output depends on how often it has run: run k runs
@@ -26,9 +27,7 @@ func runScript(t *testing.T, runs ...string) (cmd, counter string) {
 	}
 	body += "esac\nexit 0\n"
 	path := filepath.Join(dir, "gate.sh")
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, path, []byte(body))
 	return "sh '" + path + "'", counter
 }
 
