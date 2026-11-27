@@ -211,9 +211,14 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 	}
 
 	slot := AgentSlotFrom(ctx)
+	// transient is set when the latest attempt ended on a transient agent error; reverify
+	// holds the step whose verifier hit one, so the next attempt retries just the verifier.
+	var transient bool
+	var reverify *verifyStep
 	for n := prev + 1; n <= prev+p.Cfg.MaxAttempts; n++ {
 		out.Attempts++
 		logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
+		transient = false
 
 		// An attempt after a failed gate waits for an agent slot.
 		if err := slot.Acquire(ctx); err != nil {
@@ -221,6 +226,23 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 				return p.block(ctx, t.ID, store.PhaseImplement, "interrupted", out, nil)
 			}
 			return out, fmt.Errorf("wait for an agent slot for attempt %d: %w", n, err)
+		}
+
+		// The previous verifier hit a transient error: the change and its gate stand, so
+		// only the verifier runs again.
+		if reverify != nil {
+			v := *reverify
+			reverify = nil
+			v.n, v.logDir = n, logDir
+			var done bool
+			out, findings, done, transient, err = p.verifyRun(ctx, t, v, out)
+			if err != nil || done {
+				return out, err
+			}
+			if transient {
+				reverify = &v
+			}
+			continue
 		}
 
 		// implement
@@ -250,13 +272,17 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 
 		var summary string
-		findings = nil
-		if ar.res.Status != runner.StatusOK {
-			findings = append(findings, prompt.Finding{Source: "mill", Issue: "the implementer run failed: " + ar.res.Error})
-		} else if impl, perr := prompt.ParseImplementer(ar.res.Output); perr != nil {
-			findings = append(findings, prompt.Finding{Source: "mill", Issue: perr.Error()})
-		} else {
-			summary = impl.Summary
+		switch impl, perr := prompt.ParseImplementer(ar.res.Output); {
+		case ar.res.Status == runner.StatusTransient:
+			// Not the task's fault: no finding, and the next attempt keeps the findings
+			// this one started with. Whatever changed is committed below.
+			transient = true
+		case ar.res.Status != runner.StatusOK:
+			findings = []prompt.Finding{{Source: "mill", Issue: "the implementer run failed: " + ar.res.Error}}
+		case perr != nil:
+			findings = []prompt.Finding{{Source: "mill", Issue: perr.Error()}}
+		default:
+			findings, summary = nil, impl.Summary
 		}
 
 		// commit whatever changed, even after a failed run, so the next attempt builds on it
@@ -274,6 +300,9 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			if err := p.Store.SaveBranch(ctx, br); err != nil {
 				return out, err
 			}
+		}
+		if transient {
+			continue
 		}
 		if br.HeadSHA == "" || br.HeadSHA == startSHA {
 			findings = append(findings, prompt.Finding{Source: "mill", Issue: "no changes were made: the worktree is identical to its starting point"})
@@ -387,13 +416,20 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, fmt.Errorf("wait for an agent slot for the verifier of attempt %d: %w", n, err)
 		}
 		var done bool
-		out, findings, done, err = p.verify(ctx, t, verifyStep{
+		v := verifyStep{
 			n: n, br: br, startSHA: startSHA, logDir: logDir, gate: g, outside: outside, flaky: flaky,
 			implModel: implModel, limits: limits,
-		}, out)
+		}
+		out, findings, done, transient, err = p.verifyRun(ctx, t, v, out)
 		if err != nil || done {
 			return out, err
 		}
+		if transient {
+			reverify = &v
+		}
+	}
+	if transient {
+		return p.block(ctx, t.ID, "", fmt.Sprintf("transient agent errors (API timeouts or overload) exhausted the %d attempt(s); run again later with `mill run --retry-blocked`", p.Cfg.MaxAttempts), out, nil)
 	}
 	return p.block(ctx, t.ID, "", fmt.Sprintf("not verified after %d attempt(s); see `mill task show %s` for the last findings", p.Cfg.MaxAttempts, t.ID), out, nil)
 }
@@ -429,99 +465,110 @@ type verifyStep struct {
 // verdict. done means the run ends with out (verified or blocked) or err. Otherwise the
 // verifier did not pass the change: findings are recorded and the next attempt starts with them.
 func (p *Pipeline) verify(ctx context.Context, t store.Task, v verifyStep, out Outcome) (_ Outcome, findings []prompt.Finding, done bool, err error) {
+	out, findings, done, _, err = p.verifyRun(ctx, t, v, out)
+	return out, findings, done, err
+}
+
+// verifyRun is verify that also reports when the verifier ended on a transient agent error:
+// then nothing is recorded against the task, findings are nil and the verifier may run again
+// on the same change.
+func (p *Pipeline) verifyRun(ctx context.Context, t store.Task, v verifyStep, out Outcome) (_ Outcome, findings []prompt.Finding, done, transient bool, err error) {
 	n := v.n
 	if blocked, reason, err := p.checkBudgets(ctx, t, stepVerify); err != nil || blocked {
 		out, err = p.block(ctx, t.ID, store.PhaseVerify, reason, out, err)
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskRunning, store.PhaseVerify, ""); err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	diff, err := gitx.Diff(ctx, v.br.Worktree, v.startSHA)
 	if err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	stat, err := gitx.DiffStat(ctx, v.br.Worktree, v.startSHA)
 	if err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	if err := writeFile(filepath.Join(v.logDir, "diff.patch"), diff); err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	sibs, err := p.siblings(ctx, t)
 	if err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	bc, err := p.baseChanges(ctx, t, v.br, n)
 	if err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky, Siblings: sibs, BaseChanged: bc.Files, BaseChangedStat: bc.Stat})
 	verModel, verWhy := p.verifierModel(v.implModel)
 	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, v.limits, v.br.Worktree, v.logDir)
 	if err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	if vr.stop != "" {
 		out.RateLimited, out.ResetsAt = vr.rateLimited, vr.res.ResetsAt
 		out, err = p.block(ctx, t.ID, store.PhaseVerify, vr.stop, out, nil)
-		return out, nil, true, err
+		return out, nil, true, false, err
+	}
+	if vr.res.Status == runner.StatusTransient {
+		return out, nil, false, true, nil
 	}
 	if vr.res.Status != runner.StatusOK {
 		findings = []prompt.Finding{{Source: "mill", Issue: "the verifier could not complete its review: " + vr.res.Error}}
 		if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
-			return out, nil, true, err
+			return out, nil, true, false, err
 		}
-		return out, findings, false, nil
+		return out, findings, false, false, nil
 	}
 	verdict, perr := prompt.ParseVerifier(vr.res.Output)
 	if perr != nil {
 		findings = []prompt.Finding{{Source: "mill", Issue: "the verifier's answer was unusable: " + perr.Error()}}
 		if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
-			return out, nil, true, err
+			return out, nil, true, false, err
 		}
-		return out, findings, false, nil
+		return out, findings, false, false, nil
 	}
 	if _, err := p.Store.AppendEvent(ctx, "task-verdict", "", t.ID, map[string]any{"attempt": n, "head": v.br.HeadSHA, "verdict": verdict}); err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	if verdict.Verdict == "pass" {
 		p.logf("%s a%d verdict   pass: %s", t.ID, n, oneLine(verdict.Summary))
 		if err := p.recordSkippedTests(ctx, t.ID, n, v.br.Worktree, v.startSHA, v.br.HeadSHA); err != nil {
-			return out, nil, true, err
+			return out, nil, true, false, err
 		}
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
-			return out, nil, true, err
+			return out, nil, true, false, err
 		}
 		out.Status, out.HeadSHA = store.TaskVerified, v.br.HeadSHA
-		return out, nil, true, nil
+		return out, nil, true, false, nil
 	}
 	findings, outScope, owners, err := p.splitOutOfScope(ctx, t, verdict.Findings)
 	if err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
 	if len(outScope) > 0 {
 		if _, err := p.Store.AppendEvent(ctx, "verifier-out-of-scope", "", t.ID, map[string]any{"attempt": n, "findings": outScope, "owners": owners}); err != nil {
-			return out, nil, true, err
+			return out, nil, true, false, err
 		}
 		p.logf("%s a%d verdict   %d finding(s) in files other tasks own, left to them", t.ID, n, len(outScope))
 	}
 	if len(outScope) > 0 && len(findings) == 0 {
 		p.logf("%s a%d verdict   pass with notes: %d out-of-scope finding(s)", t.ID, n, len(outScope))
 		if err := p.recordSkippedTests(ctx, t.ID, n, v.br.Worktree, v.startSHA, v.br.HeadSHA); err != nil {
-			return out, nil, true, err
+			return out, nil, true, false, err
 		}
 		if err := p.Store.SetTaskStatus(ctx, t.ID, store.TaskVerified, "", ""); err != nil {
-			return out, nil, true, err
+			return out, nil, true, false, err
 		}
 		out.Status, out.HeadSHA = store.TaskVerified, v.br.HeadSHA
-		return out, nil, true, nil
+		return out, nil, true, false, nil
 	}
 	p.logf("%s a%d verdict   fail: %d finding(s)", t.ID, n, len(findings))
 	if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
-		return out, nil, true, err
+		return out, nil, true, false, err
 	}
-	return out, findings, false, nil
+	return out, findings, false, false, nil
 }
 
 // SkippedTestsEvent is the kind of the event listing the test skips a task added.
