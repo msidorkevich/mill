@@ -268,9 +268,11 @@ type runState struct {
 	o       RunOptions
 	claimer store.Claimer
 	running map[string]store.Task
-	started map[string]bool // tasks started in this run; none starts twice
-	done    chan finished
-	limit   limitHit // the usage limit is account-wide: once hit, nothing new starts
+	// stuck are tasks that ran in this run and were still pending right after their run
+	// ended; none starts again. A task that left pending and was reopened later runs again.
+	stuck map[string]bool
+	done  chan finished
+	limit limitHit // the usage limit is account-wide: once hit, nothing new starts
 	// goals this run works on and has not ended yet, and the order goals were taken up.
 	open    map[string]bool
 	order   []string
@@ -312,7 +314,7 @@ func (s *Scheduler) Run(ctx context.Context, o RunOptions) (RunResult, error) {
 	}
 	// Store writes must land even after ctx is cancelled.
 	bg := context.WithoutCancel(ctx)
-	st := &runState{o: o, claimer: s.Claimer, running: map[string]store.Task{}, started: map[string]bool{},
+	st := &runState{o: o, claimer: s.Claimer, running: map[string]store.Task{}, stuck: map[string]bool{},
 		done: make(chan finished), open: map[string]bool{}, results: map[string]Result{},
 		marked: map[string]bool{}, busy: map[string]bool{}, slots: newAgentSlots(s.MaxParallel)}
 	if st.claimer.Owner == "" {
@@ -392,7 +394,6 @@ func (s *Scheduler) Run(ctx context.Context, o RunOptions) (RunResult, error) {
 						loopErr = err
 						break
 					}
-					delete(st.started, id)
 					s.logf("%s: back to pending (%s)", id, ReasonLimitReset)
 				}
 				st.limit = limitHit{}
@@ -532,7 +533,14 @@ func (s *Scheduler) finish(bg context.Context, st *runState, f finished) error {
 			st.limit.resetsAt = f.out.ResetsAt
 		}
 	}
-	if t, terr := s.Store.GetTask(bg, f.id); terr != nil {
+	t, terr := s.Store.GetTask(bg, f.id)
+	// A run that reported a status left pending; if the task is pending now it was reopened
+	// (e.g. by `mill review changes`) and may run again. A run that reported none and left
+	// the task pending is stuck.
+	if terr == nil && t.Status == store.TaskPending && (f.out.Status == "" || f.out.Status == store.TaskPending) {
+		st.stuck[f.id] = true
+	}
+	if terr != nil {
 		err = errors.Join(err, terr)
 	} else if (t.Status == store.TaskVerified || t.Status == store.TaskBlocked) && f.err == nil {
 		// The pipeline already logged "<task>: verified at <sha> (...)" or
@@ -565,7 +573,7 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 		if !st.selected(t) || t.Status != store.TaskPending {
 			continue
 		}
-		if _, ok := st.running[t.ID]; ok || st.started[t.ID] {
+		if _, ok := st.running[t.ID]; ok || st.stuck[t.ID] {
 			continue
 		}
 		ready := true
@@ -605,6 +613,16 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 			continue
 		}
 		delete(st.busy, t.ID)
+		// A dependency may have been reopened since the store was read: start the task only
+		// if every dependency is still finished now.
+		ready, err := s.depsDone(bg, sch.Deps[t.ID])
+		if err != nil || !ready {
+			st.slots.untake()
+			if rerr := s.Store.ReleaseClaims(bg, st.claimer, []string{t.ID}); rerr != nil || err != nil {
+				return waiting, errors.Join(err, rerr)
+			}
+			continue
+		}
 		if t.GoalID != "" {
 			st.take(t.GoalID)
 			if !st.marked[t.GoalID] {
@@ -620,7 +638,6 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 			st.singles = append(st.singles, t.ID)
 		}
 		st.running[t.ID] = t
-		st.started[t.ID] = true
 		s.logf("%s: started", t.ID)
 		go func(id string) {
 			out, err := s.RunTask(pipeline.WithAgentSlot(ctx, slot), id)
@@ -629,6 +646,21 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 		}(t.ID)
 	}
 	return waiting, nil
+}
+
+// depsDone reads each dependency's status from the store now and reports whether every one
+// is verified, published or landed.
+func (s *Scheduler) depsDone(bg context.Context, deps []string) (bool, error) {
+	for _, d := range deps {
+		dt, err := s.Store.GetTask(bg, d)
+		if err != nil {
+			return false, err
+		}
+		if !store.Done(dt.Status) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // endIdleGoals ends each open goal that has nothing running and nothing more it can start.
@@ -670,7 +702,7 @@ func (s *Scheduler) goalIdle(bg context.Context, st *runState, goalID string) (b
 		status[t.ID] = t.Status
 	}
 	for _, t := range tasks {
-		if !st.selected(t) || t.Status != store.TaskPending || st.started[t.ID] {
+		if !st.selected(t) || t.Status != store.TaskPending || st.stuck[t.ID] {
 			continue
 		}
 		deps, err := s.Store.TaskDeps(bg, t.ID)
@@ -723,7 +755,7 @@ func (s *Scheduler) endGoal(ctx, bg context.Context, st *runState, goalID string
 	case len(st.limit.ids) > 0:
 		res.Status, res.Reason = store.GoalBlocked, s.limitReason(goalID, st.limit)
 	default:
-		reason, err := s.blockedReason(bg, tasks, st.started)
+		reason, err := s.blockedReason(bg, tasks, st.stuck)
 		if err != nil {
 			return err
 		}
@@ -767,9 +799,9 @@ func overlapsRunning(t store.Task, running map[string]store.Task) bool {
 }
 
 // blockedReason lists the tasks that stopped (blocked, failed or left in another state) and
-// the pending tasks waiting on them. A pending task in started ran but did not leave pending;
-// it is reported as stuck.
-func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task, started map[string]bool) (string, error) {
+// the pending tasks waiting on them. A pending task in stuck was still pending right after its
+// own run in this run ended; it is reported as stuck.
+func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task, stuck map[string]bool) (string, error) {
 	status := map[string]string{}
 	for _, t := range tasks {
 		status[t.ID] = t.Status
@@ -779,7 +811,7 @@ func (s *Scheduler) blockedReason(ctx context.Context, tasks []store.Task, start
 		switch {
 		case store.Done(t.Status):
 		case t.Status == store.TaskPending:
-			if started[t.ID] {
+			if stuck[t.ID] {
 				stopped = append(stopped, t.ID+" stuck (it did not leave pending after running)")
 				continue
 			}
