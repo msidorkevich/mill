@@ -21,6 +21,9 @@ type triageResult struct {
 	flaky    []string         // commands that failed once and passed on the re-run
 	blocked  string           // non-empty: every remaining failure also fails on the start point
 	findings []prompt.Finding // when the gate still fails (recorded for `task show` when blocked)
+	// realTests holds, per index into gate.Commands, the Go tests that failed in two of three
+	// runs of a command whose first two runs failed on different tests. Only they are findings.
+	realTests map[int][]string
 }
 
 // triage decides what a failed gate means: a flaky command passes on a re-run (gate_rerun);
@@ -56,6 +59,9 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 			return tr, nil
 		}
 		var still []int
+		var disjoint []int                  // commands whose two runs failed on different Go tests
+		seen := map[int][]string{}          // failing tests of the earlier runs, per disjoint command
+		flakyTests := map[string][]string{} // flaky tests, per command found flaky by its tests
 		tr.gate.Commands = append([]gate.CmdResult(nil), g.Commands...)
 		for k, i := range failed {
 			if k < len(rr.Commands) && rr.Commands[k].Passed() {
@@ -63,13 +69,77 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 				tr.gate.Commands[i] = rr.Commands[k]
 				continue
 			}
+			if k < len(rr.Commands) {
+				if tests, ok := disjointGoTests(g.Commands[i].LogPath, rr.Commands[k].LogPath); ok {
+					disjoint = append(disjoint, i)
+					seen[i] = tests
+					continue
+				}
+			}
 			still = append(still, i)
 		}
+		if len(disjoint) > 0 {
+			// Two runs failing on different tests say nothing yet: a third run decides.
+			ro.Cmds = cmdsAt(g, disjoint)
+			ro.LogDir = filepath.Join(opts.LogDir, "rerun2")
+			r3 := gate.Run(ctx, ro)
+			if ctx.Err() != nil {
+				return tr, nil
+			}
+			for k, i := range disjoint {
+				if k >= len(r3.Commands) {
+					still = append(still, i)
+					continue
+				}
+				c3 := r3.Commands[k]
+				if c3.Passed() {
+					tr.flaky = append(tr.flaky, c3.Cmd)
+					flakyTests[c3.Cmd] = seen[i]
+					tr.gate.Commands[i] = c3
+					continue
+				}
+				third, ok, err := gate.GoTestFailuresFromLog(c3.LogPath)
+				if err != nil || !ok {
+					// The check cannot decide: the command's first failure stands.
+					still = append(still, i)
+					continue
+				}
+				tr.gate.Commands[i] = c3
+				var real []string // tests failing in two of the three runs
+				for _, x := range third {
+					if slices.Contains(seen[i], x) {
+						real = append(real, x)
+					}
+				}
+				if len(real) == 0 {
+					tr.flaky = append(tr.flaky, c3.Cmd)
+					all := append(slices.Clone(seen[i]), third...)
+					slices.Sort(all)
+					flakyTests[c3.Cmd] = slices.Compact(all)
+					continue
+				}
+				if tr.realTests == nil {
+					tr.realTests = map[int][]string{}
+				}
+				tr.realTests[i] = real
+				still = append(still, i)
+			}
+			slices.Sort(still)
+		}
 		if len(tr.flaky) > 0 {
-			if _, err := p.Store.AppendEvent(ctx, "gate-flaky", "", t.ID, map[string]any{"attempt": n, "commands": tr.flaky}); err != nil {
+			data := map[string]any{"attempt": n, "commands": tr.flaky}
+			if len(flakyTests) > 0 {
+				data["tests"] = flakyTests
+			}
+			if _, err := p.Store.AppendEvent(ctx, "gate-flaky", "", t.ID, data); err != nil {
 				return tr, err
 			}
 			p.logf("%s a%d gate      flaky (passed on a re-run): %s", t.ID, n, strings.Join(tr.flaky, "; "))
+			for _, c := range tr.flaky {
+				if tests, ok := flakyTests[c]; ok {
+					p.logf("%s a%d gate      flaky tests of `%s` (each failed in one run only): %s", t.ID, n, c, strings.Join(tests, ", "))
+				}
+			}
 		}
 		if len(still) == 0 && len(unstarted) == 0 {
 			tr.gate.Passed, tr.gate.Reason = true, ""
@@ -84,7 +154,7 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 	}
 
 	if !p.Cfg.GateCheckBase {
-		tr.findings = gateFindings(tr.gate)
+		tr.findings = tr.gateFindings()
 		return tr, nil
 	}
 	base, err := p.runOnBase(ctx, t, startSHA, opts, cmdsAt(tr.gate, failed))
@@ -93,7 +163,7 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 	}
 	if err != nil {
 		p.logf("%s a%d gate      warning: could not check the failing commands on the starting point %s, using the gate findings as they are: %v", t.ID, n, short(startSHA), err)
-		tr.findings = gateFindings(tr.gate)
+		tr.findings = tr.gateFindings()
 		return tr, nil
 	}
 
@@ -107,9 +177,13 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 	for k, i := range failed {
 		c := tr.gate.Commands[i]
 		b := base.Commands[k]
+		real, restricted := tr.realTests[i]
 		if b.Passed() {
 			causedHere = append(causedHere, c.Cmd)
 			f := cmdFinding(c)
+			if restricted {
+				f = realTestFinding(c, real)
+			}
 			f.Issue += fmt.Sprintf("\nIt passes on the task's starting point %s, so the task's changes cause it.", short(startSHA))
 			tr.findings = append(tr.findings, f)
 			continue
@@ -118,6 +192,9 @@ func (p *Pipeline) triage(ctx context.Context, t store.Task, n int, startSHA str
 		if !ok {
 			alsoOnBase = append(alsoOnBase, c.Cmd)
 			continue
+		}
+		if restricted {
+			cmp = restrictHead(cmp, real)
 		}
 		tests[c.Cmd] = map[string]any{"head": cmp.head, "base": cmp.base, "head_only": cmp.headOnly}
 		if len(cmp.headOnly) == 0 {
@@ -251,6 +328,73 @@ func goTestFinding(c gate.CmdResult, cmp goTestComparison, startSHA string) prom
 	if pre := append(append([]string(nil), cmp.shared...), cmp.baseOnly...); len(pre) > 0 {
 		slices.Sort(pre)
 		issue += fmt.Sprintf("\nAlso failing on the starting point %s, not your fault; do not try to fix them: %s.", short(startSHA), strings.Join(pre, ", "))
+	}
+	return prompt.Finding{Source: "gate", Issue: issue}
+}
+
+// disjointGoTests reads the failing Go tests of two failed runs of one command. ok is true
+// only when both logs are go test output and no test failed in both runs; tests is then the
+// failing tests of both runs, sorted.
+func disjointGoTests(firstLog, secondLog string) (tests []string, ok bool) {
+	cmp, ok := compareGoTests(secondLog, firstLog)
+	if !ok || len(cmp.shared) > 0 {
+		return nil, false
+	}
+	tests = append(slices.Clone(cmp.head), cmp.base...)
+	slices.Sort(tests)
+	return tests, true
+}
+
+// restrictHead narrows a head/base comparison to the head's real failing tests.
+func restrictHead(cmp goTestComparison, real []string) goTestComparison {
+	out := goTestComparison{head: real, base: cmp.base, headOnly: []string{}, baseOnly: []string{}, shared: []string{}}
+	for _, h := range real {
+		if slices.Contains(cmp.base, h) {
+			out.shared = append(out.shared, h)
+		} else {
+			out.headOnly = append(out.headOnly, h)
+		}
+	}
+	for _, b := range cmp.base {
+		if !slices.Contains(real, b) {
+			out.baseOnly = append(out.baseOnly, b)
+		}
+	}
+	return out
+}
+
+// gateFindings is the findings of the triaged gate's failing commands; a command with real
+// failing tests names only them.
+func (tr triageResult) gateFindings() []prompt.Finding {
+	if len(tr.gate.Commands) == 0 {
+		return gateFindings(tr.gate)
+	}
+	var f []prompt.Finding
+	for i, c := range tr.gate.Commands {
+		if c.Passed() {
+			continue
+		}
+		if real, ok := tr.realTests[i]; ok {
+			f = append(f, realTestFinding(c, real))
+			continue
+		}
+		f = append(f, cmdFinding(c))
+	}
+	return f
+}
+
+// realTestFinding describes a command whose first two runs failed on different Go tests and
+// whose third run failed some of them again: only those tests are the command's failures.
+func realTestFinding(c gate.CmdResult, real []string) prompt.Finding {
+	issue := fmt.Sprintf("`%s` failed with these tests failing in two of three runs: %s.", c.Cmd, strings.Join(real, ", "))
+	excerpt := ""
+	if b, err := os.ReadFile(c.LogPath); err == nil {
+		excerpt = gate.GoTestExcerpt(string(b), real, goTestExcerptLines)
+	}
+	if excerpt != "" {
+		issue += " Output of those tests:\n" + indent(excerpt)
+	} else if c.Tail != "" {
+		issue += " Output (last lines):\n" + indent(c.Tail)
 	}
 	return prompt.Finding{Source: "gate", Issue: issue}
 }
