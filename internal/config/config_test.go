@@ -728,3 +728,44 @@ func TestAPITimeoutDefaultAndLoad(t *testing.T) {
 		t.Fatalf("Load err = %v, want runner.api_timeout", err)
 	}
 }
+
+func TestConfigStatusDefaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "" || cfg.StatusInterval.Duration != 2*time.Minute || cfg.CIFix {
+		t.Fatalf("status, status_interval, ci_fix = %q, %v, %v; want \"\", 2m, false", cfg.Status, cfg.StatusInterval, cfg.CIFix)
+	}
+}
+
+func TestConfigStatusLoadsFromConfigFile(t *testing.T) {
+	t.Parallel()
+	p := filepath.Join(t.TempDir(), "config.toml")
+	text := "status = \"x\"\nstatus_interval = \"30s\"\nci_fix = true\n"
+	if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Status != "x" || cfg.StatusInterval.Duration != 30*time.Second || !cfg.CIFix {
+		t.Fatalf("status, status_interval, ci_fix = %q, %v, %v; want x, 30s, true", cfg.Status, cfg.StatusInterval, cfg.CIFix)
+	}
+}
+
+func TestConfigStatusIntervalMustBePositive(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{"0s", "-1m"} {
+		p := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(p, []byte(`status_interval = "`+v+`"`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(p)
+		if err == nil || !strings.Contains(err.Error(), "status_interval") {
+			t.Errorf("status_interval = %s: Load err = %v, want a status_interval error", v, err)
+		}
+	}
+}

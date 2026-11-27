@@ -25,6 +25,7 @@ const Schema = "mill/hook@1"
 const (
 	EventPublish = "publish" // after a task's first publish
 	EventUpdate  = "update"  // after a later push of a published task, or a change of its base
+	EventStatus  = "status"  // to read the review status of a published task
 )
 
 // Document is the JSON a hook reads on stdin.
@@ -69,9 +70,15 @@ type Gate struct {
 }
 
 // Build assembles the document for a published task. root is the repository, event one of
-// EventPublish and EventUpdate, previousBase the base branch before an update ("" when it did
-// not change).
+// EventPublish, EventUpdate and EventStatus, previousBase the base branch before an update
+// ("" when it did not change).
 func Build(ctx context.Context, s *store.Store, cfg config.Config, root string, taskID, event, previousBase string) (Document, error) {
+	switch event {
+	case EventPublish, EventUpdate, EventStatus:
+	default:
+		return Document{}, fmt.Errorf("build the hook document of %s: unknown hook event %q: use %s, %s or %s",
+			taskID, event, EventPublish, EventUpdate, EventStatus)
+	}
 	t, err := s.GetTask(ctx, taskID)
 	if err != nil {
 		return Document{}, fmt.Errorf("build the hook document of %s: %w", taskID, err)

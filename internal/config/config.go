@@ -76,9 +76,16 @@ type Config struct {
 	// built-in allowlist. Each name must be a valid environment variable name.
 	HookEnv []string `toml:"hook_env"`
 	// HookTimeout bounds each hook command.
-	HookTimeout Duration     `toml:"hook_timeout"`
-	Runner      RunnerConfig `toml:"runner"`
-	Host        HostConfig   `toml:"host"`
+	HookTimeout Duration `toml:"hook_timeout"`
+	// Status is a shell command run with `sh -c` to read a published task's review status;
+	// it prints a mill/status@1 JSON document on stdout. Empty means no status hook.
+	Status string `toml:"status"`
+	// StatusInterval is how often the status hook runs for a published task.
+	StatusInterval Duration `toml:"status_interval"`
+	// CIFix lets mill act on failing review checks reported by the status hook.
+	CIFix  bool         `toml:"ci_fix"`
+	Runner RunnerConfig `toml:"runner"`
+	Host   HostConfig   `toml:"host"`
 	// Sizes is the legacy size -> model mapping, used only when the file has no [models].
 	Sizes map[string]Size `toml:"sizes"`
 	// Models maps a task's size and complexity to a model: size -> complexity -> model.
@@ -187,6 +194,7 @@ func Default() Config {
 		ImplementerRunsCheck: false,
 		EnvAllow:             []string{},
 		HookTimeout:          Duration{60 * time.Second},
+		StatusInterval:       Duration{2 * time.Minute},
 		Runner: RunnerConfig{
 			Kind:           "claude",
 			ClaudeBin:      "claude",
@@ -253,6 +261,9 @@ env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY
 # on_update = ""          # shell command run with "sh -c" when a task's review is updated; empty = no hook
 # hook_env = []           # extra env vars for hook commands, e.g. ["SLACK_WEBHOOK"]
 # hook_timeout = "60s"    # per hook command
+# status = ""             # shell command run with "sh -c" that prints a published task's mill/status@1 JSON; empty = no status hook
+# status_interval = "2m"  # how often the status hook runs
+# ci_fix = false          # act on failing checks the status hook reports
 
 # Model families from cheapest to strongest. A model belongs to the first tier whose name it
 # contains ("claude-opus-5-5" is opus); retries and verifiers move up this list.
@@ -423,6 +434,9 @@ func (c Config) Validate() error {
 	}
 	if c.HookTimeout.Duration <= 0 {
 		add("hook_timeout must be > 0, got %s", c.HookTimeout)
+	}
+	if c.StatusInterval.Duration <= 0 {
+		add("status_interval must be > 0, got %s", c.StatusInterval)
 	}
 	for _, k := range c.HookEnv {
 		if !envKeyRe.MatchString(k) {
