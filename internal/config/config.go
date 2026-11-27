@@ -112,6 +112,7 @@ type RunnerConfig struct {
 	FakeScript     string   `toml:"fake_script"`     // path to a fake-runner script, relative to the repo root
 	ClaudeBin      string   `toml:"claude_bin"`      // claude executable, looked up on PATH
 	AttemptTimeout Duration `toml:"attempt_timeout"` // bounds one agent run
+	APITimeout     Duration `toml:"api_timeout"`     // bounds one API request of a claude run (API_TIMEOUT_MS)
 }
 
 // HostConfig selects where worker processes run.
@@ -186,6 +187,7 @@ func Default() Config {
 			Kind:           "claude",
 			ClaudeBin:      "claude",
 			AttemptTimeout: Duration{30 * time.Minute},
+			APITimeout:     Duration{15 * time.Minute},
 		},
 		Host: HostConfig{Kind: "auto"},
 		Models: map[string]map[string]string{
@@ -255,6 +257,7 @@ model_tiers = ["haiku", "sonnet", "opus"]
 kind = "claude"           # or "fake" (scripted, zero tokens; set fake_script)
 claude_bin = "claude"
 attempt_timeout = "30m"   # per agent run
+api_timeout = "15m"       # per API request of a claude run, passed as API_TIMEOUT_MS
 
 [host]
 kind = "auto"             # "auto": herdr inside a herdr pane (HERDR_ENV=1, herdr on PATH), else exec; "exec": plain processes; "herdr": always herdr, fails outside a herdr pane
@@ -398,6 +401,9 @@ func (c Config) Validate() error {
 	}
 	if c.Runner.AttemptTimeout.Duration <= 0 {
 		add("runner.attempt_timeout must be > 0")
+	}
+	if c.Runner.APITimeout.Duration <= 0 {
+		add("runner.api_timeout must be > 0")
 	}
 	if c.GateTimeout.Duration <= 0 {
 		add("gate_timeout must be > 0")

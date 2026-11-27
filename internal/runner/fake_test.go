@@ -189,3 +189,32 @@ func TestFakeDelayHonoursCancellation(t *testing.T) {
 		t.Fatalf("delayed step: %+v %v", res, err)
 	}
 }
+
+func TestFakeStepEndsTransient(t *testing.T) {
+	t.Parallel()
+	f := NewFake(Script{RoleImplementer: {{Error: "Request timed out", Transient: true}, {Error: "boom"}}})
+	res, err := f.Run(context.Background(), Request{Role: RoleImplementer})
+	if err != nil || res.Status != StatusTransient || res.Error != "Request timed out" {
+		t.Fatalf("Run = %+v, %v; want transient", res, err)
+	}
+	res, err = f.Run(context.Background(), Request{Role: RoleImplementer})
+	if err != nil || res.Status != StatusError {
+		t.Fatalf("Run = %+v, %v; want error", res, err)
+	}
+}
+
+func TestFakeScriptFileTransientStep(t *testing.T) {
+	t.Parallel()
+	p := filepath.Join(t.TempDir(), "script.json")
+	if err := os.WriteFile(p, []byte(`{"implementer":[{"error":"overloaded","transient":true}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fs, err := LoadFakeScript(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := NewFake(fs).Run(context.Background(), Request{Role: RoleImplementer})
+	if err != nil || res.Status != StatusTransient {
+		t.Fatalf("Run = %+v, %v; want transient", res, err)
+	}
+}

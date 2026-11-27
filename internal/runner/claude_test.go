@@ -178,7 +178,7 @@ func TestClaudeErrorResult(t *testing.T) {
 	r := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{r}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
-	if res.Status != StatusError || !strings.Contains(res.Error, "boom") {
+	if res.Status != StatusError || res.Error != "claude error_during_execution: boom" {
 		t.Fatalf("result = %+v", res)
 	}
 }
@@ -609,13 +609,82 @@ func TestClaudeUsageWarningAddedOnceAndKeepsSuccess(t *testing.T) {
 	}
 }
 
-func TestClaudeOtherErrorResultStaysError(t *testing.T) {
+func TestClaudeOverloadedResultIsTransient(t *testing.T) {
 	t.Parallel()
 	errRes := `{"type":"result","subtype":"success","is_error":true,"api_error_status":500,"result":"overloaded","usage":{}}`
 	bin, _, _ := fakeClaude(t, []string{lineLimitWarn, errRes}, "")
 	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
-	if res.Status != StatusError {
+	if res.Status != StatusTransient {
 		t.Fatalf("status = %q", res.Status)
+	}
+}
+
+func TestClaudeIsErrorTimeoutResultIsTransientWithoutSuccessText(t *testing.T) {
+	t.Parallel()
+	errRes := `{"type":"result","subtype":"success","is_error":true,"result":"Request timed out"}`
+	bin, _, _ := fakeClaude(t, []string{errRes}, "")
+	res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
+	if res.Status != StatusTransient {
+		t.Fatalf("status = %q", res.Status)
+	}
+	if !strings.Contains(res.Error, "Request timed out") || strings.Contains(res.Error, "success") {
+		t.Fatalf("error = %q", res.Error)
+	}
+	if res.Error != "claude error: Request timed out" {
+		t.Fatalf("error = %q, want %q", res.Error, "claude error: Request timed out")
+	}
+}
+
+func TestClaudeTransientResultClassification(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, line string
+		want       Status
+	}{
+		{"status 408", `{"type":"result","subtype":"success","is_error":true,"api_error_status":408,"result":"x"}`, StatusTransient},
+		{"status 502", `{"type":"result","subtype":"success","is_error":true,"api_error_status":502,"result":"x"}`, StatusTransient},
+		{"status 503", `{"type":"result","subtype":"success","is_error":true,"api_error_status":503,"result":"x"}`, StatusTransient},
+		{"status 504", `{"type":"result","subtype":"success","is_error":true,"api_error_status":504,"result":"x"}`, StatusTransient},
+		{"status 529", `{"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"x"}`, StatusTransient},
+		{"timeout text", `{"type":"result","subtype":"success","is_error":true,"result":"API Error: Timeout"}`, StatusTransient},
+		{"server error text", `{"type":"result","subtype":"success","is_error":true,"result":"Internal Server Error"}`, StatusTransient},
+		{"overloaded text", `{"type":"result","subtype":"success","is_error":true,"result":"Overloaded"}`, StatusTransient},
+		{"usage limit wins", lineLimitResult, StatusRateLimited},
+		{"status 400", `{"type":"result","subtype":"success","is_error":true,"api_error_status":400,"result":"bad request"}`, StatusError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bin, _, _ := fakeClaude(t, []string{tt.line}, "")
+			res, _ := newClaude(bin).Run(context.Background(), baseReq(t))
+			if res.Status != tt.want {
+				t.Fatalf("status = %q, want %q (error %q)", res.Status, tt.want, res.Error)
+			}
+			if strings.Contains(res.Error, "success") {
+				t.Fatalf("error names the success subtype: %q", res.Error)
+			}
+		})
+	}
+}
+
+func TestClaudeAPITimeoutPassedAsEnv(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "api_timeout")
+	bin, _, _ := fakeClaude(t, []string{lineResult}, `printf '%s' "$API_TIMEOUT_MS" > `+envFile)
+	c := newClaude(bin)
+	c.APITimeout = 15 * time.Minute
+	req := baseReq(t)
+	req.Env = append(req.Env, "API_TIMEOUT_MS=1")
+	if res, err := c.Run(context.Background(), req); err != nil || res.Status != StatusOK {
+		t.Fatalf("result = %+v, %v", res, err)
+	}
+	got, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "900000" {
+		t.Fatalf("API_TIMEOUT_MS = %q, want 900000", got)
 	}
 }
 
