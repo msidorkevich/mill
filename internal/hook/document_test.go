@@ -224,3 +224,16 @@ func TestBuildRefusesUnpublishedTask(t *testing.T) {
 		t.Errorf("error = %v", err)
 	}
 }
+
+func TestStatusBuildDocumentHasStatusEventAndPublishedCommit(t *testing.T) {
+	t.Parallel()
+	e := stack(t)
+	res := e.publish(t, "g1/a")
+	d, m := e.build(t, "g1/a", hook.EventStatus, "")
+	if d.Event != "status" || m["event"] != "status" || d.Schema != "mill/hook@1" {
+		t.Errorf("event %q (JSON %v), schema %q; want status, mill/hook@1", d.Event, m["event"], d.Schema)
+	}
+	if d.HeadSHA != res.SHA || m["head_sha"] != res.SHA {
+		t.Errorf("head_sha = %q, want the published commit %q", d.HeadSHA, res.SHA)
+	}
+}
