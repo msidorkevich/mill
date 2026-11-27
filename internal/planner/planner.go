@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,6 +170,11 @@ Rules for the plan:
 - depends_on lists only tasks whose code this task needs; leave it empty otherwise.
 - Prefer tasks that can run in parallel: chain tasks with depends_on only when one needs
   the other's code.
+- Also, whatever the two rules above say: when a task's tests exercise a command or behaviour
+  that another task in the plan changes, make it depend on that task, even if they share no
+  files.
+- Test helpers added to a package shared with sibling tasks get a task-specific prefix, to
+  avoid clashing declarations; say so in the spec of each such task.
 - Put tests that span several tasks' features in their own test task that depends on those
   tasks, so the feature tasks stay independent.
 - When two tasks need the same file, split the work by file where possible instead of
@@ -210,6 +216,7 @@ type Options struct {
 	Env            []string
 	TmpDir         string        // the planner agent's TMPDIR, outside the repository
 	Timeout        time.Duration // per agent call; 0 means no limit
+	Log            io.Writer     // progress messages, e.g. a retry; nil means os.Stderr
 }
 
 // Result is what Generate produced.
@@ -270,9 +277,31 @@ func Generate(ctx context.Context, o Options) (Result, error) {
 				return res, err
 			}
 		}
-		out, usage, err := runOnce(ctx, o, call, Prompt(o.Goal, survey, problems), logDir)
+		prompt := Prompt(o.Goal, survey, problems)
+		out, usage, err := runOnce(ctx, o, call, prompt, logDir)
 		res.Calls++
 		res.Usage = res.Usage.Add(usage)
+		var te *transientError
+		if errors.As(err, &te) {
+			logw := o.Log
+			if logw == nil {
+				logw = os.Stderr
+			}
+			fmt.Fprintf(logw, "planner: %s; retrying\n", te.msg)
+			// The retry logs beside the failed run so that run's logs survive.
+			if logDir != "" {
+				logDir += "-retry"
+				if err := os.MkdirAll(logDir, 0o755); err != nil {
+					return res, err
+				}
+			}
+			out, usage, err = runOnce(ctx, o, call, prompt, logDir)
+			res.Calls++
+			res.Usage = res.Usage.Add(usage)
+			if errors.As(err, &te) {
+				return res, fmt.Errorf("planner failed twice with a transient API error: %s; wait a few minutes and run `mill plan` again", te.msg)
+			}
+		}
 		if err != nil {
 			return res, err
 		}
@@ -289,6 +318,11 @@ func Generate(ctx context.Context, o Options) (Result, error) {
 	}
 	return res, &InvalidPlanError{Problems: problems}
 }
+
+// transientError reports a planner run that ended with runner.StatusTransient.
+type transientError struct{ msg string }
+
+func (e *transientError) Error() string { return "planner transient: " + e.msg }
 
 // runOnce runs the planner agent once, stopping it when it crosses the budget.
 // A call that outlives o.Timeout is cancelled and reported as a timeout.
@@ -336,6 +370,8 @@ func runOnce(ctx context.Context, o Options, call int, promptText, logDir string
 		return nil, res.Usage, &RateLimitedError{LimitType: res.LimitType, ResetsAt: res.ResetsAt, now: time.Now()}
 	case overReason != "":
 		return nil, res.Usage, fmt.Errorf("planner stopped: budget exceeded: %s", overReason)
+	case res.Status == runner.StatusTransient:
+		return nil, res.Usage, &transientError{msg: res.Error}
 	default:
 		return nil, res.Usage, fmt.Errorf("planner %s: %s", res.Status, res.Error)
 	}
