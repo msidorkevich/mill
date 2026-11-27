@@ -1524,22 +1524,74 @@ hook opened normal PRs, and `keep`/`sync` printed `CI pending`, then `CI success
 
 ### Found while running and publishing `g25`
 
-- [ ] **38. The herdr wrapper fails under dash.** Ubuntu's `/bin/sh` is dash; the wrapper's
+- [x] **38. The herdr wrapper fails under dash.** Ubuntu's `/bin/sh` is dash; the wrapper's
       `set -m` prints "can't access tty; job control turned off" into the pane and the exit-file
       and process-group handling breaks (five herdr tests fail on `ubuntu-latest`).
-- [ ] **39. "text file busy" in herdr tests on Linux.** A test writes a fake `herdr` executable
+      Done in `g26` (`pgrun-helper`, `herdr-portable-group`): the wrapper starts the worker
+      through the hidden `mill __pgrun --` (setpgid, then exec) instead of `set -m`.
+- [x] **39. "text file busy" in herdr tests on Linux.** A test writes a fake `herdr` executable
       while parallel tests fork (`ETXTBSY`); write it to a temp name and rename, or build it
       once per package.
-- [ ] **40. Test shells survive their cleanup on Linux.** `TestGroupsKillTheirShellsAtCleanup`:
+      Done in `g26` (`testenv-exec-helper`, `tests-use-write-executable`):
+      `testenv.WriteExecutable` writes under `syscall.ForkLock` and renames into place.
+- [x] **40. Test shells survive their cleanup on Linux.** `TestGroupsKillTheirShellsAtCleanup`:
       the shell is alive 10s after its test ended. Linux joins the CI matrix once 38–40 are
       fixed.
-- [ ] **41. The merge check merges siblings the task already contains.** A dependency's branch
+      Done in `g26` (`testenv-groups-portable`): test shells get their process group from the
+      test binary acting as the pgrun helper. CI runs on `ubuntu-latest` and `macos-latest`
+      (PR #224).
+- [x] **41. The merge check merges siblings the task already contains.** A dependency's branch
       is an ancestor of the task's head, so merging it changes nothing but costs a gate slot;
       skip siblings whose head is an ancestor.
-- [ ] **42. The owns check refuses edits to a dependency's files.** A dependent builds on top of
+      Done in `g26` (`mergecheck-skip-contained`).
+- [x] **42. The owns check refuses edits to a dependency's files.** A dependent builds on top of
       its dependencies, so such an edit cannot conflict; record it as a note, as for dependents'
       files. (`ci-end-to-end-test` blocked on it.)
-- [ ] **43. `mill doctor` takes `NAME=value` as the hook's program.** The README suggests
+      Done in `g26` (`owns-allow-dependencies`): recorded as a note; a verifier finding on
+      such a file still counts against the task.
+- [x] **43. `mill doctor` takes `NAME=value` as the hook's program.** The README suggests
       `on_publish = "MILL_GITHUB_DRAFT=0 hooks/github/pr.sh"`, which runs fine but fails doctor
       ("program MILL_GITHUB_DRAFT=0 not found"); skip leading assignments when finding the
       program.
+      Done in `g26` (`doctor-hook-assignments`): leading `NAME=value` words and `env` are
+      skipped.
+
+## Linux and small fixes: done (goal `g26` landed 2026-11-27, $4.64)
+
+Ten tasks (PRs #216–#225), planned at $5.21–$16.09; planning cost $0.49. Workers and test
+shells get their own process group without job control: the hidden `mill __pgrun -- cmd`
+calls setpgid and execs, the herdr wrapper uses it, and tests use the test binary as the same
+helper; macOS ships `/bin/dash`, so tests run the wrapper under dash locally. Test helpers write
+executables without "text file busy". CI runs on Linux and macOS. The merge check skips
+siblings the task already contains, the owns check allows edits to a dependency's files, and
+`mill doctor` finds a hook's program after `NAME=value` and `env`.
+
+Before publishing, a temporary draft PR ran CI over the verified branches: Linux and macOS were
+green, so the Linux fixes were known to work before any PR was opened. Three tasks needed a
+second attempt for real problems: the owns change would have let the verifier-out-of-scope rule
+drop a finding about a dependency's file; the herdr change broke the TUI-in-herdr test, whose
+test binary did not provide `__pgrun`; and a README detail.
+
+### Found while running and publishing `g26`
+
+- [ ] **44. A hook timeout that expires while the hook starts is reported as a failure.**
+      `internal/hook/run.go`: with a tight timeout the deadline can pass during `cmd.Start`, and
+      the run is recorded as "start sh -c: context deadline exceeded" (exit -1, not timed out).
+      `TestRunTimeoutKillsHook` and `TestCheckReportsFailureAndTimeout` (5ms timeouts) are flaky
+      under load and turned PR #225's macOS CI red. Count a deadline during start as a timeout,
+      and give the tests a timeout the start cannot exceed.
+- [ ] **45. "Validation failed" when merging a child PR right after its parent.** When the
+      parent merges and GitHub deletes its branch, the child PR is retargeted to `master`; a
+      merge clicked during the switch fails. The README's stacking advice could say to refresh
+      the child PR before merging it.
+- [ ] **46. Parallel `git worktree add` races.** PR #226's macOS CI:
+      `TestApproveGoalNoCombinedPublishesAll` failed when sibling tasks prepared their worktrees
+      at once: `git worktree add ... fatal: could not open '.git/worktrees/c/locked'`. Concurrent
+      `worktree add`/`remove`/`prune` in one repository race on `.git/worktrees`; serialize them
+      in `internal/gitx` (a per-repository lock), in tests and in real runs.
+- [ ] **47. Two git processes in one worktree during a restack.** PR #226's Linux CI:
+      `TestPipelinedRestackKeepChildOfFixedParentIsRestackedOntoFix` failed with "Unable to create
+      '.git/worktrees/t3/index.lock': File exists" during the keeper's rebase. Find what else runs
+      git in that worktree at the same time (or a lock left by an earlier command) and make the
+      keeper wait for it or own the worktree exclusively.
+
