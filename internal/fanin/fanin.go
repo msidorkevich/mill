@@ -478,6 +478,13 @@ func Restack(ctx context.Context, o Options) (Result, error) {
 		return Result{}, fmt.Errorf("branch %s has no target to restack onto", br.Name)
 	}
 	wt := br.Worktree
+	// Hold the worktree across the merges, the replay and any restore; a caller that already
+	// holds it passes a ctx that re-enters the lock.
+	ctx, unlock, err := gitx.LockWorktree(ctx, wt)
+	if err != nil {
+		return Result{}, fmt.Errorf("restack %s: %w", br.Name, err)
+	}
+	defer unlock()
 	var res Result
 	fail := func(err error) (Result, error) {
 		if rerr := restore(ctx, br); rerr != nil {
@@ -558,6 +565,11 @@ func Restack(ctx context.Context, o Options) (Result, error) {
 // checked out and clean.
 func restore(ctx context.Context, br store.Branch) error {
 	wt := br.Worktree
+	ctx, unlock, err := gitx.LockWorktree(ctx, wt)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if ok, err := gitPathExists(ctx, wt, "MERGE_HEAD"); err != nil {
 		return err
 	} else if ok {
