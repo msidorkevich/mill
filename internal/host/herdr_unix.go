@@ -26,6 +26,9 @@ type Herdr struct {
 	Poll         time.Duration // how often pid and exit files are polled
 	StartTimeout time.Duration // how long Start waits for the pid file
 	Grace        time.Duration // how long Wait waits for the exit file once the wrapper is gone
+	// Pgrun is the argv prefix that runs a command as the leader of a new process group, in
+	// place; empty = the running mill binary with `__pgrun --`.
+	Pgrun []string
 }
 
 // NewHerdr returns the herdr host using the herdr binary on PATH and the workspace in
@@ -58,6 +61,18 @@ func (h *Herdr) startTimeout() time.Duration {
 	return h.StartTimeout
 }
 
+// pgrun returns the argv prefix that starts the worker in a new process group.
+func (h *Herdr) pgrun() ([]string, error) {
+	if len(h.Pgrun) > 0 {
+		return h.Pgrun, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("herdr host: find the mill binary to start the worker's process group with `mill __pgrun`: %w; set host.kind = \"exec\" to run workers without herdr", err)
+	}
+	return []string{exe, "__pgrun", "--"}, nil
+}
+
 // herdr runs the herdr binary and returns its stdout. A failure includes herdr's stderr.
 func (h *Herdr) herdr(args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
@@ -87,7 +102,11 @@ func (h *Herdr) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
 			return nil, fmt.Errorf("herdr host: %w", err)
 		}
 	}
-	files, err := writeWrapper(spec)
+	pgrun, err := h.pgrun()
+	if err != nil {
+		return nil, err
+	}
+	files, err := writeWrapper(spec, pgrun)
 	if err != nil {
 		return nil, err
 	}
@@ -296,11 +315,12 @@ type wrapperFiles struct {
 }
 
 // writeWrapper writes the wrapper script into the log directory. Run as `sh wrapper`, it
-// prints a notice naming the worker, then starts itself again as `sh wrapper run <pid>` in a
-// new process group (set -m). That inner copy writes its own pid and the outer one, runs the
-// command and records its exit code; the outer copy survives a kill of the group and writes
-// the final exit code atomically.
-func writeWrapper(spec ProcSpec) (wrapperFiles, error) {
+// prints a notice naming the worker, then starts itself again as `sh wrapper run <pid>`
+// through the pgrun prefix, which makes the inner copy the leader of a new process group
+// without job control, so its pid is the group id. That inner copy writes its own pid and
+// the outer one, runs the command and records its exit code; the outer copy survives a kill
+// of the group and writes the final exit code atomically.
+func writeWrapper(spec ProcSpec, pgrun []string) (wrapperFiles, error) {
 	dir := spec.LogDir
 	if dir == "" && spec.StdoutPath != "" {
 		dir = filepath.Dir(spec.StdoutPath)
@@ -339,6 +359,10 @@ func writeWrapper(spec ProcSpec) (wrapperFiles, error) {
 	if spec.Dir != "" {
 		cd = "cd " + shQuote(spec.Dir) + " && "
 	}
+	prefix := make([]string, len(pgrun))
+	for i, a := range pgrun {
+		prefix[i] = shQuote(a)
+	}
 	w, pid, rc, exit := shQuote(files.wrapper), shQuote(files.pid), shQuote(files.rc), shQuote(files.exit)
 	script := "#!/bin/sh\n" +
 		"# mill herdr wrapper" + strings.ReplaceAll(" "+spec.Name, "\n", " ") + "\n" +
@@ -349,8 +373,7 @@ func writeWrapper(spec ProcSpec) (wrapperFiles, error) {
 		"  exit 0\n" +
 		"fi\n" +
 		"printf '%s\\n' " + shQuote("mill worker: "+workerName(spec)+". Closing this tab stops the task.") + "\n" +
-		"set -m\n" +
-		"sh " + w + " run \"$$\" &\n" +
+		strings.Join(prefix, " ") + " sh " + w + " run \"$$\" &\n" +
 		"wait \"$!\"\n" +
 		"code=$?\n" +
 		"if [ -f " + rc + " ]; then code=$(cat " + rc + "); fi\n" +

@@ -6,11 +6,13 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,10 +28,18 @@ const (
 
 // fakeHerdr writes a fake herdr binary into a temp dir. It logs its argv (one call per
 // line) to the returned log file, prints the captured tab create JSON, runs `sh <wrapper>`
-// in the background in its own process group for `pane run` (mirroring the pane to
+// in the background in its own process group (through the testenv pgrun helper) for
+// `pane run` (mirroring the pane to
 // pane.out and writing the wrapper's pid to wrapper.pid) and answers `tab close`. create
 // overrides the tab create behaviour with a shell snippet.
 func fakeHerdr(t *testing.T, create string) (h *Herdr, log, dir string) {
+	t.Helper()
+	return fakeHerdrShell(t, create, `"$4"`)
+}
+
+// fakeHerdrShell is fakeHerdr whose `pane run` runs the wrapper with shell (a shell word)
+// instead of the shell mill names.
+func fakeHerdrShell(t *testing.T, create, shell string) (h *Herdr, log, dir string) {
 	t.Helper()
 	dir = t.TempDir()
 	log = filepath.Join(dir, "herdr.log")
@@ -41,16 +51,14 @@ func fakeHerdr(t *testing.T, create string) (h *Herdr, log, dir string) {
 		"echo \"$*\" >> " + shQuote(log) + "\n" +
 		"case \"$1 $2\" in\n" +
 		"'tab create') " + create + " ;;\n" +
-		"'pane run') set -m; \"$4\" \"$5\" > " + shQuote(filepath.Join(dir, "pane.out")) + " 2>&1 < /dev/null &\n" +
+		"'pane run') " + testenv.PgrunPrefix() + " " + shell + " \"$5\" > " + shQuote(filepath.Join(dir, "pane.out")) + " 2>&1 < /dev/null &\n" +
 		"  echo \"$!\" > " + shQuote(filepath.Join(dir, "wrapper.pid")) + " ;;\n" +
 		"'tab close') echo '" + realTabClose + "' ;;\n" +
 		"*) echo \"unexpected herdr call: $*\" >&2; exit 2 ;;\n" +
 		"esac\n"
 	bin := filepath.Join(dir, "herdr")
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	return &Herdr{Bin: bin, Workspace: "w8", Poll: 10 * time.Millisecond, StartTimeout: 10 * time.Second, Grace: 500 * time.Millisecond}, log, dir
+	testenv.WriteExecutable(t, bin, []byte(script))
+	return &Herdr{Bin: bin, Workspace: "w8", Poll: 10 * time.Millisecond, StartTimeout: 10 * time.Second, Grace: 500 * time.Millisecond, Pgrun: testenv.PgrunArgv()}, log, dir
 }
 
 func herdrLog(t *testing.T, log string) []string {
@@ -260,9 +268,7 @@ func TestHerdrStartFailsWhenPidNeverAppears(t *testing.T) {
 	hh, log, _ := fakeHerdr(t, "")
 	// A herdr that accepts `pane run` but never runs the wrapper.
 	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n[ \"$2\" = create ] && echo '" + realTabCreate + "'\nexit 0\n"
-	if err := os.WriteFile(hh.Bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, hh.Bin, []byte(script))
 	hh.StartTimeout = 200 * time.Millisecond
 	_, err := hh.Start(context.Background(), ProcSpec{Argv: []string{"/bin/true"}, StdoutPath: filepath.Join(t.TempDir(), "out")})
 	if err == nil || !strings.Contains(err.Error(), "pid") {
@@ -427,25 +433,22 @@ func TestHerdrWaitReturnsAfterCancelWhenExitFileNeverAppears(t *testing.T) {
 	hh, log, fake := fakeHerdr(t, "")
 	hh.StartTimeout, hh.Grace = 300*time.Millisecond, 300*time.Millisecond
 	// A wrapper that reports a worker pid, stays alive and never writes its exit file; its
-	// command line carries the wrapper path, as the host checks. It runs in its own process group (set -m), killed at cleanup, and gives up on its own once
+	// command line carries the wrapper path, as the host checks. It runs in its own process group (through the testenv pgrun helper),
+	// killed at cleanup, and gives up on its own once
 	// the fake's directory is gone or after a minute.
 	wpid := filepath.Join(fake, "wrapper.pid")
 	stuck := filepath.Join(fake, "stuck-wrapper.sh")
 	body := "sleep 60 & echo \"$! $$\" > \"$1\"\n" + testenv.WaitForFileScript(fake, "never") + "\n"
-	if err := os.WriteFile(stuck, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, stuck, []byte(body))
 	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n" +
 		"case \"$1 $2\" in\n" +
 		"'tab create') echo '" + realTabCreate + "' ;;\n" +
-		"'pane run') set -m; p=\"${5%.sh}.pid\"\n" +
-		"  sh " + shQuote(stuck) + " \"$p\" \"$5\" > /dev/null 2>&1 < /dev/null &\n" +
+		"'pane run') p=\"${5%.sh}.pid\"\n" +
+		"  " + testenv.PgrunPrefix() + " sh " + shQuote(stuck) + " \"$p\" \"$5\" > /dev/null 2>&1 < /dev/null &\n" +
 		"  echo \"$!\" > " + shQuote(wpid) + " ;;\n" +
 		"'tab close') echo '" + realTabClose + "' ;;\n" +
 		"esac\n"
-	if err := os.WriteFile(hh.Bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, hh.Bin, []byte(script))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	h, err := hh.Start(ctx, ProcSpec{Argv: []string{"/bin/true"}, StdoutPath: filepath.Join(t.TempDir(), "out")})
@@ -598,9 +601,7 @@ func TestCloseHerdrTabClosesOrReportsGone(t *testing.T) {
 
 	// herdr reports the tab does not exist.
 	gone := filepath.Join(dir, "herdr-gone")
-	if err := os.WriteFile(gone, []byte("#!/bin/sh\necho \"error: tab $3 not found\" >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, gone, []byte("#!/bin/sh\necho \"error: tab $3 not found\" >&2\nexit 1\n"))
 	closed, err = CloseHerdrTab(HerdrTab{Tab: "w8:t2", Bin: gone})
 	if err != nil || closed {
 		t.Fatalf("tab gone: %v, %v, want not closed and no error", closed, err)
@@ -608,9 +609,7 @@ func TestCloseHerdrTabClosesOrReportsGone(t *testing.T) {
 
 	// Any other failure is an error that says what to do.
 	broken := filepath.Join(dir, "herdr-broken")
-	if err := os.WriteFile(broken, []byte("#!/bin/sh\necho 'server unreachable' >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, broken, []byte("#!/bin/sh\necho 'server unreachable' >&2\nexit 1\n"))
 	closed, err = CloseHerdrTab(HerdrTab{Tab: "w8:t2", Bin: broken})
 	if err == nil || closed || !strings.Contains(err.Error(), "server unreachable") || !strings.Contains(err.Error(), "close herdr tab w8:t2 by hand") {
 		t.Fatalf("broken herdr: %v, %v", closed, err)
@@ -624,5 +623,140 @@ func TestNewHerdrDefaultStartTimeoutAllowsForLoad(t *testing.T) {
 	}
 	if got := (&Herdr{}).startTimeout(); got != 30*time.Second {
 		t.Fatalf("unset StartTimeout waits %s, want 30s", got)
+	}
+}
+
+func TestHerdrDefaultPgrunIsTheRunningBinaryAndWrapperHasNoJobControl(t *testing.T) {
+	t.Parallel()
+	if got := NewHerdr().Pgrun; len(got) != 0 {
+		t.Fatalf("NewHerdr().Pgrun = %q, want empty", got)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := (&Herdr{}).pgrun()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{exe, "__pgrun", "--"}; !slices.Equal(prefix, want) {
+		t.Fatalf("default pgrun prefix = %q, want %q", prefix, want)
+	}
+	files, err := writeWrapper(ProcSpec{Argv: []string{"/bin/true"}, LogDir: t.TempDir()}, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := read(t, files.wrapper)
+	if strings.Contains(script, "set -m") {
+		t.Fatalf("wrapper uses job control:\n%s", script)
+	}
+	if want := shQuote(exe) + " '__pgrun' '--' sh " + shQuote(files.wrapper) + ` run "$$" &`; !strings.Contains(script, want) {
+		t.Fatalf("wrapper does not start the inner copy with %q:\n%s", want, script)
+	}
+}
+
+// dashHerdr is a fake herdr whose `pane run` runs the wrapper with dash, which prints job
+// control errors in a pane without a tty. The test is skipped when dash is missing.
+func dashHerdr(t *testing.T) (h *Herdr, log, dir string) {
+	t.Helper()
+	dash, err := exec.LookPath("dash")
+	if err != nil {
+		t.Skip("dash is not installed: the wrapper cannot be checked under dash")
+	}
+	return fakeHerdrShell(t, "", shQuote(dash))
+}
+
+// waitFileContains polls path until it contains want.
+func waitFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(path); err == nil && strings.Contains(string(b), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(path)
+	t.Fatalf("%s never contained %q; it holds %q", path, want, b)
+}
+
+func TestHerdrWrapperUnderDashLeadsItsOwnGroupAndKillStopsIt(t *testing.T) {
+	t.Parallel()
+	hh, _, fake := dashHerdr(t)
+	dir := t.TempDir()
+	workerFile, childFile := filepath.Join(dir, "worker.pid"), filepath.Join(dir, "child.pid")
+	h, err := hh.Start(context.Background(), ProcSpec{
+		Name: "dash worker",
+		Argv: []string{"/bin/sh", "-c", "echo $$ > " + workerFile + "; echo worker output; sleep 30 & echo $! > " + childFile + "; wait"},
+		Env:  []string{"PATH=/usr/bin:/bin"}, StdoutPath: filepath.Join(dir, "out"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hd := h.(*herdrHandle)
+	workerPID, childPID := waitForPID(t, workerFile), waitForPID(t, childFile)
+
+	f := strings.Fields(read(t, hd.files.pid))
+	if len(f) != 2 {
+		t.Fatalf("pid file holds %q, want the inner and the outer pid", f)
+	}
+	inner, err1 := strconv.Atoi(f[0])
+	outer, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil {
+		t.Fatalf("pid file holds %q, want two pids", f)
+	}
+	pgid, err := syscall.Getpgid(workerPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pgid != inner || h.PID() != inner {
+		t.Fatalf("worker pgid = %d, pid file inner pid = %d, handle pid = %d: want all equal", pgid, inner, h.PID())
+	}
+	outerPgid, err := syscall.Getpgid(outer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outerPgid == pgid {
+		t.Fatalf("outer wrapper %d shares the worker's process group %d", outer, pgid)
+	}
+
+	pane := filepath.Join(fake, "pane.out")
+	waitFileContains(t, pane, "worker output\n")
+	if err := h.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if ex := waitHerdr(t, h); !ex.Signaled {
+		t.Fatalf("exit = %+v, want signaled", ex)
+	}
+	waitGone(t, workerPID)
+	waitGone(t, childPID)
+	if _, err := os.Stat(hd.files.exit); err != nil {
+		t.Fatalf("exit file after the group kill: %v", err)
+	}
+	got := read(t, pane)
+	if want := "mill worker: dash worker. Closing this tab stops the task.\nworker output\n"; !strings.HasPrefix(got, want) {
+		t.Fatalf("pane shows %q, want it to start with %q", got, want)
+	}
+	if l := strings.ToLower(got); strings.Contains(l, "job control") || strings.Contains(l, "tty") {
+		t.Fatalf("pane shows job control noise: %q", got)
+	}
+}
+
+func TestHerdrWrapperUnderDashRecordsExitWithoutJobControlNoise(t *testing.T) {
+	t.Parallel()
+	hh, _, fake := dashHerdr(t)
+	dir := t.TempDir()
+	h, err := hh.Start(context.Background(), ProcSpec{
+		Argv: []string{"/bin/sh", "-c", "echo done; exit 4"},
+		Env:  []string{"PATH=/usr/bin:/bin"}, StdoutPath: filepath.Join(dir, "out"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex := waitHerdr(t, h); ex.Code != 4 || ex.Signaled {
+		t.Fatalf("exit = %+v, want code 4", ex)
+	}
+	if got, want := read(t, filepath.Join(fake, "pane.out")), "mill worker: worker. Closing this tab stops the task.\ndone\n"; got != want {
+		t.Fatalf("pane shows %q, want %q", got, want)
 	}
 }
