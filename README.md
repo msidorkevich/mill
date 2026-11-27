@@ -6,7 +6,7 @@ A deterministic harness that turns a goal into a graph of tasks, runs a coding a
 task in isolation, checks the result with your project's gate and an independent verifier, and
 delivers each task as its own branch for you to review and merge in your forge.
 
-Status: **M5 (TUI and herdr host)**: the single-task pipeline, goals, review, publishing, `mill keep`, `mill tui` and the herdr host. See [docs/PROGRESS.md](docs/PROGRESS.md).
+Status: **M6 (extensions) in progress**: the single-task pipeline, goals, review, publishing, `mill keep`, `mill tui`, the herdr host, forge hooks and CI status. See [docs/PROGRESS.md](docs/PROGRESS.md).
 
 - Requirements: [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)
 - Milestones: [docs/MILESTONES.md](docs/MILESTONES.md)
@@ -134,14 +134,14 @@ mill run g1                     # same scheduler, only goal g1's tasks, in depen
 mill run g1 --retry-blocked     # after fixing the cause: blocked and failed tasks go back to pending
 mill run g1 --wait-on-limit     # on a usage limit, wait for the reset and continue instead of stopping
 mill watch [g1|g1/a]            # running attempts: task, attempt, role, elapsed, tokens, cost, latest action; tasks a command holds a claim on; redraws every 2s (--once, --interval 5s)
-mill review                     # verified and published tasks, oldest first: ID, STATUS, ATTEMPTS, COST, TITLE, BRANCH (--json)
-mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, diff stat, skipped tests added (--diff, --json)
+mill review                     # verified and published tasks, oldest first: ID, STATUS, ATTEMPTS, COST, TITLE, BRANCH, CI (--json)
+mill review show g1/a           # spec, acceptance, last verdict and gate, attempts, cost, branch, CI, diff stat, skipped tests added (--diff, --json)
 mill review changes g1/a -m "text"   # operator comments (blank line = one finding) for the next attempt; task goes pending (or --file)
 mill review reject g1/a -m "why"     # block the task; its non-landed descendants go on hold
 mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
 mill review approve --goal g1 [--no-combined]   # approve every verified task, parents first; children of unpublished parents are queued
 mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
-mill hook run g1/a [--event publish|update]   # re-run a published task's on_publish or on_update hook (default: publish until one succeeded, then update)
+mill hook run g1/a [--event publish|update|status]   # re-run a published task's on_publish, on_update or status hook (default: publish until one succeeded, then update)
 mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
 mill stats models               # first-pass rate, avg attempts and avg $ by size, complexity and first-attempt model (--json)
 ```
@@ -684,7 +684,10 @@ the hook fails, because the re-run is what you asked for. Mill keeps the last 20
 **When a hook succeeds with output.** The last non-empty line of its output is printed as
 `hook on_<event> for <task>: <last line>`, for example `hook on_publish for g1/a: https://example.test/pr/1`
 or `hook on_update for g1/a: ...`. `mill review approve`, `mill keep` and `mill sync` print it for
-each hook they run that exits 0 without timing out; a hook with no output prints nothing.
+each hook they run that exits 0 without timing out; a hook with no output prints nothing. The
+report line always follows the command's own `Published` (or `Republished`) line, so the hook's
+output is read after the push it describes: `mill review approve` prints the `Published` line,
+then the hook line, then `Next:`.
 
 **Seeing hook runs.** Each run is recorded. `mill task show` and `mill review show` print the
 latest run of each event after the other details, one line per event:
@@ -697,12 +700,13 @@ latest run of each event after the other details, one line per event:
 `mill task show --json` carries the same runs under `hooks`, keyed by event (`exit_code`,
 `duration_ms`, `timed_out`, `output_tail`, `at`).
 
-**Re-running a hook.** `mill hook run <task> [--event publish|update]` runs the hook again with a
+**Re-running a hook.** `mill hook run <task> [--event publish|update|status]` runs the hook again with a
 fresh document for a published task and prints the output tail when it succeeds (exit 0). With no
-`--event` it runs `publish` until a publish hook has succeeded, then `update`. The hook must be
-configured, and the task must be published.
+`--event` it runs `publish` until a publish hook has succeeded, then `update`. `--event status`
+runs the status hook once and prints what it reported (see [CI status](#ci-status)). The hook must
+be configured, and the task must be published.
 
-**Checking hooks.** `mill doctor` checks `on_publish` and `on_update`. Each program must be on
+**Checking hooks.** `mill doctor` checks `on_publish`, `on_update` and `status`. Each program must be on
 `PATH` or an executable file (a relative path counts from the repository root). Then the command
 runs once with `MILL_HOOK_CHECK=1` and no stdin, and must exit 0. A hook script should use that
 variable to check its prerequisites and exit: the example scripts check that `curl`, `jq` and the
@@ -714,7 +718,8 @@ branch. It needs `curl` and `jq`. To set it up:
 
 1. Create a fine-grained token: repository access **Only select repositories**, with only this
    repository selected, and permission **Pull requests: Read and write**. Metadata read is granted
-   with it; the doctor check uses it.
+   with it. For the `status` event (see [CI status](#ci-status)) add **Commit statuses: Read** and
+   **Checks: Read** on a private repository. Without them the status event fails.
 2. Copy `hooks/github/pr.sh` from the mill repository into your repository at
    `hooks/github/pr.sh`, and make it executable.
 3. In `.mill/config.toml`:
@@ -722,10 +727,22 @@ branch. It needs `curl` and `jq`. To set it up:
    ```toml
    on_publish = "hooks/github/pr.sh"
    on_update  = "hooks/github/pr.sh"
+   status     = "hooks/github/pr.sh"   # optional: reports CI, see CI status
    hook_env   = ["GITHUB_TOKEN"]
    ```
 
 4. Export the token in the shell that runs mill: `export GITHUB_TOKEN=<token>`.
+
+New pull requests are opened as drafts. To open them ready for review instead, set
+`MILL_GITHUB_DRAFT=0` for the hook command, for example
+`on_publish = "MILL_GITHUB_DRAFT=0 hooks/github/pr.sh"` (and the same for `on_update`). Existing
+pull requests are not changed.
+
+`mill doctor` runs the script in check mode, which includes a write-access check: the script asks
+GitHub to create a pull request from a branch that does not exist. GitHub answers 422 only when
+the token may create pull requests, so nothing is created. Any other answer fails the check: 403
+or 404 names the missing permission (Pull requests: Read and write), and other answers fail with
+the HTTP status. The `status` event is checked for commit status read access too.
 
 For GitHub Enterprise, set `MILL_GITHUB_API` (for example `https://ghe.example.com/api/v3`) in
 your shell and add it to `hook_env`: `hook_env = ["GITHUB_TOKEN", "MILL_GITHUB_API"]`. The
@@ -737,7 +754,8 @@ each review branch on Bitbucket Cloud. It needs `curl` and `jq`.
 1. Create a repository access token (or a workspace access token) with **Repositories: Read**
    and **Pull requests: Read and write**. The script sends it as a Bearer token. Alternatively,
    use basic auth with an Atlassian account email as `BITBUCKET_USER` and an API token as
-   `BITBUCKET_TOKEN`; the script uses basic auth whenever `BITBUCKET_USER` is set.
+   `BITBUCKET_TOKEN`; the script uses basic auth whenever `BITBUCKET_USER` is set. For the
+   `status` event (see [CI status](#ci-status)) also grant **Pipelines: Read**.
 2. Copy `hooks/bitbucket/pr.sh` from the mill repository into your repository at
    `hooks/bitbucket/pr.sh`, and make it executable.
 3. In `.mill/config.toml`, for a Bearer token:
@@ -745,11 +763,21 @@ each review branch on Bitbucket Cloud. It needs `curl` and `jq`.
    ```toml
    on_publish = "hooks/bitbucket/pr.sh"
    on_update  = "hooks/bitbucket/pr.sh"
+   status     = "hooks/bitbucket/pr.sh"   # optional: reports CI, see CI status
    hook_env   = ["BITBUCKET_TOKEN"]
    ```
 
    For basic auth, use `hook_env = ["BITBUCKET_USER", "BITBUCKET_TOKEN"]`.
 4. Export the variables in the shell that runs mill.
+
+New pull requests are opened as drafts. To open them ready for review instead, set
+`MILL_BITBUCKET_DRAFT=0` for the hook command, for example
+`on_publish = "MILL_BITBUCKET_DRAFT=0 hooks/bitbucket/pr.sh"` (and the same for `on_update`).
+
+`mill doctor` runs the script in check mode, which includes a write-access check: the script
+asks Bitbucket to create an empty pull request, which Bitbucket rejects with 400 (missing fields) only when
+the token may create pull requests, so nothing is created. 401 or 403 fails the check and names
+the permission to add.
 
 To point at another API base, set `MILL_BITBUCKET_API` in your shell and add it to `hook_env`
 as for GitHub. The default is `https://api.bitbucket.org/2.0`.
@@ -765,6 +793,92 @@ source branch on merge, so that open child PRs are retargeted:
 branch that is already gone. If you merge and delete a parent's branch before its child's PR
 exists, the hook cannot open that child's PR. So first let every PR of the stack exist (run
 `mill review approve --goal` or `mill keep --watch`), then merge from the bottom of the stack up.
+
+### CI status
+
+A status hook reads the review status (CI checks) of each published task from your forge. It is
+optional: with no `status` set, mill queries nothing and the CI column shows `-`.
+
+```toml
+status          = "hooks/github/pr.sh"   # shell command, run with "sh -c" from the repository root; empty = no status hook
+status_interval = "2m"                   # how often the status hook runs for a published task; default 2m, must be above 0
+ci_fix          = false                  # act on failing checks the status hook reports; default false
+```
+
+**The status hook.** It gets the `mill/hook@1` document on stdin with the event `status`
+(`MILL_HOOK_EVENT=status`), and must print one `mill/status@1` JSON object on stdout:
+
+```json
+{"schema": "mill/status@1", "state": "failure", "url": "https://example.test/pr/1",
+ "checks": [{"name": "test", "state": "failure", "url": "https://example.test/ci/9", "summary": "3 tests failed"}]}
+```
+
+- `schema` must be `mill/status@1`.
+- `state` is the state of the review: `success`, `failure`, `pending` or `none`. Each check has the
+  same states.
+- `url` is optional: a link to the review.
+- `checks` lists the review's checks (such as CI jobs). Each has a `name` (required), a `state`
+  (required), and optional `url` and `summary`. A `summary` longer than 2 KB (2048 bytes) is cut
+  at a character boundary.
+
+mill reads the last JSON object that starts a line on stdout. Invalid output is a failed run: a
+hook that exits non-zero, times out, prints no such object, or has a wrong `schema`, a state
+other than the four above, or a check without a name, is reported on stderr like any failed hook,
+and no CI status is recorded for that run. The last recorded status stays in place.
+
+**When mill queries it.** Mill queries the status hook for published tasks in two places, and
+both run after the pass has published, so a task that was just published or re-published is
+queried at its new head:
+
+- at the end of `mill sync`;
+- at the end of each `mill keep` pass (including `mill keep --watch`).
+
+A task is queried when nothing is recorded for its published head, the latest record is for an
+older head, its state is not final (`pending` or `none`), or the last query is at least
+`status_interval` old. `success` and `failure` are final; a final state is not queried again until
+the interval has passed. Due tasks are queried one at a time, in publish order (the order in
+which they were first published), so the CI lines and `CI:` entries from one query round follow
+that order. `mill hook run <task> --event status` runs the hook once, on demand.
+
+**The CI line.** When a query changes a task's CI state or published head, `mill sync` and
+`mill keep` print one line for the change as it happens:
+
+```text
+<task>: CI <state> at <sha8>[: <failing check names>][ <url>]
+g1/a: CI failure at 1a2b3c4d: test https://example.test/pr/1
+```
+
+`<sha8>` is the first 8 characters of the head. Failing check names are separated by commas, and
+they and the URL are left out when there are none. With `--json`, `mill keep` prints these lines
+on stderr and `mill sync` does not print them.
+
+Without `--json`, the command's closing summary also has a `CI:` block with one line per change,
+the task, its state and the head:
+
+```text
+CI:
+  g1/a  failure at 1a2b3c4d
+```
+
+**Where it shows.** `mill review` has a CI column: the state of the latest record when it is for
+the published head, `-` when nothing is recorded, and `stale (<sha8>)` when it is for an older
+head (the branch was published again and the forge has not reported on the new head yet).
+`mill review show g1/a` and `mill task show g1/a` print a `CI:` block with the state, the head,
+the URL, and the failing checks with their URLs. It is omitted when nothing is recorded. The
+`--json` output carries the same fields under `ci`.
+
+**Fixing CI failures (`ci_fix`).** With `ci_fix = true`, each `mill keep` pass looks for published
+tasks whose latest status is `failure` at their current published head that no earlier pass has
+acted on. For each one, mill runs the fixer: the failing checks become findings with the source
+`ci`, and the fixer makes a new implement attempt on the task's branch. When the fixer's result
+is verified (the gate and the verifier pass), mill publishes it again, which runs `on_update`,
+and the next query checks the new head. Each failure is fixed once.
+
+The fixer is an ordinary implement attempt, so `max_attempts` (default 3) caps it. When the fixer
+does not get the task verified, or the failure cannot be recorded for it, the task is blocked, and
+its reason says what happened, for example `keeper: CI failed at 1a2b3c4d: test; the fixer did not
+get it verified: <reason>`. Fix the cause, then unblock the task as for any blocked task. `ci_fix`
+does nothing without a status hook.
 
 ### Keeping branches mergeable: `mill keep`
 
