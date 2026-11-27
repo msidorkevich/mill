@@ -108,12 +108,12 @@ func TestHookFirstPublishRunsOnPublishOnce(t *testing.T) {
 	o, _, _ := fixture(t)
 	log := hookLog(t, &o)
 	var stderr bytes.Buffer
-	o.Stderr = &stderr
 
 	res, err := Publish(context.Background(), o)
 	if err != nil {
 		t.Fatal(err)
 	}
+	PrintHookReport(nil, &stderr, res)
 	docs := hookDocs(t, log)
 	if len(docs) != 1 {
 		t.Fatalf("hook ran %d times, want once: %v", len(docs), docs)
@@ -137,7 +137,6 @@ func TestHookRepublishRunsOnUpdateWithoutPreviousBaseWhenTargetUnchanged(t *test
 	t.Parallel()
 	o, _, br := fixture(t)
 	log := hookLog(t, &o)
-	o.Stderr = &bytes.Buffer{}
 	if _, err := Publish(context.Background(), o); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +217,6 @@ func TestHookUpdateAfterParentLandsCarriesPreviousBase(t *testing.T) {
 	o, a, b := stackedFixture(t)
 	ctx := context.Background()
 	log := hookLog(t, &o)
-	o.Stderr = &bytes.Buffer{}
 	for _, id := range []string{a.TaskID, b.TaskID} {
 		o.TaskID = id
 		if _, err := Publish(ctx, o); err != nil {
@@ -280,11 +278,11 @@ func TestHookFailureLeavesTaskPublished(t *testing.T) {
 			o, bare, _ := fixture(t)
 			o.Cfg.OnPublish, o.Cfg.HookTimeout.Duration = tc.cmd, tc.timeout
 			var stderr bytes.Buffer
-			o.Stderr = &stderr
 			res, err := Publish(context.Background(), o)
 			if err != nil {
 				t.Fatalf("Publish with a failing hook = %v, want nil", err)
 			}
+			PrintHookReport(nil, &stderr, res)
 			if res.SHA == "" || res.Onto != "main" || res.Republish {
 				t.Errorf("result = %+v", res)
 			}
@@ -307,13 +305,15 @@ func TestHookNotConfiguredRunsNothing(t *testing.T) {
 	t.Parallel()
 	o, _, br := fixture(t)
 	var stderr bytes.Buffer
-	o.Stderr = &stderr
-	if _, err := Publish(context.Background(), o); err != nil {
-		t.Fatal(err)
-	}
-	advance(t, o, br, "y.txt")
-	if _, err := Publish(context.Background(), o); err != nil {
-		t.Fatal(err)
+	for i := 0; i < 2; i++ {
+		if i == 1 {
+			advance(t, o, br, "y.txt")
+		}
+		res, err := Publish(context.Background(), o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		PrintHookReport(&stderr, &stderr, res)
 	}
 	if n := hookRuns(t, o.Store, "t1"); n != 0 {
 		t.Errorf("%d hook-run events, want none", n)

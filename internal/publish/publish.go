@@ -5,6 +5,7 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,11 +46,6 @@ type Options struct {
 	// before it waits for a gate slot, "gate" once it holds one. A reused gate tells it
 	// nothing. An error stops the gate and is returned as it is.
 	GateActivity func(step string) error
-	// HookOut receives the line of a successful on_publish/on_update hook; nil means Out. It
-	// lets a caller that drops the progress lines still show that line.
-	HookOut io.Writer
-	// Stderr receives the report of a failed on_publish/on_update hook; nil means os.Stderr.
-	Stderr io.Writer
 }
 
 // DefaultGateSlotPoll is how often a gate waiting for a slot checks again when
@@ -66,6 +62,29 @@ type Result struct {
 	Onto      string       `json:"onto"`       // the branch a PR should target: review/<parent> or the base branch
 	Republish bool         `json:"republish"`  // the task was already published
 	GateRerun *gate.Result `json:"gate_rerun"` // set when the gate was re-run at the head
+	// HookReport is what the on_publish/on_update hook run reports. Publish writes none of
+	// it: the caller prints it with PrintHookReport after its own line for the task.
+	HookReport []HookLine `json:"hook_report,omitempty"`
+}
+
+// HookLine is one line of a hook report, without its trailing newline.
+type HookLine struct {
+	Line   string `json:"line"`
+	Failed bool   `json:"failed"` // a failure report, for stderr
+}
+
+// PrintHookReport writes the hook report of r: success lines to out, failure lines to
+// stderr. A nil writer drops its lines.
+func PrintHookReport(out, stderr io.Writer, r Result) {
+	for _, l := range r.HookReport {
+		w := out
+		if l.Failed {
+			w = stderr
+		}
+		if w != nil {
+			fmt.Fprintln(w, l.Line)
+		}
+	}
 }
 
 // RefusedError is a publish that a RV5 rule does not allow. Nothing was pushed.
@@ -282,7 +301,7 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 			previousBase = prevOnto
 		}
 	}
-	runHook(ctx, o, t.GoalID, event, previousBase)
+	res.HookReport = runHook(ctx, o, t.GoalID, event, previousBase)
 	return res, nil
 }
 
@@ -308,39 +327,35 @@ func lastPublishedOnto(ctx context.Context, s *store.Store, id string) (string, 
 	return "", nil
 }
 
-// runHook runs the on_<event> hook for the published task. A failure is reported on stderr
-// and never changes the publish: the task is already pushed and recorded. A successful hook
-// whose output is not empty gets its last non-empty line written to HookOut, or to Out when
-// HookOut is nil.
-func runHook(ctx context.Context, o Options, goalID, event, previousBase string) {
+// runHook runs the on_<event> hook for the published task and returns its report. A
+// failure is reported and never changes the publish: the task is already pushed and
+// recorded. A successful hook whose output is not empty reports its last non-empty line.
+func runHook(ctx context.Context, o Options, goalID, event, previousBase string) []HookLine {
 	if (event == hook.EventPublish && o.Cfg.OnPublish == "") || (event == hook.EventUpdate && o.Cfg.OnUpdate == "") {
-		return
-	}
-	stderr := o.Stderr
-	if stderr == nil {
-		stderr = os.Stderr
+		return nil
 	}
 	id := o.TaskID
+	var stderr bytes.Buffer
 	doc, err := hook.Build(ctx, o.Store, o.Cfg, o.Paths.Root, id, event, previousBase)
 	var res hook.Result
 	if err == nil {
-		r := hook.Runner{Store: o.Store, Cfg: o.Cfg, Root: o.Paths.Root, Stderr: stderr}
+		r := hook.Runner{Store: o.Store, Cfg: o.Cfg, Root: o.Paths.Root, Stderr: &stderr}
 		res, err = r.Run(ctx, event, goalID, id, doc)
 	}
+	var report []HookLine
+	if stderr.Len() > 0 { // the runner's report of a hook that failed or timed out
+		report = append(report, HookLine{Line: strings.TrimSuffix(stderr.String(), "\n"), Failed: true})
+	}
 	if err != nil {
-		fmt.Fprintf(stderr, "hook on_%s for %s failed (%v); re-run it with `mill hook run %s`\n", event, id, err, id)
-		return
+		return append(report, HookLine{Line: fmt.Sprintf("hook on_%s for %s failed (%v); re-run it with `mill hook run %s`", event, id, err, id), Failed: true})
 	}
-	out := o.HookOut
-	if out == nil {
-		out = o.Out
-	}
-	if res.ExitCode != 0 || res.TimedOut || out == nil {
-		return
+	if res.ExitCode != 0 || res.TimedOut {
+		return report
 	}
 	if line := lastLine(res.Tail); line != "" {
-		fmt.Fprintf(out, "hook on_%s for %s: %s\n", event, id, line)
+		report = append(report, HookLine{Line: fmt.Sprintf("hook on_%s for %s: %s", event, id, line)})
 	}
+	return report
 }
 
 // lastLine is the last non-empty line of s, trimmed; "" when s has none.

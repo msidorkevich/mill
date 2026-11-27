@@ -1285,7 +1285,7 @@ func (s *syncer) republish(ctx context.Context, t store.Task) error {
 		return err
 	}
 	po := s.publishOptions(t.ID)
-	po.Out, po.HookOut = nil, s.Out // only the hook line: the result reports the publish itself
+	po.Out = nil // the result reports the publish itself
 	var pr publish.Result
 	var err error
 	publishIt := func() { pr, err = publish.Publish(ctx, po) }
@@ -1311,6 +1311,7 @@ func (s *syncer) republish(ctx context.Context, t store.Task) error {
 	}
 	s.res.Republished = append(s.res.Republished, Republished{TaskID: t.ID, Ref: pr.Ref, SHA: pr.SHA, Parent: pr.Parent})
 	s.logf("%s: republished %s at %s (parent %s)", t.ID, pr.Ref, short(pr.SHA), short(pr.Parent))
+	publish.PrintHookReport(s.Out, os.Stderr, pr)
 	return nil
 }
 

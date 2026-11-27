@@ -929,7 +929,7 @@ func (k *keeper) republish(ctx context.Context, id string) error {
 		return err
 	}
 	po := k.publishOptions(id)
-	po.Out, po.HookOut = nil, k.Out // only the hook line: the pass logs the publish itself
+	po.Out = nil // the pass logs the publish itself
 	var pr publish.Result
 	var err error
 	publishIt := func() { pr, err = publish.Publish(ctx, po) }
@@ -948,6 +948,7 @@ func (k *keeper) republish(ctx context.Context, id string) error {
 	}
 	k.res.Republished = append(k.res.Republished, syncer.Republished{TaskID: id, Ref: pr.Ref, SHA: pr.SHA, Parent: pr.Parent})
 	k.logf("%s: republished %s at %s", id, pr.Ref, short(pr.SHA))
+	publish.PrintHookReport(k.Out, os.Stderr, pr)
 	return nil
 }
 
