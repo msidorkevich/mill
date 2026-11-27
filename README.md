@@ -26,6 +26,11 @@ make build     # bin/mill
 make install   # go install (only from a merged main)
 ```
 
+**Linux.** mill runs on Linux and macOS. The herdr wrapper and the tests also work under dash
+(Ubuntu's `/bin/sh`), which has no job control: the herdr host starts each worker's process group
+through the hidden `mill __pgrun` command instead of relying on the shell. CI runs `make check` on
+ubuntu-latest and macos-latest (`.github/workflows/check.yml`).
+
 ## Use
 
 ```sh
@@ -259,8 +264,16 @@ task's `owns` (a task with empty `owns` is never restricted):
   for that attempt.
 - `"off"`: no check.
 
-**Files owned by a sibling.** Under `warn` and `enforce`, a changed file that another unlanded task
-of the same goal owns is treated as a sibling-owned file. Under both `warn` and `enforce` the
+**Files owned by a dependency.** A task's dependencies and dependents, direct or transitive, do
+not count as its siblings (below), so editing a file they own does not by itself fail the attempt.
+This is an exemption from the sibling-owned-file rule only: the file is still outside the task's
+`owns`. Under `warn` the edit is recorded in the `owns-outside` event and the verifier is given it.
+Under `enforce` it fails like any other outside-owns file. A file that a sibling also owns is
+still a sibling-owned file.
+
+**Files owned by a sibling.** Under `warn` and `enforce`, a changed file outside the task's `owns`
+that another unlanded task of the same goal owns (not a dependency or dependent) is treated as a
+sibling-owned file. Under both `warn` and `enforce` the
 attempt fails at once, without running the gate or the verifier, and each such file becomes a
 finding for the next attempt. The finding names the owning task and the revert command, for example
 `changed a file owned by task g1/b; revert it with git restore --source <sha> -- a.go (delete it
@@ -343,8 +356,11 @@ merge_check_cmd = "go vet ./..."
 
 The check runs right after a task is verified. Its siblings are the other tasks of the same goal
 that are verified or published, not landed yet, and whose changed files share a directory with the
-task's changes. A task without such siblings is not checked. Mill merges the task's verified head
-with all its siblings in a throwaway worktree (removed afterwards) and runs the command there,
+task's changes. A task without such siblings is not checked. A sibling whose branch is already
+contained in the task's head (for example one of its dependencies, whose commits the task builds
+on) is skipped. A task without siblings left after that is not checked: no throwaway worktree is
+created and no gate slot is taken. Otherwise mill merges the task's verified head with all its
+remaining siblings in a throwaway worktree (removed afterwards) and runs the command there,
 holding a gate slot (`max_parallel_gates`, see above) while it runs. When a merge conflicts or the
 command fails, the task is not published: mill sends it back to pending with a `merge-check`
 finding that names the sibling tasks, the conflicting files or the command and the tail of its
@@ -652,6 +668,11 @@ hook_timeout = "60s"                  # per hook command; the default is 60s, mu
 allowlist as workers (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `LANG`,
 `LC_ALL`, `LC_CTYPE`) plus the names in `hook_env`. A token in your shell is invisible to a hook
 until you list its name there.
+
+**Assignments in hook commands.** A hook command may start with `NAME=value` assignments, or with
+`env NAME=value ...`, for example `on_publish = "MILL_GITHUB_DRAFT=0 hooks/github/pr.sh"` or
+`on_publish = "env MILL_GITHUB_DRAFT=0 hooks/github/pr.sh"`. `mill doctor` finds the program
+after the assignments, so the check runs the same program the hook runs.
 
 **The mill/hook@1 document.** One JSON object on stdin, `"schema": "mill/hook@1"`:
 
