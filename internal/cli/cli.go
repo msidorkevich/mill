@@ -16,6 +16,7 @@ import (
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/doctor"
 	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/pgrun"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 )
@@ -129,6 +130,9 @@ func init() {
 // Each call answers repeated git lookups (work tree root, common dir, remote URLs, identity)
 // from a cache of its own, unless ctx already carries one or opts out with gitx.WithoutCache.
 func Run(ctx context.Context, env Env, args []string) int {
+	if len(args) > 0 && args[0] == pgrunCommand {
+		return runPgrun(env, args[1:])
+	}
 	if gitx.CacheFrom(ctx) == nil {
 		ctx = gitx.WithCache(ctx, gitx.NewCache()) // no-op when ctx opted out
 	}
@@ -148,6 +152,25 @@ func Run(ctx context.Context, env Env, args []string) int {
 	fmt.Fprintf(env.Stderr, "mill: unknown command %q\n\n", args[0])
 	usage(env.Stderr)
 	return ExitUsage
+}
+
+// pgrunCommand is the hidden helper that runs a command as the leader of a new process
+// group. It is absent from commands so usage never lists it.
+const pgrunCommand = "__pgrun"
+
+// runPgrun replaces the process with the command in args as a new process group leader. It
+// opens no repository, config or database. It returns only when the exec fails: 127 for a
+// missing command, 126 otherwise.
+func runPgrun(env Env, args []string) int {
+	err := pgrun.Exec(args)
+	if err == nil {
+		return ExitOK
+	}
+	fmt.Fprintf(env.Stderr, "mill %s: %v\n", pgrunCommand, err)
+	if errors.Is(err, pgrun.ErrNotFound) {
+		return 127
+	}
+	return 126
 }
 
 func usage(w io.Writer) {
