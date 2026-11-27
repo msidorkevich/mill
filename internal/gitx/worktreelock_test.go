@@ -19,6 +19,8 @@ const (
 	wtAdminHelperEnv    = "MILL_GITX_WTADMIN_HELPER_REPO"
 	wtAdminHelperDirEnv = "MILL_GITX_WTADMIN_HELPER_DIR"
 	wtAdminRounds       = 12
+	// wtAdminHelperDone is printed by the helper once all its rounds succeeded.
+	wtAdminHelperDone = "wtadmin-helper-done"
 )
 
 // wtAdminHelperMain is the helper process: it adds and removes worktrees in a loop and
@@ -29,6 +31,7 @@ func wtAdminHelperMain() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	fmt.Println(wtAdminHelperDone)
 	return 0
 }
 
@@ -124,6 +127,12 @@ func TestWorktreeAdminLockAcrossProcesses(t *testing.T) {
 	ownErr := wtAdminCycle(ctx, r, dir, "test", wtAdminRounds)
 	if err := cmd.Wait(); err != nil {
 		t.Errorf("helper process: %v\n%s", err, out.String())
+	} else if !strings.Contains(out.String(), wtAdminHelperDone) {
+		t.Errorf("helper process did no worktree work (no %q in its output):\n%s", wtAdminHelperDone, out.String())
+	}
+	// Both processes worked in dir: the helper's branches exist only if it ran its rounds.
+	if refs := mustRun(t, context.Background(), r, "branch", "--list", "wt/helper-*"); strings.Count(refs, "wt/helper-") != wtAdminRounds {
+		t.Errorf("helper created branches %q, want %d", refs, wtAdminRounds)
 	}
 	if ownErr != nil {
 		t.Fatal(ownErr)
