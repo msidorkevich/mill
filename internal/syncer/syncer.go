@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/cistatus"
 	"github.com/msidorkevich/mill/internal/cleanup"
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/fanin"
@@ -46,6 +47,13 @@ type Options struct {
 	Paths project.Paths
 	Host  host.Host // runs the gate; nil means host.NewExec()
 	Out   io.Writer // one progress line per action; nil discards
+	// Stderr gets status hook failures; nil discards.
+	Stderr io.Writer
+	// Now is the clock the CI status query runs on; nil means time.Now.
+	Now func() time.Time
+	// SkipCIStatus leaves the CI status query to the caller (the keeper queries once at
+	// the end of its pass).
+	SkipCIStatus bool
 	// ReportRedGate leaves a task whose gate fails after a restack unblocked and lists it in
 	// Result.GateRed, for the caller to fix (the keeper). Off, such a task is blocked.
 	ReportRedGate bool
@@ -162,6 +170,8 @@ type Result struct {
 	NotCleaned []NotCleaned `json:"not_cleaned"`
 	// Busy lists tasks left unchanged because they are being worked on; run sync again later.
 	Busy []Busy `json:"busy"`
+	// CI lists the CI status changes the status hook reported at the end of the sync.
+	CI []cistatus.Change `json:"ci"`
 }
 
 type syncer struct {
@@ -425,7 +435,7 @@ func (s *syncer) activity(ctx context.Context, id, step string) error {
 func newResult(o Options) Result {
 	return Result{Remote: o.Cfg.Remote, BaseBranch: o.Cfg.BaseBranch,
 		Landed: []Landed{}, Restacked: []Restacked{}, Republished: []Republished{}, NeedsRepublish: []NeedsRepublish{}, Blocked: []Blocked{}, Restored: []Restored{},
-		GoalsLanded: []string{}, Cleaned: []Cleaned{}, NotCleaned: []NotCleaned{}, Busy: []Busy{}}
+		GoalsLanded: []string{}, Cleaned: []Cleaned{}, NotCleaned: []NotCleaned{}, Busy: []Busy{}, CI: []cistatus.Change{}}
 }
 
 // Sync fetches the remote, marks merged tasks landed, restacks and re-publishes their
@@ -474,6 +484,15 @@ func Sync(ctx context.Context, o Options) (Result, error) {
 	}
 	// Last, so that children of landed tasks were restacked off their branches first.
 	s.cleanLanded(ctx)
+	if o.SkipCIStatus {
+		return res, nil
+	}
+	// After the restacks and re-publishes, so re-published tasks are queried at their new head.
+	changes, err := cistatus.Poll(ctx, cistatus.Options{Store: o.Store, Cfg: o.Cfg, Root: root, Out: o.Out, Stderr: o.Stderr, Now: o.Now})
+	res.CI = append(res.CI, changes...)
+	if err != nil {
+		return res, err
+	}
 	return res, nil
 }
 
