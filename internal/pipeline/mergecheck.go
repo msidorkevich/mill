@@ -216,7 +216,8 @@ func mergeClashFinding(c mergeClash, cmd string) prompt.Finding {
 
 // mergeSiblings lists the other tasks of t's goal that are verified (or published) and not
 // landed, with a branch, and whose changed files share a directory with t's changes between
-// startSHA and head. None for a standalone task.
+// startSHA and head. A sibling whose branch head is already an ancestor of head (such as a
+// dependency) adds nothing to the merge and is left out. None for a standalone task.
 func (p *Pipeline) mergeSiblings(ctx context.Context, t store.Task, startSHA, head string) ([]mergeSibling, error) {
 	goal, _ := store.SplitTaskID(t.ID)
 	if goal == "" {
@@ -251,11 +252,23 @@ func (p *Pipeline) mergeSiblings(ctx context.Context, t store.Task, startSHA, he
 		if err != nil {
 			return nil, fmt.Errorf("merge check of %s: list the changed files of sibling %s: %w", t.ID, s.ID, err)
 		}
+		shares := false
 		for d := range fileDirs(sfiles) {
 			if dirs[d] {
-				out = append(out, mergeSibling{id: s.ID, branch: sb.Name})
+				shares = true
 				break
 			}
+		}
+		if !shares {
+			continue
+		}
+		// The branch, not the recorded head: it is what the check would merge.
+		contained, err := gitx.IsAncestor(ctx, p.Paths.Root, "refs/heads/"+sb.Name, head)
+		if err != nil {
+			return nil, fmt.Errorf("merge check of %s: cannot tell whether %s already contains sibling %s; check that branch %s exists, then run the task again: %w", t.ID, short(head), s.ID, sb.Name, err)
+		}
+		if !contained {
+			out = append(out, mergeSibling{id: s.ID, branch: sb.Name})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
