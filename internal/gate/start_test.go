@@ -28,7 +28,7 @@ func stuckHerdr(t *testing.T) (*host.Herdr, string) {
 		"esac\nexit 0\n"
 	bin := filepath.Join(dir, "herdr")
 	testenv.WriteExecutable(t, bin, []byte(script))
-	return &host.Herdr{Bin: bin, Poll: time.Millisecond, StartTimeout: 50 * time.Millisecond, Grace: 100 * time.Millisecond}, log
+	return &host.Herdr{Bin: bin, Poll: time.Millisecond, StartTimeout: 2 * time.Second, Grace: 100 * time.Millisecond}, log
 }
 
 func countCalls(t *testing.T, log, prefix string) int {

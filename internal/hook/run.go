@@ -124,7 +124,12 @@ func (r Runner) Run(ctx context.Context, event, goalID, taskID string, doc any) 
 	if res.statusErr != nil {
 		data["error"] = res.statusErr.Error()
 	}
-	if _, err := r.Store.AppendEvent(ctx, RunEvent, goalID, taskID, data); err != nil {
+	recordCtx := ctx
+	if res.TimedOut {
+		// The deadline that timed the hook out may be ctx's own; the run is still recorded.
+		recordCtx = context.WithoutCancel(ctx)
+	}
+	if _, err := r.Store.AppendEvent(recordCtx, RunEvent, goalID, taskID, data); err != nil {
 		return res, fmt.Errorf("record %s event for %s of %s: %w", RunEvent, name, taskID, err)
 	}
 
@@ -206,6 +211,10 @@ func run(ctx context.Context, dir, command string, env []string, stdin []byte, t
 	cmd.WaitDelay = waitDelay
 
 	if err := cmd.Start(); err != nil {
+		// A deadline (the hook's or ctx's) that passed before or during Start is a timeout.
+		if errors.Is(tctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+			return outcome{exitCode: -1, timedOut: true}
+		}
 		return outcome{exitCode: -1, tail: tail(fmt.Sprintf("start sh -c: %v", err))}
 	}
 	err := cmd.Wait()
