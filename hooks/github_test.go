@@ -500,3 +500,44 @@ func TestGitHubScriptPassesShellcheck(t *testing.T) {
 		t.Fatalf("shellcheck -s sh %s: %v\n%s", ghScript, err, out)
 	}
 }
+
+func TestGitHubHookKeepsTokenOffCurlArgs(t *testing.T) {
+	ghRequireTools(t)
+	realCurl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A fake curl first on PATH: it records each argument on its own line, then runs the real one.
+	bin := t.TempDir()
+	argsFile := filepath.Join(t.TempDir(), "curl-args")
+	fake := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >>'" + argsFile + "'; done\nexec '" + realCurl + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := ghNewServer(t, "acme", "widgets")
+	env := append(ghEnv(s), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	res := ghRunHook(t, t.TempDir(), ghInput(t, nil), env...)
+	ghExpectSuccess(t, res, "https://github.example/acme/widgets/pull/100")
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("the fake curl recorded nothing: %v", err)
+	}
+	if !strings.Contains(string(data), s.srv.URL) {
+		t.Fatalf("recorded curl args do not name the server %s: the fake curl was not used\n%s", s.srv.URL, data)
+	}
+	for _, arg := range strings.Split(string(data), "\n") {
+		if strings.Contains(arg, "test-token") {
+			t.Errorf("curl argument %q contains the token", arg)
+		}
+	}
+	reqs := s.recorded()
+	if len(reqs) != 2 {
+		t.Fatalf("requests = %+v, want a lookup and a create", reqs)
+	}
+	for _, r := range reqs {
+		if r.Auth != "Bearer test-token" {
+			t.Errorf("%s %s: Authorization = %q, want %q", r.Method, r.Path, r.Auth, "Bearer test-token")
+		}
+	}
+}
