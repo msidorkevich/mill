@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/msidorkevich/mill/internal/cistatus"
 	"github.com/msidorkevich/mill/internal/syncer"
 )
 
@@ -31,7 +32,7 @@ func runSync(ctx context.Context, env Env, args []string) int {
 	if *asJSON {
 		out = nil
 	}
-	res, err := syncer.Sync(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: out, Home: env.Home, MaxParallelGates: cfg.MaxParallelGates})
+	res, err := syncer.Sync(ctx, syncer.Options{Store: s, Cfg: cfg, Paths: paths, Out: out, Stderr: env.Stderr, Home: env.Home, MaxParallelGates: cfg.MaxParallelGates})
 	if err != nil {
 		return fail(err)
 	}
@@ -53,7 +54,7 @@ func runSync(ctx context.Context, env Env, args []string) int {
 
 func printSync(w io.Writer, r syncer.Result) {
 	fmt.Fprintf(w, "\nSynced with %s/%s at %s.\n", r.Remote, r.BaseBranch, short(r.BaseSHA))
-	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.GoalsLanded)+len(r.Cleaned)+len(r.NotCleaned)+len(r.Busy) == 0 {
+	if len(r.Landed)+len(r.Restacked)+len(r.Republished)+len(r.NeedsRepublish)+len(r.Blocked)+len(r.GoalsLanded)+len(r.Cleaned)+len(r.NotCleaned)+len(r.Busy)+len(r.CI) == 0 {
 		fmt.Fprintln(w, "Nothing changed.")
 		return
 	}
@@ -120,9 +121,25 @@ func printSync(w io.Writer, r syncer.Result) {
 			fmt.Fprintf(w, "  %s  %s\n", id, n.Reason)
 		}
 	}
+	printCI(w, r.CI)
 	printBusy(w, r.Busy, "mill sync")
 	if len(r.Blocked) > 0 {
 		fmt.Fprintln(w, "\nNext: inspect blocked tasks with `mill task show <id>`.")
+	}
+}
+
+// printCI lists the CI status changes of a sync or keep pass.
+func printCI(w io.Writer, changes []cistatus.Change) {
+	if len(changes) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "CI:")
+	for _, c := range changes {
+		sha := c.SHA
+		if len(sha) > 8 {
+			sha = sha[:8] // as in the CI progress lines
+		}
+		fmt.Fprintf(w, "  %s  %s at %s\n", c.TaskID, c.State, sha)
 	}
 }
 

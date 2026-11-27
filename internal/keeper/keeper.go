@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/cistatus"
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gate"
 	"github.com/msidorkevich/mill/internal/gitx"
@@ -50,7 +51,10 @@ type Options struct {
 	Goal     string    // only this goal's tasks; empty means every goal
 	Tasks    []string  // only these tasks (full ids); empty means every ready task
 	Out      io.Writer // one progress line per action; nil discards
-	Force    bool      // run the combined check even when nothing changed since the last one
+	Stderr   io.Writer // status hook failures; nil discards
+	// Now is the clock the CI status query runs on; nil means time.Now.
+	Now   func() time.Time
+	Force bool // run the combined check even when nothing changed since the last one
 	// Claimer claims each task before the pass changes it; the zero value means
 	// store.NewClaimer("keep").
 	Claimer store.Claimer
@@ -101,6 +105,8 @@ type Result struct {
 	// Busy lists tasks the pass left unchanged because they are being worked on (tasks the
 	// sync step left alone are in Sync.Busy).
 	Busy []syncer.Busy `json:"busy"`
+	// CI lists the CI status changes the status hook reported at the end of the pass.
+	CI []cistatus.Change `json:"ci"`
 }
 
 type keeper struct {
@@ -199,15 +205,15 @@ func (k *keeper) activity(ctx context.Context, id, step string) error {
 func Pass(ctx context.Context, o Options) (Result, error) {
 	res := Result{Rebased: []Rebased{}, ResolvedRerere: []string{}, ResolvedAgent: []string{}, Fixed: []string{},
 		Blocked: []Blocked{}, Republished: []syncer.Republished{}, NeedsRepublish: []syncer.NeedsRepublish{}, Skipped: []Skipped{},
-		Queue: Queue{Published: []QueuePublished{}, Waiting: []QueueWaiting{}}, Busy: []syncer.Busy{}}
+		Queue: Queue{Published: []QueuePublished{}, Waiting: []QueueWaiting{}}, Busy: []syncer.Busy{}, CI: []cistatus.Change{}}
 	if o.Claimer.Owner == "" {
 		o.Claimer = store.NewClaimer("keep")
 	}
 	if o.Pipeline == nil {
 		return res, errors.New("keeper: no pipeline to run the resolver, verifier and fixer with")
 	}
-	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, ReportRedGate: true, LeaveFanIn: true, Claimer: o.Claimer,
-		MaxParallelGates: o.MaxParallelGates, GateSlotPoll: o.GateSlotPoll})
+	sr, err := syncer.Sync(ctx, syncer.Options{Store: o.Store, Cfg: o.Cfg, Paths: o.Paths, Host: o.Host, Out: o.Out, Stderr: o.Stderr, Now: o.Now, SkipCIStatus: true,
+		ReportRedGate: true, LeaveFanIn: true, Claimer: o.Claimer, MaxParallelGates: o.MaxParallelGates, GateSlotPoll: o.GateSlotPoll})
 	res.Sync = sr
 	if err != nil {
 		return res, err
@@ -245,6 +251,12 @@ func Pass(ctx context.Context, o Options) (Result, error) {
 	}
 	// Approved tasks publish last, once their parents are synced, restacked and fixed.
 	if err := k.queue(ctx); err != nil {
+		return res, err
+	}
+	// Last, so that restacked and re-published tasks are queried at their new head.
+	changes, err := cistatus.Poll(ctx, cistatus.Options{Store: o.Store, Cfg: o.Cfg, Root: o.Paths.Root, Goal: o.Goal, Out: o.Out, Stderr: o.Stderr, Now: o.Now})
+	res.CI = append(res.CI, changes...)
+	if err != nil {
 		return res, err
 	}
 	return res, nil

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/cistatus"
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/keeper"
 	"github.com/msidorkevich/mill/internal/syncer"
@@ -124,7 +125,7 @@ func keepOnce(ctx context.Context, env Env, o keepOpts) (code int, busy bool) {
 		return fail(err)
 	}
 	p.MaxParallelGates = cfg.MaxParallelGates
-	ko := keeper.Options{Store: s, Cfg: cfg, Paths: paths, Host: p.Host, Pipeline: p, Goal: o.goal, Out: out, Force: o.combined, MaxParallelGates: cfg.MaxParallelGates}
+	ko := keeper.Options{Store: s, Cfg: cfg, Paths: paths, Host: p.Host, Pipeline: p, Goal: o.goal, Out: out, Stderr: env.Stderr, Force: o.combined, MaxParallelGates: cfg.MaxParallelGates}
 
 	var kres *keeper.Result
 	if o.combined {
@@ -195,6 +196,10 @@ func printKeep(w io.Writer, r *keeper.Result, c keeper.CombinedResult) {
 		section("Published from queue", queued)
 		section("Waiting", waiting)
 		section("Blocked", blockedL)
+		if ci := append(append([]cistatus.Change{}, r.Sync.CI...), r.CI...); len(ci) > 0 {
+			empty = false
+			printCI(w, ci)
+		}
 		if busy := append(append([]syncer.Busy{}, r.Sync.Busy...), r.Busy...); len(busy) > 0 {
 			empty = false
 			printBusy(w, busy, "mill keep")
