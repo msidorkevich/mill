@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // realTabCreate and realTabClose are `herdr tab create` and `herdr tab close` responses
@@ -424,13 +426,20 @@ func TestHerdrWaitReturnsAfterCancelWhenExitFileNeverAppears(t *testing.T) {
 	t.Parallel()
 	hh, log, fake := fakeHerdr(t, "")
 	hh.StartTimeout, hh.Grace = 300*time.Millisecond, 300*time.Millisecond
-	// A wrapper that reports a worker pid, stays alive and never writes its exit file.
+	// A wrapper that reports a worker pid, stays alive and never writes its exit file; its
+	// command line carries the wrapper path, as the host checks. It runs in its own process group (set -m), killed at cleanup, and gives up on its own once
+	// the fake's directory is gone or after a minute.
 	wpid := filepath.Join(fake, "wrapper.pid")
+	stuck := filepath.Join(fake, "stuck-wrapper.sh")
+	body := "sleep 60 & echo \"$! $$\" > \"$1\"\n" + testenv.WaitForFileScript(fake, "never") + "\n"
+	if err := os.WriteFile(stuck, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	script := "#!/bin/sh\necho \"$*\" >> " + shQuote(log) + "\n" +
 		"case \"$1 $2\" in\n" +
 		"'tab create') echo '" + realTabCreate + "' ;;\n" +
 		"'pane run') set -m; p=\"${5%.sh}.pid\"\n" +
-		"  sh -c 'sleep 60 & echo \"$! $$\" > \"$0\"; while :; do sleep 1; done' \"$p\" \"$5\" > /dev/null 2>&1 < /dev/null &\n" +
+		"  sh " + shQuote(stuck) + " \"$p\" \"$5\" > /dev/null 2>&1 < /dev/null &\n" +
 		"  echo \"$!\" > " + shQuote(wpid) + " ;;\n" +
 		"'tab close') echo '" + realTabClose + "' ;;\n" +
 		"esac\n"
