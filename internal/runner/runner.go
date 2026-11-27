@@ -72,6 +72,7 @@ const (
 	StatusCancelled      Status = "cancelled"       // the context was cancelled
 	StatusBudgetExceeded Status = "budget_exceeded" // stopped because a limit was reached
 	StatusRateLimited    Status = "rate_limited"    // the account hit a usage limit
+	StatusTransient      Status = "transient"       // an API timeout or overload the caller may retry
 )
 
 // Result is the outcome of a Request.

@@ -20,6 +20,8 @@ type Step struct {
 	Usage []budget.Usage `json:"usage,omitempty"`
 	// Error, when set, makes the run end with StatusError and this message.
 	Error string `json:"error,omitempty"`
+	// Transient, with Error, makes the run end with StatusTransient instead of StatusError.
+	Transient bool `json:"transient,omitempty"`
 	// Files are written into Request.Dir before returning, simulating agent edits.
 	Files map[string]string `json:"files,omitempty"`
 	// DelayMS makes the fake wait this long before returning (cancelled early with the context).
@@ -151,6 +153,9 @@ func (f *Fake) Run(ctx context.Context, req Request) (Result, error) {
 	if rl := step.RateLimit; rl != nil {
 		return Result{Status: StatusRateLimited, Usage: total, Error: "usage limit reached",
 			LimitType: rl.Type, ResetsAt: rl.ResetsAt}, nil
+	}
+	if step.Error != "" && step.Transient {
+		return Result{Status: StatusTransient, Usage: total, Error: step.Error}, nil
 	}
 	if step.Error != "" {
 		return Result{Status: StatusError, Usage: total, Error: step.Error}, nil

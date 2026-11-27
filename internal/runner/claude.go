@@ -36,6 +36,9 @@ type Claude struct {
 	// Prices overrides the built-in token prices used to estimate the cost of runs that end
 	// without a result event.
 	Prices map[string]price.Rates
+	// APITimeout, when > 0, is passed to every run as API_TIMEOUT_MS, the claude CLI's
+	// timeout for one API request.
+	APITimeout time.Duration
 }
 
 // NewClaude returns a claude runner using bin and h.
@@ -79,11 +82,15 @@ func (c *Claude) Run(ctx context.Context, req Request) (Result, error) {
 		return Result{}, fmt.Errorf("claude runner: create worker TMPDIR %s: %w", tmpDir, err)
 	}
 
+	env := setEnv(req.Env, "TMPDIR", tmpDir)
+	if c.APITimeout > 0 {
+		env = setEnv(env, "API_TIMEOUT_MS", strconv.FormatInt(c.APITimeout.Milliseconds(), 10))
+	}
 	h, err := c.Host.Start(ctx, host.ProcSpec{
 		Name:       req.Name,
 		Argv:       c.argv(req, settingsPath),
 		Dir:        req.Dir,
-		Env:        setEnv(req.Env, "TMPDIR", tmpDir),
+		Env:        env,
 		StdinPath:  promptPath,
 		StdoutPath: streamPath,
 		StderrPath: stderrPath,
@@ -474,8 +481,10 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 		}
 	case last.IsError || last.Subtype != "success":
 		res.Status = StatusError
-		res.Error = strings.TrimSpace(fmt.Sprintf("claude %s: %s %s", last.Subtype,
-			strings.Join(last.Errors, "; "), last.Result))
+		if transient(last) {
+			res.Status = StatusTransient
+		}
+		res.Error = resultError(last)
 	default:
 		out := last.StructuredOutput
 		if len(out) == 0 || string(out) == "null" {
@@ -491,6 +500,40 @@ func (p *streamParser) result(ctx context.Context, ex host.Exit, stderrTail, req
 		}
 	}
 	return res
+}
+
+// transientStatuses are the API error statuses of timeouts and overloads worth retrying.
+var transientStatuses = map[int]bool{408: true, 500: true, 502: true, 503: true, 504: true, 529: true}
+
+// transientTexts are result texts (lower case) of timeouts and overloads worth retrying.
+var transientTexts = []string{"request timed out", "timeout", "overloaded", "internal server error"}
+
+// transient reports whether a failed result is an API timeout or overload.
+func transient(r *resultEvent) bool {
+	if transientStatuses[r.APIErrorStatus] {
+		return true
+	}
+	text := strings.ToLower(r.Result)
+	for _, t := range transientTexts {
+		if strings.Contains(text, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// resultError describes a failed result. The subtype is named only when it says something:
+// claude reports some API errors as subtype "success" with is_error set.
+func resultError(r *resultEvent) string {
+	prefix := "claude error"
+	if r.Subtype != "" && r.Subtype != "success" {
+		prefix = "claude " + r.Subtype
+	}
+	detail := strings.TrimSpace(strings.Join(r.Errors, "; ") + " " + r.Result)
+	if detail == "" {
+		return prefix
+	}
+	return prefix + ": " + detail
 }
 
 func subtract(a, b budget.Usage) budget.Usage {

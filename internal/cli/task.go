@@ -412,6 +412,7 @@ func newPipeline(env Env, name string, paths project.Paths, cfg config.Config, h
 	case "claude":
 		cl := runner.NewClaude(cfg.Runner.ClaudeBin, h)
 		cl.Prices = cfg.Prices
+		cl.APITimeout = cfg.Runner.APITimeout.Duration
 		r = cl
 		agentEnv = runner.ClaudeEnvAllow
 	case "fake":

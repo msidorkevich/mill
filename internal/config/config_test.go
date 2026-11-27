@@ -204,6 +204,7 @@ func TestTimeoutAndEnvValidation(t *testing.T) {
 		{"bad duration", `gate_timeout = "soon"`, "parse config"},
 		{"zero gate timeout", `gate_timeout = "0s"`, "gate_timeout"},
 		{"zero attempt timeout", "[runner]\nattempt_timeout = \"0s\"", "attempt_timeout"},
+		{"zero api timeout", "[runner]\napi_timeout = \"0s\"", "runner.api_timeout must be > 0"},
 		{"empty claude bin", "[runner]\nclaude_bin = \"\"", "claude_bin"},
 		{"bad env key", `env_allow = ["NOT-VALID"]`, "env_allow"},
 	}
@@ -685,5 +686,27 @@ func TestHookEnvAcceptsLettersDigitsAndUnderscores(t *testing.T) {
 	t.Parallel()
 	if _, err := Parse(`hook_env = ["A", "_b", "C_9"]`); err != nil {
 		t.Fatalf("valid hook_env rejected: %v", err)
+	}
+}
+
+func TestAPITimeoutDefaultAndLoad(t *testing.T) {
+	t.Parallel()
+	if got := Default().Runner.APITimeout.Duration; got != 15*time.Minute {
+		t.Fatalf("default api_timeout = %v, want 15m", got)
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(p, []byte("[runner]\napi_timeout = \"2m\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil || cfg.Runner.APITimeout.Duration != 2*time.Minute {
+		t.Fatalf("Load = %v, %v", cfg.Runner.APITimeout, err)
+	}
+	if err := os.WriteFile(p, []byte("[runner]\napi_timeout = \"0s\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "runner.api_timeout") {
+		t.Fatalf("Load err = %v, want runner.api_timeout", err)
 	}
 }
