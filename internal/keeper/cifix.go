@@ -114,7 +114,12 @@ func (k *keeper) ciFix(ctx context.Context, id string, rec cistatus.Record) erro
 		return err
 	}
 	k.logf("%s: CI failed at %s (%s); running the fixer", id, short(rec.SHA), strings.Join(names, ", "))
-	out, err := k.Pipeline.Run(ctx, id)
+	lctx, unlock, err := k.lockTask(ctx, id)
+	if err != nil {
+		return err
+	}
+	out, err := k.Pipeline.Run(lctx, id)
+	unlock()
 	if err != nil {
 		return fmt.Errorf("fixer for %s: %w", id, err)
 	}

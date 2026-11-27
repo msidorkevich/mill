@@ -65,8 +65,15 @@ func (k *keeper) restackFanIn(ctx context.Context, t store.Task, br store.Branch
 }
 
 // restack rebuilds the fan-in task on tg with the resolver for conflicts, then settles it.
+// The worktree is held exclusively from the preflight through the merges, the replay and
+// their conflict resolution or abort; the gate runs once it is released.
 func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg fanin.Target) error {
-	if ok, err := k.preflight(ctx, t, br, tg.Onto); err != nil || !ok {
+	lctx, unlock, err := k.lockRestack(ctx, t, br)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if ok, err := k.preflight(lctx, t, br, tg.Onto); err != nil || !ok {
 		return err
 	}
 	oldStart := br.StartSHA
@@ -77,7 +84,7 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 	for _, p := range tg.Merges() {
 		tips = append(tips, p.Head)
 	}
-	baseCommits, err := k.baseCommits(ctx, br.HeadSHA, tips...)
+	baseCommits, err := k.baseCommits(lctx, br.HeadSHA, tips...)
 	if err != nil {
 		return err
 	}
@@ -85,7 +92,7 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 	old := br
 	// undo puts the branch back and blocks the task; a block during the restack itself
 	// (restack) is retried by later syncs.
-	undo := func(restack bool, step string, files []string, detail string) error {
+	undo := func(ctx context.Context, restack bool, step string, files []string, detail string) error {
 		if err := k.restore(ctx, old); err != nil {
 			return fmt.Errorf("%s: restacking onto %s failed (%s: %s) and the branch could not be restored: %w", t.ID, tg.Onto, step, detail, err)
 		}
@@ -100,7 +107,10 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 		}
 		return k.block(ctx, t.ID, reason)
 	}
-	fail := func(step string, files []string, detail string) error { return undo(true, step, files, detail) }
+	fail := func(step string, files []string, detail string) error { return undo(lctx, true, step, files, detail) }
+	if err := k.clearStaleIndexLock(lctx, t.ID, br.Worktree); err != nil {
+		return fail("clearing a stale index.lock", nil, err.Error())
+	}
 
 	// resolveErr carries the failed step of the resolver out of fanin.Restack.
 	type resolveErr struct{ step, detail string }
@@ -114,7 +124,7 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 		}
 		return nil
 	}
-	fr, err := fanin.Restack(ctx, fanin.Options{Branch: br, Target: tg, Resolve: resolver})
+	fr, err := fanin.Restack(lctx, fanin.Options{Branch: br, Target: tg, Resolve: resolver})
 	var ce *fanin.ConflictError
 	switch {
 	case errors.As(err, &ce) && failed != nil:
@@ -126,6 +136,8 @@ func (k *keeper) restack(ctx context.Context, t store.Task, br store.Branch, tg 
 	}
 
 	br.Base, br.BaseSHA, br.StartSHA, br.HeadSHA = tg.Base, tg.BaseSHA, fr.StartSHA, fr.Head
+	// The gate reads the worktree under its own lock; lctx no longer holds it from here on.
+	unlock()
 	return k.settle(ctx, t, old, br, restacked{onto: tg.Onto, tip: tg.BaseSHA, oldStart: oldStart, agent: fr.Resolved, rerere: fr.Rerere},
-		func(step string, files []string, detail string) error { return undo(false, step, files, detail) })
+		func(step string, files []string, detail string) error { return undo(ctx, false, step, files, detail) })
 }
