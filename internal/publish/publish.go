@@ -19,6 +19,7 @@ import (
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/gate"
 	"github.com/msidorkevich/mill/internal/gitx"
+	"github.com/msidorkevich/mill/internal/hook"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/project"
@@ -44,6 +45,8 @@ type Options struct {
 	// before it waits for a gate slot, "gate" once it holds one. A reused gate tells it
 	// nothing. An error stops the gate and is returned as it is.
 	GateActivity func(step string) error
+	// Stderr receives the report of a failed on_publish/on_update hook; nil means os.Stderr.
+	Stderr io.Writer
 }
 
 // DefaultGateSlotPoll is how often a gate waiting for a slot checks again when
@@ -240,6 +243,10 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
+	prevOnto, err := lastPublishedOnto(ctx, s, id)
+	if err != nil {
+		return res, err
+	}
 	sha, err := gitx.CommitTree(ctx, root, tree, st.parentSHA, msg)
 	if err != nil {
 		return res, fmt.Errorf("create the squashed commit: %w", err)
@@ -262,10 +269,61 @@ func Publish(ctx context.Context, o Options) (Result, error) {
 		return res, fmt.Errorf("pushed %s to %s/%s but recording it failed: %w", short(sha), cfg.Remote, res.Ref, err)
 	}
 	if _, err := s.AppendEvent(ctx, "task-published", t.GoalID, id,
-		map[string]string{"sha": sha, "parent": st.parentSHA, "remote": cfg.Remote, "ref": res.Ref}); err != nil {
+		map[string]string{"sha": sha, "parent": st.parentSHA, "remote": cfg.Remote, "ref": res.Ref, "onto": st.onto}); err != nil {
 		return res, fmt.Errorf("pushed %s to %s/%s but recording the event failed: %w", short(sha), cfg.Remote, res.Ref, err)
 	}
+	event, previousBase := hook.EventPublish, ""
+	if res.Republish {
+		event = hook.EventUpdate
+		if prevOnto != "" && prevOnto != st.onto {
+			previousBase = prevOnto
+		}
+	}
+	runHook(ctx, o, t.GoalID, event, previousBase)
 	return res, nil
+}
+
+// lastPublishedOnto is the onto recorded by the task's latest task-published event; "" when
+// it has none or the event predates recording it.
+func lastPublishedOnto(ctx context.Context, s *store.Store, id string) (string, error) {
+	evs, err := s.TaskEvents(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("read the events of %s to tell whether its base changed: %w", id, err)
+	}
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Kind != "task-published" {
+			continue
+		}
+		var d struct {
+			Onto string `json:"onto"`
+		}
+		if err := json.Unmarshal(evs[i].Data, &d); err != nil {
+			return "", fmt.Errorf("corrupt task-published event %d of %s: %w", evs[i].Seq, id, err)
+		}
+		return d.Onto, nil
+	}
+	return "", nil
+}
+
+// runHook runs the on_<event> hook for the published task. A failure is reported on stderr
+// and never changes the publish: the task is already pushed and recorded.
+func runHook(ctx context.Context, o Options, goalID, event, previousBase string) {
+	if (event == hook.EventPublish && o.Cfg.OnPublish == "") || (event == hook.EventUpdate && o.Cfg.OnUpdate == "") {
+		return
+	}
+	stderr := o.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	id := o.TaskID
+	doc, err := hook.Build(ctx, o.Store, o.Cfg, o.Paths.Root, id, event, previousBase)
+	if err == nil {
+		r := hook.Runner{Store: o.Store, Cfg: o.Cfg, Root: o.Paths.Root, Stderr: stderr}
+		_, err = r.Run(ctx, event, goalID, id, doc)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "hook on_%s for %s failed (%v); re-run it with `mill hook run %s`\n", event, id, err, id)
+	}
 }
 
 // buildTree builds the published tree: the change from start to head applied onto parent.
