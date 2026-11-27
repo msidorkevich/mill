@@ -1285,7 +1285,7 @@ func (s *syncer) republish(ctx context.Context, t store.Task) error {
 		return err
 	}
 	po := s.publishOptions(t.ID)
-	po.Out = nil
+	po.Out, po.HookOut = nil, s.Out // only the hook line: the result reports the publish itself
 	var pr publish.Result
 	var err error
 	publishIt := func() { pr, err = publish.Publish(ctx, po) }

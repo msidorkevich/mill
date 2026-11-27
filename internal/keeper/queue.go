@@ -76,7 +76,7 @@ func (k *keeper) publishQueued(ctx context.Context, id string) error {
 		return nil
 	}
 	po := k.publishOptions(t.ID)
-	po.Out = nil
+	po.Out, po.HookOut = nil, k.Out // only the hook line: the pass logs the publish itself
 	pr, err := publish.Publish(ctx, po)
 	if _, ok := publish.ParentRefusal(err); ok {
 		k.res.Queue.Waiting = append(k.res.Queue.Waiting, QueueWaiting{TaskID: t.ID, Reason: err.Error()})

@@ -45,6 +45,9 @@ type Options struct {
 	// before it waits for a gate slot, "gate" once it holds one. A reused gate tells it
 	// nothing. An error stops the gate and is returned as it is.
 	GateActivity func(step string) error
+	// HookOut receives the line of a successful on_publish/on_update hook; nil means Out. It
+	// lets a caller that drops the progress lines still show that line.
+	HookOut io.Writer
 	// Stderr receives the report of a failed on_publish/on_update hook; nil means os.Stderr.
 	Stderr io.Writer
 }
@@ -306,7 +309,9 @@ func lastPublishedOnto(ctx context.Context, s *store.Store, id string) (string, 
 }
 
 // runHook runs the on_<event> hook for the published task. A failure is reported on stderr
-// and never changes the publish: the task is already pushed and recorded.
+// and never changes the publish: the task is already pushed and recorded. A successful hook
+// whose output is not empty gets its last non-empty line written to HookOut, or to Out when
+// HookOut is nil.
 func runHook(ctx context.Context, o Options, goalID, event, previousBase string) {
 	if (event == hook.EventPublish && o.Cfg.OnPublish == "") || (event == hook.EventUpdate && o.Cfg.OnUpdate == "") {
 		return
@@ -317,13 +322,36 @@ func runHook(ctx context.Context, o Options, goalID, event, previousBase string)
 	}
 	id := o.TaskID
 	doc, err := hook.Build(ctx, o.Store, o.Cfg, o.Paths.Root, id, event, previousBase)
+	var res hook.Result
 	if err == nil {
 		r := hook.Runner{Store: o.Store, Cfg: o.Cfg, Root: o.Paths.Root, Stderr: stderr}
-		_, err = r.Run(ctx, event, goalID, id, doc)
+		res, err = r.Run(ctx, event, goalID, id, doc)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "hook on_%s for %s failed (%v); re-run it with `mill hook run %s`\n", event, id, err, id)
+		return
 	}
+	out := o.HookOut
+	if out == nil {
+		out = o.Out
+	}
+	if res.ExitCode != 0 || res.TimedOut || out == nil {
+		return
+	}
+	if line := lastLine(res.Tail); line != "" {
+		fmt.Fprintf(out, "hook on_%s for %s: %s\n", event, id, line)
+	}
+}
+
+// lastLine is the last non-empty line of s, trimmed; "" when s has none.
+func lastLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // buildTree builds the published tree: the change from start to head applied onto parent.

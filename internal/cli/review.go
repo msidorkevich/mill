@@ -604,7 +604,7 @@ func runReviewApprove(ctx context.Context, env Env, args []string) int {
 		}
 	}
 	for _, id := range ids {
-		if err := approveClaimed(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id, GateSlotPoll: approveGateSlotPoll}); err != nil {
+		if err := approveClaimed(ctx, env, s, publish.Options{Store: s, Cfg: cfg, Paths: paths, TaskID: id, Out: env.Stdout, GateSlotPoll: approveGateSlotPoll}); err != nil {
 			fmt.Fprintf(env.Stderr, "mill review approve: %v\n", err)
 			code = ExitError
 		}
