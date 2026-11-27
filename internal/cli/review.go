@@ -180,6 +180,8 @@ type reviewView struct {
 	// skipped are the test skips the latest skipped-tests event recorded; text only, so
 	// --json keeps its fields as they are.
 	skipped []skiptest.Skip
+	// hooks are the latest hook run of each hook event; text only, like skipped.
+	hooks map[string]hookRun
 }
 
 // reviewable loads a task and refuses one that is not verified or published.
@@ -263,6 +265,9 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 	if v.skipped, err = latestSkippedTests(evs); err != nil {
 		return fail(fmt.Errorf("task %s: %w", id, err))
 	}
+	if v.hooks, err = latestHookRuns(evs); err != nil {
+		return fail(fmt.Errorf("task %s: %w", id, err))
+	}
 	for _, e := range evs {
 		switch e.Kind {
 		case "gate-flaky", "owns-outside", "gate-base-failing", "verifier-out-of-scope":
@@ -333,6 +338,7 @@ func printReview(env Env, v reviewView) {
 			fmt.Fprintf(w, "  waiting   will publish when %s\n", v.Waiting)
 		}
 	}
+	printHookRuns(w, v.hooks)
 	fmt.Fprintf(w, "\nSpec:\n  %s\n", strings.ReplaceAll(t.Spec.Spec, "\n", "\n  "))
 	fmt.Fprintln(w, "\nAcceptance:")
 	for _, a := range t.Acceptance {
