@@ -61,9 +61,20 @@ type Config struct {
 	ImplementerRunsCheck bool `toml:"implementer_runs_check"`
 	// EnvAllow lists extra environment variables passed to workers and gate commands, on top
 	// of the built-in allowlist (SE3).
-	EnvAllow []string     `toml:"env_allow"`
-	Runner   RunnerConfig `toml:"runner"`
-	Host     HostConfig   `toml:"host"`
+	EnvAllow []string `toml:"env_allow"`
+	// OnPublish is a shell command run with `sh -c` when a task's branch is published. Empty
+	// means no hook.
+	OnPublish string `toml:"on_publish"`
+	// OnUpdate is a shell command run with `sh -c` when a task's review is updated. Empty
+	// means no hook.
+	OnUpdate string `toml:"on_update"`
+	// HookEnv lists extra environment variables passed to hook commands, on top of the
+	// built-in allowlist. Each name must be a valid environment variable name.
+	HookEnv []string `toml:"hook_env"`
+	// HookTimeout bounds each hook command.
+	HookTimeout Duration     `toml:"hook_timeout"`
+	Runner      RunnerConfig `toml:"runner"`
+	Host        HostConfig   `toml:"host"`
 	// Sizes is the legacy size -> model mapping, used only when the file has no [models].
 	Sizes map[string]Size `toml:"sizes"`
 	// Models maps a task's size and complexity to a model: size -> complexity -> model.
@@ -170,6 +181,7 @@ func Default() Config {
 		GateNice:             DefaultGateNice(),
 		ImplementerRunsCheck: false,
 		EnvAllow:             []string{},
+		HookTimeout:          Duration{60 * time.Second},
 		Runner: RunnerConfig{
 			Kind:           "claude",
 			ClaudeBin:      "claude",
@@ -230,6 +242,10 @@ gate_check_base = true    # run still-failing commands on the task's starting po
 # gate_nice = 10          # run gate commands under "nice -n <value>"; 0 disables. Default: 10 on macOS and Linux, 0 elsewhere
 implementer_runs_check = false   # true: implementer, fixer and resolver agents run check_cmd themselves; false: only the gate runs it
 env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
+# on_publish = ""         # shell command run with "sh -c" when a task's branch is published; empty = no hook
+# on_update = ""          # shell command run with "sh -c" when a task's review is updated; empty = no hook
+# hook_env = []           # extra env vars for hook commands, e.g. ["SLACK_WEBHOOK"]
+# hook_timeout = "60s"    # per hook command
 
 # Model families from cheapest to strongest. A model belongs to the first tier whose name it
 # contains ("claude-opus-5-5" is opus); retries and verifiers move up this list.
@@ -392,6 +408,14 @@ func (c Config) Validate() error {
 	for _, k := range c.EnvAllow {
 		if !envKeyRe.MatchString(k) {
 			add("env_allow: %q is not a valid environment variable name", k)
+		}
+	}
+	if c.HookTimeout.Duration <= 0 {
+		add("hook_timeout must be > 0, got %s", c.HookTimeout)
+	}
+	for _, k := range c.HookEnv {
+		if !envKeyRe.MatchString(k) {
+			add("hook_env: %q is not a valid environment variable name", k)
 		}
 	}
 	if !oneOf(c.Host.Kind, HostKinds) {
