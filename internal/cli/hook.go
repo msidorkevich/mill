@@ -7,11 +7,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/cistatus"
 	"github.com/msidorkevich/mill/internal/hook"
 	"github.com/msidorkevich/mill/internal/store"
 )
 
-const hookUsage = "Usage: mill hook run <task> [--event publish|update]"
+const hookUsage = "Usage: mill hook run <task> [--event publish|update|status]"
 
 func runHook(ctx context.Context, env Env, args []string) int {
 	if len(args) > 0 && args[0] == "run" {
@@ -29,16 +30,18 @@ func runHook(ctx context.Context, env Env, args []string) int {
 	return ExitUsage
 }
 
-// runHookRun re-runs a published task's on_publish or on_update hook with a fresh document.
+// runHookRun re-runs a published task's on_publish, on_update or status hook with a fresh
+// document. A status run prints the parsed status and records it as a ci-status event when it
+// changed.
 func runHookRun(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "hook run")
-	event := fs.String("event", "", "the hook to run: publish or update (default: publish until a publish hook succeeded, then update)")
-	id, code, ok := goalArg(env, "hook run", "mill hook run <task> [--event publish|update]", fs, args)
+	event := fs.String("event", "", "the hook to run: publish, update or status (default: publish until a publish hook succeeded, then update)")
+	id, code, ok := goalArg(env, "hook run", "mill hook run <task> [--event publish|update|status]", fs, args)
 	if !ok {
 		return code
 	}
-	if *event != "" && *event != hook.EventPublish && *event != hook.EventUpdate {
-		fmt.Fprintf(env.Stderr, "mill hook run: unknown --event %q: use publish or update\n%s\n", *event, hookUsage)
+	if *event != "" && *event != hook.EventPublish && *event != hook.EventUpdate && *event != hook.EventStatus {
+		fmt.Fprintf(env.Stderr, "mill hook run: unknown --event %q: use publish or update to re-run that hook, or status to read the CI status\n%s\n", *event, hookUsage)
 		return ExitUsage
 	}
 	fail := func(err error) int {
@@ -65,10 +68,16 @@ func runHookRun(ctx context.Context, env Env, args []string) int {
 		}
 	}
 	command := cfg.OnPublish
-	if *event == hook.EventUpdate {
+	switch *event {
+	case hook.EventUpdate:
 		command = cfg.OnUpdate
+	case hook.EventStatus:
+		command = cfg.Status
 	}
 	if strings.TrimSpace(command) == "" {
+		if *event == hook.EventStatus {
+			return fail(fmt.Errorf("hook status is not configured; set status in .mill/config.toml"))
+		}
 		return fail(fmt.Errorf("hook on_%s is not configured; set it in .mill/config.toml", *event))
 	}
 
@@ -84,8 +93,23 @@ func runHookRun(ctx context.Context, env Env, args []string) int {
 	if res.Skipped {
 		return fail(fmt.Errorf("hook on_%s is not configured; set it in .mill/config.toml", *event))
 	}
-	if res.TimedOut || res.ExitCode != 0 {
+	if res.Failed() {
 		return ExitError // the runner reported the failure on stderr
+	}
+	if *event == hook.EventStatus {
+		st := *res.Status
+		if st.Checks == nil {
+			st.Checks = []hook.StatusCheck{}
+		}
+		if _, err := cistatus.RecordIfChanged(ctx, s, id, doc.HeadSHA, st); err != nil {
+			return fail(err)
+		}
+		b, err := json.MarshalIndent(st, "", "  ")
+		if err != nil {
+			return fail(fmt.Errorf("encode the status of %s: %w", id, err))
+		}
+		fmt.Fprintln(env.Stdout, string(b))
+		return ExitOK
 	}
 	fmt.Fprintf(env.Stdout, "hook on_%s for %s succeeded in %s\n", *event, id, res.Duration.Round(time.Millisecond))
 	if res.Tail != "" {
