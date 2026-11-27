@@ -86,11 +86,16 @@ func NewGroups(t testing.TB) *Groups {
 	return g
 }
 
-// Script wraps body so it runs in its own process group: the shell turns on job control,
-// starts body as a background job (which gets a group of its own), records the group id,
-// waits for it and exits with its status.
+// Script wraps body so it runs in its own process group without job control: the shell
+// starts sh -c body in the background through the pgrun helper (PgrunPrefix), which makes it
+// the leader of a new group and execs in place, so its pid ($! to the wrapper) is the group
+// id. That sh records its pid ($$, equal to $!) before running body; it does so itself
+// because only then does the group exist, so a kill at cleanup never finds a recorded group
+// missing while the body is still to start. The wrapper waits for body and exits with its
+// status.
 func (g *Groups) Script(body string) string {
-	return "set -m; ( " + body + " ) & : > " + Quote(g.dir) + "/$!; wait $!"
+	inner := ": > " + Quote(g.dir) + "/$$; " + body
+	return PgrunPrefix() + " sh -c " + Quote(inner) + " & wait $!"
 }
 
 // kill sends SIGKILL to every process group a Script recorded.
