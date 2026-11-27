@@ -1354,7 +1354,78 @@ only in test files. Two tasks needed a second attempt (a missing test, an imprec
 
 ### Found while reviewing `g22`
 
-- [ ] **22. A failure to compute base changes fails verification.** `baseChanges` in
-      `internal/pipeline/pipeline.go` returns the error of `FindBaseChanges`, so a missing base
-      record or base commit stops the verifier step. The list is advisory: log a warning and
-      verify without it.
+- [x] **22. A failure to compute base changes fails verification.** `baseChanges` in
+      `internal/pipeline/pipeline.go` returned the error of `FindBaseChanges`, so a missing base
+      record or base commit stopped the verifier step. Done in `g23`
+      (`basechanges-advisory`): mill logs the error and verifies without the list.
+
+## Publish hooks: done (goal `g23` landed 2026-11-27, $9.01)
+
+The first M6 goal: twelve tasks (PRs #172–#183), planned at $6.17–$19.42; planning cost $2.01
+because the first planner call timed out (finding 23). `on_publish` and `on_update` run a shell
+command from the repository root after a task's first publish and after every later push, with
+the `mill/hook@1` JSON document on stdin (task, branches, previous base, stack position,
+verdict, gate, cost, added skips), the worker environment allowlist plus `hook_env`, and
+`hook_timeout`. All publish paths (`review approve`, the approval queue, sync, keep) go through
+`publish.Publish`, which runs the hook; a failed hook is reported with the re-run command and
+never changes task state or the exit code. Each run is a `hook-run` event shown in `mill task
+show` and `mill review show`; `mill hook run <task>` re-runs one; `mill doctor` runs each hook
+with `MILL_HOOK_CHECK=1`. The example hooks `hooks/github/pr.sh` and `hooks/bitbucket/pr.sh`
+(POSIX sh, git, curl, jq) open a draft PR per review branch or update and retarget it, with
+"Stacked on #N" for stacked tasks; Go tests run them against fake APIs. Follow-up 22 is done:
+base changes are advisory. The `status` hook and the CI signal (KP9) are a later goal.
+
+The verifier caught an import cycle (the document test imported `internal/publish`, which
+`publish-hooks` made import `internal/hook`). Two problems showed only at fan-in, when
+`readme-hooks` and `hooks-e2e-test` merged their dependencies: `hook-run-cli`'s test declared
+`type hookRun`, as `hook-run-show` did in `task.go`; and `hook-run-cli`'s test assumed that
+approve does not run hooks, which `publish-hooks` changed. Both were sent back with
+`mill review changes`; the second needed a dependency the plan did not have. The combined check
+before publishing was green on the first probe for all twelve branches.
+
+### Found while running and reviewing `g23`
+
+- [ ] **23. A planner timeout is labelled as success.** The first `g23` planner call ended with
+      "claude success: Request timed out" ($1.10) and no plan. Report it as a failure (timeout)
+      with what to do.
+- [ ] **24. The planner has no raised API timeout.** Large goals time out at the default; pass a
+      longer `API_TIMEOUT_MS` (or the runner's equivalent) to planner runs.
+- [ ] **25. Test clones flake on `maintenance.lock`.**
+      `TestSyncChangedPatchWithTrailerLandsTaskByTrailer` failed at `git clone` of a local bare
+      remote: "failed to copy file to .../objects/maintenance.lock". Git 2.56 runs automatic
+      maintenance in the background after some commands; test git helpers should set
+      `maintenance.auto=false` and `gc.auto=0` (or clone with `--no-local`).
+- [ ] **26. A successful hook's output is not shown during approve and keep.** The PR URL the
+      example hooks print is recorded but not printed; print the last line on success
+      (`hook on_publish for <task>: <url>`). `mill hook run` already prints it.
+- [ ] **27. The example hooks pass the token on the curl command line.** `-H "Authorization:
+      ..."` and `-u` are visible in `ps` while curl runs; pass headers with `curl --config -` on
+      stdin.
+- [ ] **28. Triage counts a re-run that fails on other tests as a real failure.** The
+      `publish-hooks` gate failed one `pipeline` test; the re-run passed it but failed two
+      timing-sensitive `keeper` tests, so the failure went to the implementer as a finding
+      (an unneeded attempt, load average about 80). When the re-run fails only on different
+      tests, treat the first failure as flaky and re-run the new failures too.
+- [ ] **29. Tests leak processes.** Five orphaned processes, 19 hours to 2 days old, were
+      polling for files in deleted temp directories (`TestSyncClaimActivity…`,
+      `TestApproveDuringRun…`, `TestHerdrWait…`, a stuck `pre-receive` hook). Tests that start
+      shells must kill their process groups in cleanup.
+- [ ] **30. Clashes between verified siblings show up only at fan-in.** Two tasks of one package
+      each declared `hookRun`; each branch was green alone. When a task is verified, build and
+      vet it merged with verified siblings that touch the same packages, and send the later one
+      back with the clash as a finding.
+- [ ] **31. A task reopened during a run is reported as stuck.** After `mill review changes`
+      during `mill run`, the run ended with "stuck (it did not leave pending after running)";
+      a later reopen in another run was picked up. Pick up reopened tasks, or report "reopened
+      during the run; run again".
+- [ ] **32. `--retry-blocked` retries on a stale starting point.** A task blocked because the
+      gate fails on its starting point was retried on the same merge after the dependency was
+      fixed, and blocked again. Re-prepare (rebase and re-merge dependencies) when a dependency's
+      head changed since the task's preparation.
+- [ ] **33. Dependents start while a reopened dependency is pending.** After `hook-run-cli` was
+      sent back, `hooks-e2e-test` and `readme-hooks` started at once on its old head instead of
+      waiting for it to be verified again.
+- [ ] **34. The planner misses dependencies between behaviours.** `hook-run-cli`'s tests observe
+      what `mill review approve` records, which `publish-hooks` changed, but the two were
+      planned in parallel. The planner prompt should chain a task whose tests observe another
+      task's behaviour, not only tasks that share code.
