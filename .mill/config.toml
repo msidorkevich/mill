@@ -12,6 +12,9 @@ start_children_on = "verified"   # or "published"
 worktree_root = ""        # where task worktrees live; "" = ~/.cache/mill/worktrees
 gate_timeout = "20m"      # per gate command
 env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
+on_publish = "hooks/github/pr.sh"   # open a draft PR per review branch (needs GITHUB_TOKEN)
+on_update = "hooks/github/pr.sh"    # update and retarget it after later pushes
+hook_env = ["GITHUB_TOKEN"]
 
 [runner]
 kind = "claude"           # or "fake" (scripted, zero tokens; set fake_script)
@@ -30,11 +33,6 @@ M = { low = "sonnet", medium = "opus", high = "opus" }
 [roles]
 planner = "opus"          # model that plans goals
 verifier_min = "sonnet"   # verifiers run on the implementer's model or this, whichever tier is higher
-
-[sizes.S]
-model = "sonnet"
-[sizes.M]
-model = "opus"
 
 [budget]
 count = "billable"        # tokens counted against limits: "billable" or "all" (adds cache reads)
