@@ -259,6 +259,9 @@ func Pass(ctx context.Context, o Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
+	if err := k.fixCI(ctx); err != nil {
+		return res, err
+	}
 	return res, nil
 }
 

@@ -60,7 +60,7 @@ type ImplementerOutput struct {
 
 // Finding is one problem to fix in the next attempt.
 type Finding struct {
-	Source string `json:"source"` // gate, verifier, mill, operator
+	Source string `json:"source"` // gate, verifier, ci, mill, operator
 	File   string `json:"file,omitempty"`
 	Line   int    `json:"line,omitempty"`
 	Issue  string `json:"issue"`
