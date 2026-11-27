@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 const ghScript = "github/pr.sh"
@@ -38,6 +39,11 @@ type ghServer struct {
 	open     map[string]int // review branch -> open PR number
 	noRepo   bool           // GET /repos/{o}/{r} answers 404
 	requests []ghRequest
+
+	statuses      []map[string]any // combined status entries of every commit
+	checkRuns     []map[string]any // check runs of every commit
+	probeStatus   int              // answer to the permission probe POST (default 422)
+	defaultStatus int              // when set, GET commits/main/status answers this code
 }
 
 func ghNewServer(t *testing.T, owner, repo string) *ghServer {
@@ -83,7 +89,23 @@ func (s *ghServer) handle(w http.ResponseWriter, r *http.Request) {
 			reply(http.StatusNotFound, map[string]string{"message": "Not Found"})
 			return
 		}
-		reply(http.StatusOK, map[string]string{"full_name": s.owner + "/" + s.repo})
+		reply(http.StatusOK, map[string]string{"full_name": s.owner + "/" + s.repo, "default_branch": "main"})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, repoPath+"/commits/") && strings.HasSuffix(r.URL.Path, "/status"):
+		if s.defaultStatus != 0 && r.URL.Path == repoPath+"/commits/main/status" {
+			reply(s.defaultStatus, map[string]string{"message": "Resource not accessible by personal access token"})
+			return
+		}
+		list := s.statuses
+		if list == nil {
+			list = []map[string]any{}
+		}
+		reply(http.StatusOK, map[string]any{"state": "pending", "statuses": list})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, repoPath+"/commits/") && strings.HasSuffix(r.URL.Path, "/check-runs"):
+		list := s.checkRuns
+		if list == nil {
+			list = []map[string]any{}
+		}
+		reply(http.StatusOK, map[string]any{"total_count": len(list), "check_runs": list})
 	case r.Method == http.MethodGet && r.URL.Path == pullsPath:
 		if r.URL.Query().Get("state") != "open" {
 			reply(http.StatusUnprocessableEntity, map[string]string{"message": "state=open expected"})
@@ -99,8 +121,16 @@ func (s *ghServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(http.StatusOK, list)
 	case r.Method == http.MethodPost && r.URL.Path == pullsPath:
-		n := 100 + len(s.open)
 		head, _ := req.Body["head"].(string)
+		if strings.HasPrefix(head, "mill-permission-probe-") {
+			code := s.probeStatus
+			if code == 0 {
+				code = http.StatusUnprocessableEntity
+			}
+			reply(code, map[string]string{"message": "probe answer"})
+			return
+		}
+		n := 100 + len(s.open)
 		s.open[head] = n
 		reply(http.StatusCreated, map[string]any{"number": n, "html_url": html(n)})
 	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, pullsPath+"/"):
@@ -431,8 +461,9 @@ func TestGitHubCheckModeSucceedsWithRepositoryAccess(t *testing.T) {
 		t.Fatalf("exit %d, want 0\nstderr: %s", res.Code, res.Stderr)
 	}
 	reqs := s.recorded()
-	if len(reqs) != 1 || reqs[0].Method != http.MethodGet || reqs[0].Path != "/repos/acme/widgets" {
-		t.Fatalf("requests = %+v, want only GET /repos/acme/widgets", reqs)
+	if len(reqs) != 2 || reqs[0].Method != http.MethodGet || reqs[0].Path != "/repos/acme/widgets" ||
+		reqs[1].Method != http.MethodPost {
+		t.Fatalf("requests = %+v, want GET /repos/acme/widgets and the permission probe", reqs)
 	}
 }
 
@@ -539,5 +570,264 @@ func TestGitHubHookKeepsTokenOffCurlArgs(t *testing.T) {
 		if r.Auth != "Bearer test-token" {
 			t.Errorf("%s %s: Authorization = %q, want %q", r.Method, r.Path, r.Auth, "Bearer test-token")
 		}
+	}
+}
+
+// ghStatusDoc is the mill/status@1 object the status event prints.
+type ghStatusDoc struct {
+	Schema string `json:"schema"`
+	State  string `json:"state"`
+	URL    string `json:"url"`
+	Checks []struct {
+		Name    string `json:"name"`
+		URL     string `json:"url"`
+		State   string `json:"state"`
+		Summary string `json:"summary"`
+	} `json:"checks"`
+}
+
+// ghRunStatus runs the status event and decodes its stdout, which must hold exactly one object.
+func ghRunStatus(t *testing.T, s *ghServer, env ...string) ghStatusDoc {
+	t.Helper()
+	res := ghRunHook(t, t.TempDir(), ghInput(t, map[string]any{"event": "status"}), append(ghEnv(s), env...)...)
+	if res.Code != 0 {
+		t.Fatalf("exit %d, want 0\nstdout: %s\nstderr: %s", res.Code, res.Stdout, res.Stderr)
+	}
+	dec := json.NewDecoder(strings.NewReader(res.Stdout))
+	var doc ghStatusDoc
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, res.Stdout)
+	}
+	if dec.More() {
+		t.Fatalf("stdout holds more than one JSON value:\n%s", res.Stdout)
+	}
+	if doc.Schema != "mill/status@1" {
+		t.Fatalf("schema = %q, want mill/status@1", doc.Schema)
+	}
+	return doc
+}
+
+const ghSHA = "0123456789abcdef0123456789abcdef01234567"
+
+func TestGhStatusFailedCheckRunReportsFailureWithSummaryAndPR(t *testing.T) {
+	ghRequireTools(t)
+	s := ghNewServer(t, "acme", "widgets")
+	s.open["mill/g1/feature"] = 9
+	long := strings.Repeat("é", 1500) // 3000 bytes
+	s.checkRuns = []map[string]any{
+		{"name": "build", "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/1"},
+		{"name": "test", "status": "completed", "conclusion": "failure", "html_url": "https://github.example/runs/2",
+			"output": map[string]any{"title": "2 tests failed", "summary": long}},
+	}
+	doc := ghRunStatus(t, s)
+	if doc.State != "failure" {
+		t.Fatalf("state = %q, want failure", doc.State)
+	}
+	if doc.URL != "https://github.example/acme/widgets/pull/9" {
+		t.Fatalf("url = %q, want the open PR's html_url", doc.URL)
+	}
+	if len(doc.Checks) != 2 {
+		t.Fatalf("checks = %+v, want both runs", doc.Checks)
+	}
+	c := doc.Checks[1]
+	if c.Name != "test" || c.URL != "https://github.example/runs/2" || c.State != "failure" {
+		t.Fatalf("failed check = %+v, want test with its html_url and state failure", c)
+	}
+	if !strings.HasPrefix(c.Summary, "2 tests failed\né") {
+		t.Fatalf("summary = %q, want the output title, a newline, then the summary", c.Summary[:min(40, len(c.Summary))])
+	}
+	if n := len(c.Summary); n > 2048 || n < 2046 {
+		t.Fatalf("summary is %d bytes, want cut to 2048", n)
+	}
+	if !utf8.ValidString(c.Summary) {
+		t.Fatalf("summary was cut inside a character")
+	}
+	if doc.Checks[0].State != "success" || doc.Checks[0].Summary != "" {
+		t.Fatalf("passing check = %+v, want success without a summary", doc.Checks[0])
+	}
+	var commitPaths []string
+	for _, r := range s.ghOnly(http.MethodGet) {
+		if strings.Contains(r.Path, "/commits/") {
+			commitPaths = append(commitPaths, r.Path)
+		}
+	}
+	want := []string{"/repos/acme/widgets/commits/" + ghSHA + "/status", "/repos/acme/widgets/commits/" + ghSHA + "/check-runs"}
+	if strings.Join(commitPaths, " ") != strings.Join(want, " ") {
+		t.Fatalf("commit requests = %v, want %v", commitPaths, want)
+	}
+}
+
+func TestGhStatusStates(t *testing.T) {
+	ghRequireTools(t)
+	for _, tc := range []struct {
+		name     string
+		statuses []map[string]any
+		runs     []map[string]any
+		want     string
+	}{
+		{"mixed pending and success is pending",
+			[]map[string]any{{"context": "ci/lint", "state": "success", "target_url": "https://ci.example/1"}},
+			[]map[string]any{{"name": "test", "status": "in_progress", "conclusion": nil}},
+			"pending"},
+		{"pending status is pending",
+			[]map[string]any{{"context": "ci/lint", "state": "pending"}},
+			[]map[string]any{{"name": "test", "status": "completed", "conclusion": "success"}},
+			"pending"},
+		{"all success is success",
+			[]map[string]any{{"context": "ci/lint", "state": "success"}},
+			[]map[string]any{{"name": "test", "status": "completed", "conclusion": "success"}},
+			"success"},
+		{"nothing is none", nil, nil, "none"},
+		{"status error is failure",
+			[]map[string]any{{"context": "ci/deploy", "state": "error", "target_url": "https://ci.example/2"}},
+			[]map[string]any{{"name": "test", "status": "completed", "conclusion": "success"}},
+			"failure"},
+		{"timed out run is failure", nil,
+			[]map[string]any{{"name": "test", "status": "completed", "conclusion": "timed_out"}},
+			"failure"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := ghNewServer(t, "acme", "widgets")
+			s.statuses, s.checkRuns = tc.statuses, tc.runs
+			doc := ghRunStatus(t, s)
+			if doc.State != tc.want {
+				t.Fatalf("state = %q, want %q (checks %+v)", doc.State, tc.want, doc.Checks)
+			}
+			if got, want := len(doc.Checks), len(tc.statuses)+len(tc.runs); got != want {
+				t.Fatalf("checks = %+v, want %d entries", doc.Checks, want)
+			}
+			if doc.URL != "" {
+				t.Fatalf("url = %q without an open PR, want none", doc.URL)
+			}
+		})
+	}
+}
+
+func TestGhStatusListsStatusContextAndTargetURL(t *testing.T) {
+	ghRequireTools(t)
+	s := ghNewServer(t, "acme", "widgets")
+	s.statuses = []map[string]any{{"context": "ci/deploy", "state": "error", "target_url": "https://ci.example/2"}}
+	doc := ghRunStatus(t, s)
+	if len(doc.Checks) != 1 || doc.Checks[0].Name != "ci/deploy" || doc.Checks[0].URL != "https://ci.example/2" ||
+		doc.Checks[0].State != "failure" {
+		t.Fatalf("checks = %+v, want ci/deploy with its target_url, state failure", doc.Checks)
+	}
+}
+
+func TestGhStatusEventFromEnvironment(t *testing.T) {
+	ghRequireTools(t)
+	s := ghNewServer(t, "acme", "widgets")
+	res := ghRunHook(t, t.TempDir(), ghInput(t, nil), append(ghEnv(s), "MILL_HOOK_EVENT=status")...)
+	if res.Code != 0 || !strings.Contains(res.Stdout, `"mill/status@1"`) {
+		t.Fatalf("exit %d, stdout %q; want a mill/status@1 object\nstderr: %s", res.Code, res.Stdout, res.Stderr)
+	}
+	if posts := s.ghOnly(http.MethodPost); len(posts) != 0 {
+		t.Fatalf("POSTs = %+v on the status event, want none", posts)
+	}
+}
+
+func ghRunCheck(t *testing.T, s *ghServer, env ...string) ghResult {
+	t.Helper()
+	ghRequireTools(t, "git")
+	dir := ghGitRepo(t, "git@github.com:acme/widgets.git")
+	return ghRunHook(t, dir, "", append(append(ghEnv(s), "MILL_HOOK_CHECK=1"), env...)...)
+}
+
+func TestGhCheckPassesWhenProbeGets422(t *testing.T) {
+	s := ghNewServer(t, "acme", "widgets")
+	res := ghRunCheck(t, s)
+	if res.Code != 0 {
+		t.Fatalf("exit %d, want 0\nstderr: %s", res.Code, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "token may create pull requests") {
+		t.Fatalf("stdout = %q, want the write check reported", res.Stdout)
+	}
+	posts := s.ghOnly(http.MethodPost)
+	if len(posts) != 1 || posts[0].Path != "/repos/acme/widgets/pulls" {
+		t.Fatalf("POSTs = %+v, want one probe to /repos/acme/widgets/pulls", posts)
+	}
+	head, _ := posts[0].Body["head"].(string)
+	if !strings.HasPrefix(head, "mill-permission-probe-") || len(head) <= len("mill-permission-probe-") || posts[0].Body["base"] != "main" {
+		t.Fatalf("probe body = %v, want head mill-permission-probe-<random> and base main", posts[0].Body)
+	}
+	if len(s.open) != 0 {
+		t.Fatalf("open PRs = %v after the probe, want none", s.open)
+	}
+}
+
+func TestGhCheckFailsWhenTokenCannotCreatePulls(t *testing.T) {
+	for _, code := range []int{http.StatusForbidden, http.StatusNotFound} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			s := ghNewServer(t, "acme", "widgets")
+			s.probeStatus = code
+			res := ghRunCheck(t, s)
+			if res.Code == 0 {
+				t.Fatalf("exit 0 with HTTP %d from the probe, want non-zero", code)
+			}
+			want := "the token cannot create pull requests: give it Pull requests: Read and write on acme/widgets"
+			if !strings.Contains(res.Stderr, want) {
+				t.Fatalf("stderr = %q, want %q", res.Stderr, want)
+			}
+		})
+	}
+}
+
+func TestGhCheckFailsOnUnexpectedProbeStatus(t *testing.T) {
+	s := ghNewServer(t, "acme", "widgets")
+	s.probeStatus = http.StatusInternalServerError
+	res := ghRunCheck(t, s)
+	if res.Code == 0 || !strings.Contains(res.Stderr, "500") {
+		t.Fatalf("exit %d, stderr %q; want a failure naming HTTP 500", res.Code, res.Stderr)
+	}
+}
+
+func TestGhCheckStatusEventFailsWhenStatusesAreRefused(t *testing.T) {
+	s := ghNewServer(t, "acme", "widgets")
+	s.defaultStatus = http.StatusForbidden
+	res := ghRunCheck(t, s, "MILL_HOOK_EVENT=status")
+	if res.Code == 0 {
+		t.Fatalf("exit 0 when commit statuses are refused, want non-zero")
+	}
+	for _, want := range []string{"403", "Commit statuses: Read", "Checks: Read", "acme/widgets"} {
+		if !strings.Contains(res.Stderr, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", res.Stderr, want)
+		}
+	}
+}
+
+func TestGhCheckStatusEventPassesWhenStatusesAreReadable(t *testing.T) {
+	s := ghNewServer(t, "acme", "widgets")
+	res := ghRunCheck(t, s, "MILL_HOOK_EVENT=status")
+	if res.Code != 0 {
+		t.Fatalf("exit %d, want 0\nstderr: %s", res.Code, res.Stderr)
+	}
+	var read bool
+	for _, r := range s.ghOnly(http.MethodGet) {
+		read = read || r.Path == "/repos/acme/widgets/commits/main/status"
+	}
+	if !read {
+		t.Fatalf("requests = %+v, want GET commits/main/status", s.recorded())
+	}
+}
+
+func TestGhDraftDefaultAndDisabled(t *testing.T) {
+	ghRequireTools(t)
+	for _, tc := range []struct {
+		env  []string
+		want bool
+	}{
+		{nil, true},
+		{[]string{"MILL_GITHUB_DRAFT=1"}, true},
+		{[]string{"MILL_GITHUB_DRAFT=0"}, false},
+	} {
+		t.Run(fmt.Sprint(tc.env), func(t *testing.T) {
+			s := ghNewServer(t, "acme", "widgets")
+			res := ghRunHook(t, t.TempDir(), ghInput(t, nil), append(ghEnv(s), tc.env...)...)
+			ghExpectSuccess(t, res, "https://github.example/acme/widgets/pull/100")
+			posts := s.ghOnly(http.MethodPost)
+			if len(posts) != 1 || posts[0].Body["draft"] != tc.want {
+				t.Fatalf("POSTs = %+v, want one with draft %v", posts, tc.want)
+			}
+		})
 	}
 }
