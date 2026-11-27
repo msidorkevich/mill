@@ -1478,14 +1478,68 @@ the last two by itself and printed their URLs.
 
 ### Found while publishing `g24`
 
-- [ ] **35. `mill doctor` passes a hook whose token cannot write.** The example hooks' check
+- [x] **35. `mill doctor` passes a hook whose token cannot write.** The example hooks' check
       mode only reads (`GET /repos/{o}/{r}`), which a read-only token passes on a public
       repository. Check the token's pull-request permission (e.g. from the API's
       `X-Accepted-GitHub-Permissions` / permission headers, or a harmless write probe), or say
       plainly in the check output and README that write access is not checked.
-- [ ] **36. A hook's failure line comes before its task's `Published` line.** The hook runs
+      Done in `g25` (`github-hook-status`, `bitbucket-hook-status`): check mode probes PR
+      creation with a request that cannot succeed (GitHub 422, Bitbucket 400 means allowed).
+- [x] **36. A hook's failure line comes before its task's `Published` line.** The hook runs
       inside `publish.Publish` and reports before the caller prints `Published ...`; print the
       publish line first.
-- [ ] **37. Draft PRs need an extra click each.** Merging a draft takes "Ready for review"
+      Done in `g25` (`publish-hook-line-order`): `publish.Publish` returns its hook lines and
+      callers print them after their own line.
+- [x] **37. Draft PRs need an extra click each.** Merging a draft takes "Ready for review"
       first. Make drafts optional in the example hooks (e.g. `MILL_GITHUB_DRAFT=0`, and the same
       for Bitbucket).
+      Done in `g25`: `MILL_GITHUB_DRAFT=0` / `MILL_BITBUCKET_DRAFT=0`; this repository uses
+      `env MILL_GITHUB_DRAFT=0 hooks/github/pr.sh` (PR #211).
+
+## Status hook and CI signal: done (goal `g25` landed 2026-11-27, $13.05)
+
+Twelve tasks (PRs #201–#210, #212, #213), planned at $6.85–$18.78; planning cost $0.75. A
+`status` hook prints a `mill/status@1` document (state, url, checks) for a published task's
+head; `mill sync` and every `mill keep` pass query it for published tasks whose status is not
+final for their head or older than `status_interval`, record `ci-status` events, print each
+change and show the state in a CI column of `mill review` and in `review show` / `task show`.
+With `ci_fix`, a CI failure of the current head starts the fixer like a red gate after a
+restack. `mill hook run <task> --event status` queries on demand; `mill doctor` checks the
+status hook. The example hooks report GitHub combined statuses and check runs and Bitbucket
+build statuses, probe write access in check mode, and can open normal PRs. A macOS CI workflow
+(`make check`, PR #200) gives the signal something to read; this repository now opens normal PRs
+and reads CI (PR #211).
+
+The run paused once at the five-hour usage limit and resumed by itself; interrupted attempts
+kept their work. The merge check caught a real clash between verified siblings (`printCI` in
+`internal/cli` from `ci-status-display` and `sync-keep-ci-poll`), sent the later task back and
+the scheduler re-ran it in the same run, with no operator step. The end-to-end test task blocked
+after three attempts: it needed a clock in files owned by its dependencies, which the owns check
+refused, and the verifier insisted on an injected clock; its spec was changed to a long
+`status_interval` instead, and it passed on the next attempt. The README needed three attempts
+for accurate details.
+
+On the first real PRs the chain worked end to end: `mill keep` published the last two tasks, the
+hook opened normal PRs, and `keep`/`sync` printed `CI pending`, then `CI success`.
+
+### Found while running and publishing `g25`
+
+- [ ] **38. The herdr wrapper fails under dash.** Ubuntu's `/bin/sh` is dash; the wrapper's
+      `set -m` prints "can't access tty; job control turned off" into the pane and the exit-file
+      and process-group handling breaks (five herdr tests fail on `ubuntu-latest`).
+- [ ] **39. "text file busy" in herdr tests on Linux.** A test writes a fake `herdr` executable
+      while parallel tests fork (`ETXTBSY`); write it to a temp name and rename, or build it
+      once per package.
+- [ ] **40. Test shells survive their cleanup on Linux.** `TestGroupsKillTheirShellsAtCleanup`:
+      the shell is alive 10s after its test ended. Linux joins the CI matrix once 38–40 are
+      fixed.
+- [ ] **41. The merge check merges siblings the task already contains.** A dependency's branch
+      is an ancestor of the task's head, so merging it changes nothing but costs a gate slot;
+      skip siblings whose head is an ancestor.
+- [ ] **42. The owns check refuses edits to a dependency's files.** A dependent builds on top of
+      its dependencies, so such an edit cannot conflict; record it as a note, as for dependents'
+      files. (`ci-end-to-end-test` blocked on it.)
+- [ ] **43. `mill doctor` takes `NAME=value` as the hook's program.** The README suggests
+      `on_publish = "MILL_GITHUB_DRAFT=0 hooks/github/pr.sh"`, which runs fine but fails doctor
+      ("program MILL_GITHUB_DRAFT=0 not found"); skip leading assignments when finding the
+      program.
