@@ -540,7 +540,7 @@ func (p *Pipeline) verifyRun(ctx context.Context, t store.Task, v verifyStep, ou
 		out, err = p.verified(ctx, t, v, out)
 		return out, nil, true, false, err
 	}
-	findings, outScope, owners, err := p.splitOutOfScope(ctx, t, verdict.Findings)
+	findings, outScope, owners, err := p.splitOutOfScope(ctx, t, verdict.Findings, v.outside)
 	if err != nil {
 		return out, nil, true, false, err
 	}
