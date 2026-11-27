@@ -141,6 +141,7 @@ mill review reject g1/a -m "why"     # block the task; its non-landed descendant
 mill review approve g1/a        # publish: one squashed commit force-pushed (with lease) to review/g1/a on the remote
 mill review approve --goal g1 [--no-combined]   # approve every verified task, parents first; children of unpublished parents are queued
 mill sync                       # after merges on the forge: mark landed, restack, re-gate and re-publish children (--json)
+mill hook run g1/a [--event publish|update]   # re-run a published task's on_publish or on_update hook (default: publish until one succeeded, then update)
 mill clean                      # remove worktrees and local branches of landed tasks (--remote, --dry-run)
 mill stats models               # first-pass rate, avg attempts and avg $ by size, complexity and first-attempt model (--json)
 ```
@@ -572,6 +573,144 @@ the forge already deleted is skipped, and one that moved is left alone with a me
 branches, remote branches, skipped with reasons). Running it again is harmless. Sync already
 cleans up tasks as they land (see `clean_on_land`); `mill clean` remains for tasks that landed
 before that, ones sync could not clean (a dirty worktree), or with `clean_on_land = "off"`.
+
+### Publish hooks
+
+Hooks are optional shell commands that run after mill publishes a task. The usual use is to open
+or update a pull request (or merge request) on your forge. With no hook configured, nothing runs.
+
+Four keys in `.mill/config.toml` set them up:
+
+```toml
+on_publish   = "hooks/github/pr.sh"   # run with "sh -c" from the repository root
+on_update    = "hooks/github/pr.sh"
+hook_env     = ["GITHUB_TOKEN"]       # extra environment variables for hooks (see below)
+hook_timeout = "60s"                  # per hook command; the default is 60s, must be above 0
+```
+
+- `on_publish` runs after a task's **first** publish: `mill review approve`, `mill review approve
+  --goal`, or a queued task that `mill keep` publishes later.
+- `on_update` runs after a **later** push of a published task (for example a new attempt that
+  you approve again) or when its base changes (for example a restack after its parent landed).
+- Hooks run **parents before children**. A child is published only once its parent is published
+  or landed, so the parent's hook has already run; `mill review approve --goal` publishes parents
+  first too.
+- A hook that runs past `hook_timeout` is killed, with everything it started in its process group,
+  and counts as timed out.
+
+**The environment.** A hook gets the input document on stdin and the variable `MILL_HOOK_EVENT`
+(`publish` or `update`). It does not inherit your whole environment: it gets the same
+allowlist as workers (`PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`, `TERM`, `LANG`,
+`LC_ALL`, `LC_CTYPE`) plus the names in `hook_env`. A token in your shell is invisible to a hook
+until you list its name there.
+
+**The mill/hook@1 document.** One JSON object on stdin, `"schema": "mill/hook@1"`:
+
+| field | meaning |
+|---|---|
+| `event` | `publish` or `update` |
+| `goal_id`, `task_id`, `title` | the goal, the task (for example `g1/a`) and its title |
+| `description` | the body of the published commit: the task's spec and acceptance |
+| `review_branch` | the branch the task is published to, `review/g1/a` |
+| `base_branch` | the branch its pull request should target: the parent's review branch for a stacked task, otherwise the configured `base_branch` |
+| `previous_base` | the base before an update changed it; absent when it did not change |
+| `head_sha` | the published commit |
+| `remote`, `remote_url` | the git remote mill pushes to and its URL |
+| `parent_task_id`, `parent_review_branch` | the published parent of a stacked task; absent for a bottom task |
+| `stack_position` | 1 for the bottom of a stack, 2 for the task stacked on it, and so on |
+| `verifier` | `{"verdict", "summary"}`: the task's latest verifier verdict |
+| `gate` | `{"passed", "sha"}`: the task's latest gate result and the commit it ran at |
+| `cost_usd` | what the task has cost so far |
+| `skipped_tests` | the test skips the task added: a list of `{"file", "line", "reason"}` (an empty list when none) |
+
+**When a hook fails.** A hook that exits non-zero or times out is reported on stderr, naming the
+event, the task, the failure and the last lines of its output, then the re-run command: for
+example ``hook on_publish for g1/a failed (exit 3): <last lines of output>; re-run it with `mill
+hook run g1/a` ``. The publish, approve, sync or keep command that ran the hook keeps its exit
+code. A failed hook never changes a task's state: the branch is already pushed and recorded. Fix
+the cause, then re-run the hook with `mill hook run`. Only `mill hook run` itself exits 1 when
+the hook fails, because the re-run is what you asked for. Mill keeps the last 20 lines (at most
+4 KB) of each run's output.
+
+**Seeing hook runs.** Each run is recorded. `mill task show` and `mill review show` print the
+latest run of each event after the other details, one line per event:
+
+```
+  hook publish: ok (1.2s, 2026-11-27 10:00)
+  hook update: exit 2 (300ms, 2026-11-27 11:30): lint failed
+```
+
+`mill task show --json` carries the same runs under `hooks`, keyed by event (`exit_code`,
+`duration_ms`, `timed_out`, `output_tail`, `at`).
+
+**Re-running a hook.** `mill hook run <task> [--event publish|update]` runs the hook again with a
+fresh document for a published task and prints the output tail when it succeeds (exit 0). With no
+`--event` it runs `publish` until a publish hook has succeeded, then `update`. The hook must be
+configured, and the task must be published.
+
+**Checking hooks.** `mill doctor` checks `on_publish` and `on_update`. Each program must be on
+`PATH` or an executable file (a relative path counts from the repository root). Then the command
+runs once with `MILL_HOOK_CHECK=1` and no stdin, and must exit 0. A hook script should use that
+variable to check its prerequisites and exit: the example scripts check that `curl`, `jq` and the
+token are present, and that the forge API answers for this repository. Doctor reports `skip` for a
+hook that is not configured.
+
+**GitHub.** The example `hooks/github/pr.sh` opens or updates a draft pull request for each review
+branch. It needs `curl` and `jq`. To set it up:
+
+1. Create a fine-grained token: repository access **Only select repositories**, with only this
+   repository selected, and permission **Pull requests: Read and write**. Metadata read is granted
+   with it; the doctor check uses it.
+2. Copy `hooks/github/pr.sh` from the mill repository into your repository at
+   `hooks/github/pr.sh`, and make it executable.
+3. In `.mill/config.toml`:
+
+   ```toml
+   on_publish = "hooks/github/pr.sh"
+   on_update  = "hooks/github/pr.sh"
+   hook_env   = ["GITHUB_TOKEN"]
+   ```
+
+4. Export the token in the shell that runs mill: `export GITHUB_TOKEN=<token>`.
+
+For GitHub Enterprise, set `MILL_GITHUB_API` (for example `https://ghe.example.com/api/v3`) in
+your shell and add it to `hook_env`: `hook_env = ["GITHUB_TOKEN", "MILL_GITHUB_API"]`. The
+default is `https://api.github.com`.
+
+**Bitbucket.** The example `hooks/bitbucket/pr.sh` opens or updates a draft pull request for
+each review branch on Bitbucket Cloud. It needs `curl` and `jq`.
+
+1. Create a repository access token (or a workspace access token) with **Repositories: Read**
+   and **Pull requests: Read and write**. The script sends it as a Bearer token. Alternatively,
+   use basic auth with an Atlassian account email as `BITBUCKET_USER` and an API token as
+   `BITBUCKET_TOKEN`; the script uses basic auth whenever `BITBUCKET_USER` is set.
+2. Copy `hooks/bitbucket/pr.sh` from the mill repository into your repository at
+   `hooks/bitbucket/pr.sh`, and make it executable.
+3. In `.mill/config.toml`, for a Bearer token:
+
+   ```toml
+   on_publish = "hooks/bitbucket/pr.sh"
+   on_update  = "hooks/bitbucket/pr.sh"
+   hook_env   = ["BITBUCKET_TOKEN"]
+   ```
+
+   For basic auth, use `hook_env = ["BITBUCKET_USER", "BITBUCKET_TOKEN"]`.
+4. Export the variables in the shell that runs mill.
+
+To point at another API base, set `MILL_BITBUCKET_API` in your shell and add it to `hook_env`
+as for GitHub. The default is `https://api.bitbucket.org/2.0`.
+
+**Delete the branch when a PR merges.** Turn on the forge's setting that deletes a pull request's
+source branch on merge, so that open child PRs are retargeted:
+
+- GitHub: in the repository settings, under Pull Requests, enable **Automatically delete head
+  branches**.
+- Bitbucket: enable **Delete source branch after merging** for the repository.
+
+**Merge a stack bottom-up, after all its PRs exist.** A PR cannot be opened against a parent
+branch that is already gone. If you merge and delete a parent's branch before its child's PR
+exists, the hook cannot open that child's PR. So first let every PR of the stack exist (run
+`mill review approve --goal` or `mill keep --watch`), then merge from the bottom of the stack up.
 
 ### Keeping branches mergeable: `mill keep`
 
