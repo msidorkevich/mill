@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 const bbScript = "bitbucket/pr.sh"
@@ -523,9 +525,7 @@ func TestBitbucketHookKeepsTokenOffCurlArgs(t *testing.T) {
 			bin := t.TempDir()
 			argLog := filepath.Join(t.TempDir(), "curl-args")
 			fake := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\" >>'%s'; done\nexec '%s' \"$@\"\n", argLog, realCurl)
-			if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(fake), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			testenv.WriteExecutable(t, filepath.Join(bin, "curl"), []byte(fake))
 			s := bbNewServer(t, "acme", "widgets")
 			s.wantAuth = tc.wantAuth
 			s.open["mill/g1/feature"] = 7 // exercises a PUT with a request body too

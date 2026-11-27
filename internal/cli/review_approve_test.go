@@ -14,6 +14,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // approvedEvents counts the task-approved events of a task.
@@ -364,9 +365,7 @@ func TestReviewApproveClaimActivityShowsPushWhilePushing(t *testing.T) {
 	t.Parallel()
 	root, bare := publishedGoal(t)
 	l := newApproveLatch(t)
-	if err := os.WriteFile(filepath.Join(bare, "hooks", "pre-receive"), []byte("#!/bin/sh\ncat >/dev/null\n"+l.script()+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, filepath.Join(bare, "hooks", "pre-receive"), []byte("#!/bin/sh\ncat >/dev/null\n"+l.script()+"\n"))
 
 	c, r := approveWithLatch(t, root, "g1/a", l)
 	if r.code != ExitOK {

@@ -3,18 +3,17 @@ package publish
 import (
 	"bytes"
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // hookScript writes a shell script that prints body and returns the command that runs it.
 func hookScript(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "hook.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, path, []byte("#!/bin/sh\n"+body+"\n"))
 	return "sh '" + path + "'"
 }
 

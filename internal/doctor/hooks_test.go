@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // hookRepo is an initialized repository with config cfgText and an executable
@@ -20,9 +22,7 @@ func hookRepo(t *testing.T, cfgText, script string) string {
 	if err := os.MkdirAll(hooks, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hooks, "hook.sh"), []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, filepath.Join(hooks, "hook.sh"), []byte("#!/bin/sh\n"+script+"\n"))
 	return dir
 }
 

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 const ghScript = "github/pr.sh"
@@ -542,9 +544,7 @@ func TestGitHubHookKeepsTokenOffCurlArgs(t *testing.T) {
 	bin := t.TempDir()
 	argsFile := filepath.Join(t.TempDir(), "curl-args")
 	fake := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >>'" + argsFile + "'; done\nexec '" + realCurl + "' \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(fake), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, filepath.Join(bin, "curl"), []byte(fake))
 	s := ghNewServer(t, "acme", "widgets")
 	env := append(ghEnv(s), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	res := ghRunHook(t, t.TempDir(), ghInput(t, nil), env...)

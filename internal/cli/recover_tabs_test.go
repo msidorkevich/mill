@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/msidorkevich/mill/internal/host"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // recordTab writes a herdr tab file into the run dir of t1 attempt 2, the attempt
@@ -76,9 +77,7 @@ func TestRecoverWithHerdrTabAlreadyGonePrintsNothing(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "herdr")
 	script := "#!/bin/sh\necho \"$*\" >> " + filepath.Join(dir, "herdr.log") + "\necho \"error: tab $3 not found\" >&2\nexit 1\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, bin, []byte(script))
 	lookPath := func(string) (string, error) { return bin, nil }
 	var out bytes.Buffer
 	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: runs, lookPath: lookPath}); err != nil {
