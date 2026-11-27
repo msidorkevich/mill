@@ -470,6 +470,24 @@ func TestMaxParallelGatesDefaultsToOne(t *testing.T) {
 	}
 }
 
+func TestMergeCheckCmdDefaultsToOff(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.MergeCheckCmd != "" || Default().MergeCheckCmd != "" {
+		t.Fatalf("MergeCheckCmd = %q (default %q), want empty", cfg.MergeCheckCmd, Default().MergeCheckCmd)
+	}
+	if !strings.Contains(DefaultTOML, "# merge_check_cmd = \"\"") {
+		t.Fatal("DefaultTOML does not document merge_check_cmd")
+	}
+	cfg, err = Parse(`merge_check_cmd = "go vet ./..."`)
+	if err != nil || cfg.MergeCheckCmd != "go vet ./..." {
+		t.Fatalf("Parse(merge_check_cmd) = %q, %v; want go vet ./...", cfg.MergeCheckCmd, err)
+	}
+}
+
 func TestVerifierShareDefaultsToQuarter(t *testing.T) {
 	t.Parallel()
 	if got := Default().Budget.VerifierShare; got != 0.25 {

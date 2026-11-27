@@ -55,6 +55,10 @@ type Config struct {
 	// GateNice runs gate commands under `nice -n GateNice` so they yield the CPU to
 	// interactive work. 0 disables it.
 	GateNice int `toml:"gate_nice"`
+	// MergeCheckCmd is run with `sh -c` in a throwaway worktree that merges a just-verified
+	// task with its verified, unlanded siblings that touch the same directories. A failure
+	// sends the task back to pending. Empty means the check is off.
+	MergeCheckCmd string `toml:"merge_check_cmd"`
 	// ImplementerRunsCheck tells implementer, fixer and resolver agents to run check_cmd
 	// themselves before they finish. When false, mill runs check_cmd only in the gate and
 	// the agents run the task's checks and the tests of the packages they changed.
@@ -242,6 +246,7 @@ gate_timeout = "20m"      # per gate command
 gate_rerun = true         # re-run failed gate commands once; passing then = flaky, the gate passes
 gate_check_base = true    # run still-failing commands on the task's starting point; failing there too blocks the task
 # gate_nice = 10          # run gate commands under "nice -n <value>"; 0 disables. Default: 10 on macOS and Linux, 0 elsewhere
+# merge_check_cmd = ""    # run after a task is verified, on it merged with its verified siblings in the same directories, e.g. "go vet ./..."; empty = off
 implementer_runs_check = false   # true: implementer, fixer and resolver agents run check_cmd themselves; false: only the gate runs it
 env_allow = []            # extra env vars for workers and gates, e.g. ["GOPROXY", "NPM_TOKEN"]
 # on_publish = ""         # shell command run with "sh -c" when a task's branch is published; empty = no hook
