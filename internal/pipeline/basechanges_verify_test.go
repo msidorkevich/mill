@@ -122,22 +122,3 @@ func TestVerifierPromptGetsBaseChangesForOwnedFile(t *testing.T) {
 		t.Fatalf("head = %s, want %s (%v)", head, br.HeadSHA, err)
 	}
 }
-
-func TestVerificationFailsWhenBaseChangesCannotBeFound(t *testing.T) {
-	t.Parallel()
-	e := ownedTaskEnv(t, func(root string) error {
-		_, err := gitx.Run(context.Background(), root, "branch", "-m", "main", "gone")
-		return err
-	}, verdict("pass"))
-	const id = "owner"
-	const want = "find the base changes of task owner"
-	if out, err := e.p.Run(context.Background(), id); err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("Run: out=%+v err=%v\n%s", out, err, e.out)
-	}
-	if _, _, err := e.p.Verify(context.Background(), id); err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("Verify: err=%v", err)
-	}
-	if ps := prompts(e.fake, runner.RoleVerifier); len(ps) != 0 {
-		t.Fatalf("the verifier ran %d times", len(ps))
-	}
-}

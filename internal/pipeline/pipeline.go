@@ -532,11 +532,16 @@ const (
 )
 
 // baseChanges finds what changed on t's base since it started that concerns it, for the
-// verifier of attempt n, and records a base-changed event when there is anything.
+// verifier of attempt n, and records a base-changed event when there is anything. When the
+// changes cannot be found, it logs that and returns none: the verifier runs without them.
 func (p *Pipeline) baseChanges(ctx context.Context, t store.Task, br store.Branch, n int) (BaseChanges, error) {
 	bc, err := FindBaseChanges(ctx, p.Paths.Root, p.Cfg, t, br)
-	if err != nil || len(bc.Files) == 0 {
-		return bc, err
+	if err != nil {
+		p.logf("%s a%d base changes: %v; verifying without them", t.ID, n, err)
+		return BaseChanges{}, nil
+	}
+	if len(bc.Files) == 0 {
+		return bc, nil
 	}
 	if _, err := p.Store.AppendEvent(ctx, "base-changed", "", t.ID, map[string]any{"attempt": n, "base": bc.Base, "from": bc.From, "to": bc.To, "files": bc.Files}); err != nil {
 		return BaseChanges{}, fmt.Errorf("record the base changes of task %s; check the mill database and run the verification again: %w", t.ID, err)
