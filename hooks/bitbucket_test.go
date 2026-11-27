@@ -42,11 +42,18 @@ type bbServer struct {
 	open     map[string]int // review branch -> open PR id
 	noRepo   bool           // GET /repositories/{ws}/{repo} answers 404
 	requests []bbRequest
+	// statuses holds the build statuses of each commit or branch, served pageSize at a time.
+	statuses map[string][]map[string]any
+	pageSize int
+	// probeStatus answers the empty POST pullrequests permission probe (default 400).
+	probeStatus int
+	// statusesStatus, when set, answers every GET of commit statuses with this error status.
+	statusesStatus int
 }
 
 func bbNewServer(t *testing.T, workspace, repo string) *bbServer {
 	t.Helper()
-	s := &bbServer{t: t, workspace: workspace, repo: repo, open: map[string]int{}, wantAuth: "Bearer test-token"}
+	s := &bbServer{t: t, workspace: workspace, repo: repo, open: map[string]int{}, statuses: map[string][]map[string]any{}, wantAuth: "Bearer test-token"}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.srv.Close)
 	return s
@@ -103,7 +110,35 @@ func (s *bbServer) handle(w http.ResponseWriter, r *http.Request) {
 			fail(http.StatusNotFound, "Repository not found")
 			return
 		}
-		reply(http.StatusOK, map[string]string{"full_name": s.workspace + "/" + s.repo})
+		reply(http.StatusOK, map[string]any{
+			"full_name":  s.workspace + "/" + s.repo,
+			"mainbranch": map[string]string{"name": "main"},
+		})
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, repoPath+"/commit/") &&
+		strings.HasSuffix(r.URL.Path, "/statuses"):
+		if s.statusesStatus != 0 {
+			fail(s.statusesStatus, "Access denied")
+			return
+		}
+		ref := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, repoPath+"/commit/"), "/statuses")
+		all := s.statuses[ref]
+		page := 1
+		if p := r.URL.Query().Get("page"); p != "" {
+			if _, err := fmt.Sscanf(p, "%d", &page); err != nil {
+				fail(http.StatusBadRequest, "bad page "+p)
+				return
+			}
+		}
+		size := s.pageSize
+		if size == 0 {
+			size = len(all) + 1
+		}
+		lo, hi := min((page-1)*size, len(all)), min(page*size, len(all))
+		body := map[string]any{"values": append([]map[string]any{}, all[lo:hi]...), "page": page, "pagelen": size}
+		if hi < len(all) {
+			body["next"] = fmt.Sprintf("%s%s?page=%d", s.srv.URL, r.URL.Path, page+1)
+		}
+		reply(http.StatusOK, body)
 	case r.Method == http.MethodGet && r.URL.Path == pullsPath:
 		m := bbQueryPattern.FindStringSubmatch(req.Q)
 		if m == nil {
@@ -120,6 +155,14 @@ func (s *bbServer) handle(w http.ResponseWriter, r *http.Request) {
 		src, _ := req.Body["source"].(map[string]any)
 		branch, _ := src["branch"].(map[string]any)
 		name, _ := branch["name"].(string)
+		if name == "" {
+			status := s.probeStatus
+			if status == 0 {
+				status = http.StatusBadRequest
+			}
+			fail(status, "source: This field is required.")
+			return
+		}
 		s.open[name] = id
 		reply(http.StatusCreated, pr(id))
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, pullsPath+"/"):
@@ -569,8 +612,8 @@ func TestBitbucketCheckModeSucceedsWithRepositoryAccess(t *testing.T) {
 		t.Fatalf("exit %d, want 0\nstderr: %s", res.Code, res.Stderr)
 	}
 	reqs := s.recorded()
-	if len(reqs) != 1 || reqs[0].Method != http.MethodGet || reqs[0].Path != "/repositories/acme/widgets" {
-		t.Fatalf("requests = %+v, want only GET /repositories/acme/widgets", reqs)
+	if len(reqs) != 2 || reqs[0].Method != http.MethodGet || reqs[0].Path != "/repositories/acme/widgets" {
+		t.Fatalf("requests = %+v, want GET /repositories/acme/widgets then the probe", reqs)
 	}
 }
 
@@ -638,5 +681,270 @@ func TestBitbucketScriptPassesShellcheck(t *testing.T) {
 	out, err := exec.Command("shellcheck", "-s", "sh", bbScript).CombinedOutput()
 	if err != nil {
 		t.Fatalf("shellcheck -s sh %s: %v\n%s", bbScript, err, out)
+	}
+}
+
+// bbStatusOut is the mill/status@1 object the status event prints.
+type bbStatusOut struct {
+	Schema string `json:"schema"`
+	State  string `json:"state"`
+	URL    string `json:"url"`
+	Checks []struct {
+		Name    string  `json:"name"`
+		URL     string  `json:"url"`
+		State   string  `json:"state"`
+		Summary *string `json:"summary"`
+	} `json:"checks"`
+}
+
+const bbHeadSHA = "0123456789abcdef0123456789abcdef01234567"
+
+// bbRunStatus runs the status event and decodes its stdout, which must be one JSON object.
+func bbRunStatus(t *testing.T, s *bbServer) bbStatusOut {
+	t.Helper()
+	res := bbRunHook(t, t.TempDir(), bbInput(t, map[string]any{"event": "status"}), bbEnv(s)...)
+	if res.Code != 0 {
+		t.Fatalf("exit %d, want 0\nstdout: %s\nstderr: %s", res.Code, res.Stdout, res.Stderr)
+	}
+	var out bbStatusOut
+	dec := json.NewDecoder(strings.NewReader(res.Stdout))
+	if err := dec.Decode(&out); err != nil {
+		t.Fatalf("stdout %q is not a JSON object: %v", res.Stdout, err)
+	}
+	if dec.More() {
+		t.Fatalf("stdout %q holds more than one JSON value", res.Stdout)
+	}
+	if out.Schema != "mill/status@1" {
+		t.Fatalf("schema = %q, want mill/status@1", out.Schema)
+	}
+	if n := len(s.bbOnly(http.MethodPost)) + len(s.bbOnly(http.MethodPut)); n != 0 {
+		t.Fatalf("the status event changed %d PRs, want none", n)
+	}
+	return out
+}
+
+func bbStatus(state, key, name, url, desc string) map[string]any {
+	st := map[string]any{"state": state, "key": key, "url": url, "description": desc}
+	if name != "" {
+		st["name"] = name
+	}
+	return st
+}
+
+func TestBbStatusFailedGivesFailureWithNameURLAndSummary(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	s.open["mill/g1/feature"] = 7
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", "ok"),
+		bbStatus("FAILED", "unit", "Unit tests", "https://ci.example/unit", "3 tests failed"),
+		bbStatus("INPROGRESS", "e2e", "", "https://ci.example/e2e", "running"),
+	}
+	out := bbRunStatus(t, s)
+	if out.State != "failure" {
+		t.Fatalf("state = %q, want failure", out.State)
+	}
+	if out.URL != s.html(7) {
+		t.Fatalf("url = %q, want the open PR's link %q", out.URL, s.html(7))
+	}
+	if len(out.Checks) != 3 {
+		t.Fatalf("checks = %+v, want 3", out.Checks)
+	}
+	f := out.Checks[1]
+	if f.Name != "Unit tests" || f.URL != "https://ci.example/unit" || f.State != "failure" ||
+		f.Summary == nil || *f.Summary != "3 tests failed" {
+		t.Fatalf("failed check = %+v, want name, url, failure and the description as summary", f)
+	}
+	if c := out.Checks[0]; c.State != "success" || c.Summary != nil {
+		t.Fatalf("successful check = %+v, want success without a summary", c)
+	}
+	if c := out.Checks[2]; c.Name != "e2e" || c.State != "pending" {
+		t.Fatalf("in-progress check = %+v, want the key as name and pending", c)
+	}
+}
+
+func TestBbStatusStoppedIsFailureAndSummaryIsCut(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	long := strings.Repeat("é", 2000) // 4000 bytes
+	s.statuses[bbHeadSHA] = []map[string]any{bbStatus("STOPPED", "build", "Build", "https://ci.example/b", long)}
+	out := bbRunStatus(t, s)
+	if out.State != "failure" || len(out.Checks) != 1 || out.Checks[0].Summary == nil {
+		t.Fatalf("status = %+v, want one failed check with a summary", out)
+	}
+	sum := *out.Checks[0].Summary
+	if len(sum) > 2048 || len(sum) < 2046 || !strings.HasPrefix(long, sum) {
+		t.Fatalf("summary is %d bytes, want the description cut to at most 2048 on a character boundary", len(sum))
+	}
+	if out.URL != "" {
+		t.Fatalf("url = %q without an open PR, want none", out.URL)
+	}
+}
+
+func TestBbStatusInProgressAndSuccessfulGivesPending(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", ""),
+		bbStatus("INPROGRESS", "unit", "Unit", "https://ci.example/unit", ""),
+	}
+	if out := bbRunStatus(t, s); out.State != "pending" {
+		t.Fatalf("state = %q, want pending", out.State)
+	}
+}
+
+func TestBbStatusAllSuccessfulGivesSuccess(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "lint", "Lint", "https://ci.example/lint", ""),
+		bbStatus("SUCCESSFUL", "unit", "Unit", "https://ci.example/unit", ""),
+	}
+	out := bbRunStatus(t, s)
+	if out.State != "success" || len(out.Checks) != 2 {
+		t.Fatalf("status = %+v, want success with two checks", out)
+	}
+}
+
+func TestBbStatusNoStatusesGivesNone(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	out := bbRunStatus(t, s)
+	if out.State != "none" || len(out.Checks) != 0 {
+		t.Fatalf("status = %+v, want none with no checks", out)
+	}
+}
+
+func TestBbStatusFollowsNextPages(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	s.pageSize = 2
+	s.statuses[bbHeadSHA] = []map[string]any{
+		bbStatus("SUCCESSFUL", "a", "A", "https://ci.example/a", ""),
+		bbStatus("SUCCESSFUL", "b", "B", "https://ci.example/b", ""),
+		bbStatus("SUCCESSFUL", "c", "C", "https://ci.example/c", ""),
+		bbStatus("FAILED", "d", "D", "https://ci.example/d", "broken"),
+		bbStatus("SUCCESSFUL", "e", "E", "https://ci.example/e", ""),
+	}
+	out := bbRunStatus(t, s)
+	if out.State != "failure" || len(out.Checks) != 5 {
+		t.Fatalf("status = %+v, want all 5 checks across pages and failure", out)
+	}
+}
+
+func TestBbStatusFailsWhenStatusesAreRefused(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	s.statusesStatus = http.StatusForbidden
+	res := bbRunHook(t, t.TempDir(), bbInput(t, map[string]any{"event": "status"}), bbEnv(s)...)
+	if res.Code == 0 || res.Stdout != "" || !strings.Contains(res.Stderr, "403") {
+		t.Fatalf("exit %d, stdout %q, stderr %q; want a failure naming 403 and no output", res.Code, res.Stdout, res.Stderr)
+	}
+}
+
+// bbRunCheck runs check mode in a temporary repository whose origin is the fake repository.
+func bbRunCheck(t *testing.T, s *bbServer, env ...string) bbResult {
+	t.Helper()
+	dir := bbGitRepo(t, "git@bitbucket.org:acme/widgets.git")
+	return bbRunHook(t, dir, "", append(append(bbEnv(s), "MILL_HOOK_CHECK=1"), env...)...)
+}
+
+func TestBbCheckPassesOnProbeAnswered400(t *testing.T) {
+	bbRequireTools(t, "git")
+	s := bbNewServer(t, "acme", "widgets")
+	res := bbRunCheck(t, s)
+	if res.Code != 0 {
+		t.Fatalf("exit %d, want 0\nstderr: %s", res.Code, res.Stderr)
+	}
+	posts := s.bbOnly(http.MethodPost)
+	if len(posts) != 1 || posts[0].Path != "/repositories/acme/widgets/pullrequests" || len(posts[0].Body) != 0 {
+		t.Fatalf("POSTs = %+v, want one empty {} to pullrequests", posts)
+	}
+	if len(s.open) != 0 {
+		t.Fatalf("check mode opened PRs %v, want none", s.open)
+	}
+}
+
+func TestBbCheckFailsOnProbeRefusedWithWhatToGrant(t *testing.T) {
+	bbRequireTools(t, "git")
+	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			s := bbNewServer(t, "acme", "widgets")
+			s.probeStatus = code
+			res := bbRunCheck(t, s)
+			want := "the token cannot create pull requests: give it Pull requests: Write on acme/widgets"
+			if res.Code == 0 || !strings.Contains(res.Stderr, want) {
+				t.Fatalf("exit %d, stderr %q; want a failure saying %q", res.Code, res.Stderr, want)
+			}
+		})
+	}
+}
+
+func TestBbCheckFailsOnOtherProbeAnswerWithTheCode(t *testing.T) {
+	bbRequireTools(t, "git")
+	s := bbNewServer(t, "acme", "widgets")
+	s.probeStatus = http.StatusInternalServerError
+	res := bbRunCheck(t, s)
+	if res.Code == 0 || !strings.Contains(res.Stderr, "500") {
+		t.Fatalf("exit %d, stderr %q; want a failure naming 500", res.Code, res.Stderr)
+	}
+}
+
+func TestBbCheckStatusEventReadsDefaultBranchStatuses(t *testing.T) {
+	bbRequireTools(t, "git")
+	s := bbNewServer(t, "acme", "widgets")
+	res := bbRunCheck(t, s, "MILL_HOOK_EVENT=status")
+	if res.Code != 0 {
+		t.Fatalf("exit %d, want 0\nstderr: %s", res.Code, res.Stderr)
+	}
+	var found bool
+	for _, r := range s.bbOnly(http.MethodGet) {
+		if r.Path == "/repositories/acme/widgets/commit/main/statuses" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("requests = %+v, want a GET of the main branch statuses", s.recorded())
+	}
+}
+
+func TestBbCheckStatusEventFailsWhenDefaultBranchStatusesRefused(t *testing.T) {
+	bbRequireTools(t, "git")
+	s := bbNewServer(t, "acme", "widgets")
+	s.statusesStatus = http.StatusForbidden
+	res := bbRunCheck(t, s, "MILL_HOOK_EVENT=status")
+	if res.Code == 0 || !strings.Contains(res.Stderr, "Repositories: Read") ||
+		!strings.Contains(res.Stderr, "Pipelines: Read") || !strings.Contains(res.Stderr, "403") {
+		t.Fatalf("exit %d, stderr %q; want a failure naming 403 and what to grant", res.Code, res.Stderr)
+	}
+}
+
+func TestBbCheckWithoutStatusEventSkipsStatuses(t *testing.T) {
+	bbRequireTools(t, "git")
+	s := bbNewServer(t, "acme", "widgets")
+	s.statusesStatus = http.StatusForbidden
+	if res := bbRunCheck(t, s); res.Code != 0 {
+		t.Fatalf("exit %d, want 0 when statuses are not needed\nstderr: %s", res.Code, res.Stderr)
+	}
+}
+
+func TestBbDraftDefaultsToTrue(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	bbExpectSuccess(t, bbRunHook(t, t.TempDir(), bbInput(t, nil), bbEnv(s)...), s.html(100))
+	posts := s.bbOnly(http.MethodPost)
+	if len(posts) != 1 || bbDig(posts[0].Body, "draft") != true {
+		t.Fatalf("POSTs = %+v, want one with draft true", posts)
+	}
+}
+
+func TestBbDraftZeroCreatesNormalPR(t *testing.T) {
+	bbRequireTools(t)
+	s := bbNewServer(t, "acme", "widgets")
+	res := bbRunHook(t, t.TempDir(), bbInput(t, nil), append(bbEnv(s), "MILL_BITBUCKET_DRAFT=0")...)
+	bbExpectSuccess(t, res, s.html(100))
+	posts := s.bbOnly(http.MethodPost)
+	if len(posts) != 1 || bbDig(posts[0].Body, "draft") != false {
+		t.Fatalf("POSTs = %+v, want one with draft false", posts)
 	}
 }
