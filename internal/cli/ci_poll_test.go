@@ -15,6 +15,7 @@ import (
 	"github.com/msidorkevich/mill/internal/hook"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // ciPollHook is a scripted status hook: it appends the task it runs for to calls and prints
@@ -34,9 +35,7 @@ f='` + h.dir + `'/$(echo "$id" | tr / _).json
 cat "$f" || { echo "no script for $id" >&2; exit 4; }
 `
 	sh := filepath.Join(h.dir, "status.sh")
-	if err := os.WriteFile(sh, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, sh, []byte(script))
 	cfgPath := project.PathsAt(root).Config
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {

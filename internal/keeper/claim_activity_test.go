@@ -135,9 +135,7 @@ func TestKeepClaimActivityShowsPublishWhileRepublishing(t *testing.T) {
 	e := publishedRebase(t, "true")
 	l := newClaimActivityLatch(t)
 	hook := filepath.Join(e.bare, "hooks", "pre-receive")
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat >/dev/null\n"+l.script()+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, hook, []byte("#!/bin/sh\ncat >/dev/null\n"+l.script()+"\n"))
 	done := e.claimActivityPass()
 
 	l.wait(t)

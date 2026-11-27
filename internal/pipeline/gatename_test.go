@@ -13,6 +13,7 @@ import (
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/runner"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // labelHerdr is a herdr host whose fake binary creates tabs but never runs a command, so
@@ -30,9 +31,7 @@ func labelHerdr(t *testing.T) (*host.Herdr, string) {
 		"'tab close') echo '{\"result\":{\"type\":\"ok\"}}' ;;\n" +
 		"esac\nexit 0\n"
 	bin := filepath.Join(dir, "herdr")
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, bin, []byte(script))
 	return &host.Herdr{Bin: bin, Poll: time.Millisecond, StartTimeout: 50 * time.Millisecond, Grace: 100 * time.Millisecond}, log
 }
 

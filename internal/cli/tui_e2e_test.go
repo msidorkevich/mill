@@ -18,6 +18,7 @@ import (
 	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 	"github.com/msidorkevich/mill/internal/tui"
 )
 
@@ -396,9 +397,7 @@ func fakeHerdr(t *testing.T) (lookPath func(string) (string, error), log string)
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "herdr"), body, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	testenv.WriteExecutable(t, filepath.Join(dir, "herdr"), body)
 	lookPath = func(file string) (string, error) {
 		if file == "herdr" {
 			return filepath.Join(dir, "herdr"), nil
