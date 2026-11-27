@@ -15,6 +15,7 @@ import (
 	"github.com/msidorkevich/mill/internal/project"
 	"github.com/msidorkevich/mill/internal/store"
 	"github.com/msidorkevich/mill/internal/taskspec"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // These tests drive one `mill run` (cli.Run in a goroutine) as the repository's scheduler
@@ -22,8 +23,13 @@ import (
 // their gate by a check that waits for a release file the test creates, so the test decides
 // when each task ends instead of sleeping.
 
-// gates hands out barrier checks and releases them.
-type gates struct{ dir string }
+// gates hands out barrier checks and releases them. Each check waits in its own process
+// group, killed when the test ends, and gives up on its own once dir is gone or after a
+// minute.
+type gates struct {
+	dir    string
+	groups *testenv.Groups
+}
 
 func newGates(t *testing.T) *gates {
 	t.Helper()
@@ -31,12 +37,12 @@ func newGates(t *testing.T) *gates {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &gates{dir: dir}
+	return &gates{dir: dir, groups: testenv.NewGroups(t)}
 }
 
 // hold is a task check that waits until name (or every barrier) is released.
 func (g *gates) hold(name string) string {
-	return "while [ ! -e " + filepath.Join(g.dir, name) + " ] && [ ! -e " + filepath.Join(g.dir, "all") + " ]; do sleep 0.01; done"
+	return g.groups.Script(testenv.WaitForFileScript(g.dir, name, "all"))
 }
 
 func (g *gates) release(t *testing.T, names ...string) {

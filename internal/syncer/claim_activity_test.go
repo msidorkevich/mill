@@ -12,19 +12,25 @@ import (
 
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/store"
+	"github.com/msidorkevich/mill/internal/testenv"
 )
 
 // claimActivityLatch is a gate command or git hook that creates started and waits until
-// release exists, polling every few milliseconds.
-type claimActivityLatch struct{ started, release string }
+// release exists. The waiting shell runs in its own process group, killed when the test
+// ends, and gives up on its own once the latch directory is gone or after a minute.
+type claimActivityLatch struct {
+	dir, started, release string
+	groups                *testenv.Groups
+}
 
 func newClaimActivityLatch(t *testing.T) claimActivityLatch {
 	dir := t.TempDir()
-	return claimActivityLatch{started: filepath.Join(dir, "started"), release: filepath.Join(dir, "release")}
+	return claimActivityLatch{dir: dir, started: filepath.Join(dir, "started"), release: filepath.Join(dir, "release"),
+		groups: testenv.NewGroups(t)}
 }
 
 func (l claimActivityLatch) script() string {
-	return "touch '" + l.started + "'; while [ ! -f '" + l.release + "' ]; do sleep 0.005; done"
+	return l.groups.Script("touch " + testenv.Quote(l.started) + "; " + testenv.WaitForFileScript(l.dir, "release"))
 }
 
 // wait polls until the latch's holder started, failing the test after a deadline.
