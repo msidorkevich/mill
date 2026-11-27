@@ -49,6 +49,23 @@ repo_from_url() {
 	esac
 }
 
+# config_quote VALUE: prints VALUE with \ and " escaped for a double-quoted curl config value.
+# printf is a shell builtin, so VALUE never appears in another process's arguments.
+config_quote() {
+	printf '%s' "$1" | sed 's/[\\"]/\\&/g'
+}
+
+# auth_config: prints the curl config line carrying the credentials.
+auth_config() {
+	token=$(config_quote "$BITBUCKET_TOKEN") || return 1
+	if [ -n "${BITBUCKET_USER:-}" ]; then
+		user=$(config_quote "$BITBUCKET_USER") || return 1
+		printf 'user = "%s:%s"\n' "$user" "$token"
+	else
+		printf 'header = "Authorization: Bearer %s"\n' "$token"
+	fi
+}
+
 # api_call METHOD PATH [JSON-BODY]: prints the response body; fails on any HTTP error with the
 # status and the response message.
 api_call() {
@@ -61,15 +78,15 @@ api_call() {
 		has_body=1
 	fi
 	set -- -sS -o "$out" -w '%{http_code}' -X "$method" -H "Accept: application/json"
-	if [ -n "${BITBUCKET_USER:-}" ]; then
-		set -- "$@" -u "$BITBUCKET_USER:$BITBUCKET_TOKEN"
-	else
-		set -- "$@" -H "Authorization: Bearer $BITBUCKET_TOKEN"
-	fi
 	if [ "$has_body" = 1 ]; then
 		set -- "$@" -H "Content-Type: application/json" --data-binary "@$tmp/request"
 	fi
-	status=$(curl "$@" "$url") || die "$method $url failed: curl could not reach the API (check MILL_BITBUCKET_API and the network)"
+	# The credentials go to curl as a config on stdin, never on its command line (visible in ps).
+	auth=$(auth_config) || die "cannot build the curl auth config"
+	status=$(curl -K - "$@" "$url" <<EOF
+$auth
+EOF
+) || die "$method $url failed: curl could not reach the API (check MILL_BITBUCKET_API and the network)"
 	case $status in
 	2??) cat "$out" ;;
 	*)
