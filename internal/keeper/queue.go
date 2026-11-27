@@ -3,6 +3,7 @@ package keeper
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/msidorkevich/mill/internal/publish"
 	"github.com/msidorkevich/mill/internal/store"
@@ -76,7 +77,7 @@ func (k *keeper) publishQueued(ctx context.Context, id string) error {
 		return nil
 	}
 	po := k.publishOptions(t.ID)
-	po.Out, po.HookOut = nil, k.Out // only the hook line: the pass logs the publish itself
+	po.Out = nil // the pass logs the publish itself
 	pr, err := publish.Publish(ctx, po)
 	if _, ok := publish.ParentRefusal(err); ok {
 		k.res.Queue.Waiting = append(k.res.Queue.Waiting, QueueWaiting{TaskID: t.ID, Reason: err.Error()})
@@ -88,5 +89,6 @@ func (k *keeper) publishQueued(ctx context.Context, id string) error {
 	}
 	k.res.Queue.Published = append(k.res.Queue.Published, QueuePublished{TaskID: t.ID, Ref: pr.Ref, SHA: pr.SHA})
 	k.logf("%s: published from the queue as %s at %s", t.ID, pr.Ref, short(pr.SHA))
+	publish.PrintHookReport(k.Out, os.Stderr, pr)
 	return nil
 }

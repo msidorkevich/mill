@@ -710,6 +710,7 @@ func approveOne(ctx context.Context, env Env, s *store.Store, o publish.Options)
 		verb = "Republished"
 	}
 	fmt.Fprintf(env.Stdout, "%s %s as %s on %s at %s (parent %s).\n", verb, id, res.Ref, res.Remote, short(res.SHA), short(res.Parent))
+	publish.PrintHookReport(env.Stdout, env.Stderr, res)
 	fmt.Fprintf(env.Stdout, "\nNext: open a pull request from %s into %s.\n", res.Ref, res.Onto)
 	return nil
 }

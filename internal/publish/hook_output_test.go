@@ -23,11 +23,13 @@ func TestHookOutputSuccessPrintsLastNonEmptyLine(t *testing.T) {
 	o, _, _ := fixture(t)
 	o.Cfg.OnPublish = hookScript(t, `printf 'creating\nhttps://example.test/pr/1\n\n'`)
 	var out, stderr bytes.Buffer
-	o.Out, o.Stderr = &out, &stderr
+	o.Out = &out
 
-	if _, err := Publish(context.Background(), o); err != nil {
+	res, err := Publish(context.Background(), o)
+	if err != nil {
 		t.Fatal(err)
 	}
+	PrintHookReport(&out, &stderr, res)
 	want := "hook on_publish for t1: https://example.test/pr/1\n"
 	if out.String() != want {
 		t.Errorf("Out = %q, want %q", out.String(), want)
@@ -50,11 +52,13 @@ func TestHookOutputEmptyOrBlankOutputPrintsNoLine(t *testing.T) {
 			o, _, _ := fixture(t)
 			o.Cfg.OnPublish = hookScript(t, tc.body)
 			var out bytes.Buffer
-			o.Out, o.Stderr = &out, &bytes.Buffer{}
+			o.Out = &out
 
-			if _, err := Publish(context.Background(), o); err != nil {
+			res, err := Publish(context.Background(), o)
+			if err != nil {
 				t.Fatal(err)
 			}
+			PrintHookReport(&out, &bytes.Buffer{}, res)
 			if out.Len() != 0 {
 				t.Errorf("Out = %q, want nothing", out.String())
 			}
@@ -70,11 +74,13 @@ func TestHookOutputFailedHookPrintsNoSuccessLine(t *testing.T) {
 	o, _, _ := fixture(t)
 	o.Cfg.OnPublish = hookScript(t, "echo https://example.test/pr/2\nexit 3")
 	var out, stderr bytes.Buffer
-	o.Out, o.Stderr = &out, &stderr
+	o.Out = &out
 
-	if _, err := Publish(context.Background(), o); err != nil {
+	res, err := Publish(context.Background(), o)
+	if err != nil {
 		t.Fatalf("Publish with a failing hook = %v, want nil", err)
 	}
+	PrintHookReport(&out, &stderr, res)
 	if out.Len() != 0 {
 		t.Errorf("Out = %q, want nothing for a failed hook", out.String())
 	}
