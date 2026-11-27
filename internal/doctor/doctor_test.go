@@ -134,8 +134,12 @@ func TestAllGreen(t *testing.T) {
 		t.Fatalf("report not OK: %+v", r.Checks)
 	}
 	for _, c := range r.Checks {
-		if c.Status != OK {
-			t.Errorf("%s = %s (%s), want ok", c.Name, c.Status, c.Detail)
+		want := OK
+		if c.Name == "on_publish" || c.Name == "on_update" {
+			want = Skip // no hooks configured
+		}
+		if c.Status != want {
+			t.Errorf("%s = %s (%s), want %s", c.Name, c.Status, c.Detail, want)
 		}
 	}
 }
