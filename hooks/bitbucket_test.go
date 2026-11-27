@@ -459,6 +459,65 @@ func TestBitbucketBasicAuthWithUserAndToken(t *testing.T) {
 	}
 }
 
+func TestBitbucketHookKeepsTokenOffCurlArgs(t *testing.T) {
+	bbRequireTools(t)
+	realCurl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = `s3cr3t-"tok\en`
+	for _, tc := range []struct {
+		name     string
+		env      []string
+		wantAuth string
+	}{
+		{"bearer", nil, "Bearer " + token},
+		{"basic", []string{"BITBUCKET_USER=alice@example.com"},
+			"Basic " + base64.StdEncoding.EncodeToString([]byte("alice@example.com:"+token))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fake curl first on PATH: records each argument on its own line, then runs the real one.
+			bin := t.TempDir()
+			argLog := filepath.Join(t.TempDir(), "curl-args")
+			fake := fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\" >>'%s'; done\nexec '%s' \"$@\"\n", argLog, realCurl)
+			if err := os.WriteFile(filepath.Join(bin, "curl"), []byte(fake), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			s := bbNewServer(t, "acme", "widgets")
+			s.wantAuth = tc.wantAuth
+			s.open["mill/g1/feature"] = 7 // exercises a PUT with a request body too
+			env := append([]string{
+				"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"MILL_BITBUCKET_API=" + s.srv.URL,
+				"BITBUCKET_TOKEN=" + token,
+			}, tc.env...)
+			bbExpectSuccess(t, bbRunHook(t, t.TempDir(), bbInput(t, nil), env...), s.html(7))
+
+			data, err := os.ReadFile(argLog)
+			if err != nil {
+				t.Fatalf("fake curl was not run: %v", err)
+			}
+			for _, arg := range strings.Split(string(data), "\n") {
+				if strings.Contains(arg, "s3cr3t") {
+					t.Errorf("curl argument %q contains the token", arg)
+				}
+			}
+			reqs := s.recorded()
+			if len(reqs) != 2 {
+				t.Fatalf("requests = %+v, want a lookup and an update", reqs)
+			}
+			for _, r := range reqs {
+				if r.Auth != tc.wantAuth {
+					t.Errorf("%s %s Authorization = %q, want %q", r.Method, r.Path, r.Auth, tc.wantAuth)
+				}
+			}
+			if puts := s.bbOnly(http.MethodPut); len(puts) != 1 || bbDig(puts[0].Body, "title") != "Add the feature" {
+				t.Fatalf("PUTs = %+v, want one carrying the request body", puts)
+			}
+		})
+	}
+}
+
 func TestBitbucketMissingTokenFailsWithWhatToSet(t *testing.T) {
 	bbRequireTools(t)
 	s := bbNewServer(t, "acme", "widgets")
