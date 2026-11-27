@@ -1584,3 +1584,14 @@ test binary did not provide `__pgrun`; and a README detail.
       parent merges and GitHub deletes its branch, the child PR is retargeted to `master`; a
       merge clicked during the switch fails. The README's stacking advice could say to refresh
       the child PR before merging it.
+- [ ] **46. Parallel `git worktree add` races.** PR #226's macOS CI:
+      `TestApproveGoalNoCombinedPublishesAll` failed when sibling tasks prepared their worktrees
+      at once: `git worktree add ... fatal: could not open '.git/worktrees/c/locked'`. Concurrent
+      `worktree add`/`remove`/`prune` in one repository race on `.git/worktrees`; serialize them
+      in `internal/gitx` (a per-repository lock), in tests and in real runs.
+- [ ] **47. Two git processes in one worktree during a restack.** PR #226's Linux CI:
+      `TestPipelinedRestackKeepChildOfFixedParentIsRestackedOntoFix` failed with "Unable to create
+      '.git/worktrees/t3/index.lock': File exists" during the keeper's rebase. Find what else runs
+      git in that worktree at the same time (or a lock left by an earlier command) and make the
+      keeper wait for it or own the worktree exclusively.
+
