@@ -112,6 +112,7 @@ func init() {
 		{"review", "list tasks awaiting review; show, changes, reject, approve (--goal)", runReview},
 		{"sync", "detect merged reviews, mark them landed, restack and re-publish children (--json)", runSync},
 		{"keep", "keep branches mergeable: sync, rebase, fix, re-publish, combined check (--watch, --interval, --combined, --json)", runKeep},
+		{"hook", "re-run a publish hook for a published task (run --event)", runHook},
 		{"clean", "remove worktrees and branches of landed tasks (--remote, --dry-run)", runClean},
 		{"watch", "show running agents, live spend and their latest action (--once, --interval)", runWatch},
 		{"stats", "report first-pass rate, attempts and cost by size, complexity and model (models, --json)", runStats},
