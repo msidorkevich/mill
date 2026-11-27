@@ -47,25 +47,31 @@ repo_from_url() {
 }
 
 # api_call METHOD PATH [JSON-BODY]: prints the response body; fails on any HTTP error with the
-# status and the response message.
+# status and the response message. The token reaches curl as a config on stdin (-K -), never on
+# its command line, so other users cannot read it from the process list; the request body goes
+# through a file because stdin carries that config.
 api_call() {
 	method=$1
 	url="$api$2"
 	out="$tmp/response"
 	if [ $# -ge 3 ]; then
 		printf '%s' "$3" >"$tmp/request"
-		status=$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
-			-H "Authorization: Bearer $GITHUB_TOKEN" \
+		status=$(curl -K - -sS -o "$out" -w '%{http_code}' -X "$method" \
 			-H "Accept: application/vnd.github+json" \
 			-H "X-GitHub-Api-Version: 2022-11-28" \
 			-H "Content-Type: application/json" \
-			--data-binary "@$tmp/request" "$url") || die "$method $url failed: curl could not reach the API (check MILL_GITHUB_API and the network)"
+			--data-binary "@$tmp/request" "$url" <<EOF
+header = "Authorization: Bearer $GITHUB_TOKEN"
+EOF
+		) || die "$method $url failed: curl could not reach the API (check MILL_GITHUB_API and the network)"
 	else
-		status=$(curl -sS -o "$out" -w '%{http_code}' -X "$method" \
-			-H "Authorization: Bearer $GITHUB_TOKEN" \
+		status=$(curl -K - -sS -o "$out" -w '%{http_code}' -X "$method" \
 			-H "Accept: application/vnd.github+json" \
 			-H "X-GitHub-Api-Version: 2022-11-28" \
-			"$url") || die "$method $url failed: curl could not reach the API (check MILL_GITHUB_API and the network)"
+			"$url" <<EOF
+header = "Authorization: Bearer $GITHUB_TOKEN"
+EOF
+		) || die "$method $url failed: curl could not reach the API (check MILL_GITHUB_API and the network)"
 	fi
 	case $status in
 	2??) cat "$out" ;;
