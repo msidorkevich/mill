@@ -226,10 +226,14 @@ func Run(ctx context.Context, opts Options) Report {
 	}
 
 	// hooks
-	for _, h := range []struct{ name, command string }{
-		{"on_publish", cfg.OnPublish},
-		{"on_update", cfg.OnUpdate},
-	} {
+	hooks := []struct{ name, event, command string }{
+		{"on_publish", "publish", cfg.OnPublish},
+		{"on_update", "update", cfg.OnUpdate},
+	}
+	if strings.TrimSpace(cfg.Status) != "" {
+		hooks = append(hooks, struct{ name, event, command string }{"hook_status", "status", cfg.Status})
+	}
+	for _, h := range hooks {
 		if !cfgOK {
 			add(h.name, Skip, "needs a valid config")
 			continue
@@ -239,7 +243,7 @@ func Run(ctx context.Context, opts Options) Report {
 			add(h.name, Skip, "no hook configured")
 		} else if !programFound(opts.LookPath, paths.Root, fields[0]) {
 			add(h.name, Fail, "hook %s: program %s not found; fix the command in .mill/config.toml", h.name, fields[0])
-		} else if tail, err := hook.Check(ctx, cfg, paths.Root, h.command); err != nil {
+		} else if tail, err := hook.CheckEvent(ctx, cfg, paths.Root, h.command, h.event); err != nil {
 			add(h.name, Fail, "hook %s: %v; fix the command in .mill/config.toml; output: %s", h.name, err, tail)
 		} else {
 			add(h.name, OK, "%q passed in check mode", h.command)
