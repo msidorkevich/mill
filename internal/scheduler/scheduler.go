@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/msidorkevich/mill/internal/gitx"
 	"github.com/msidorkevich/mill/internal/pipeline"
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/store"
@@ -62,6 +63,14 @@ type Options struct {
 	// WaitOnLimit waits for a usage limit to reset and continues, instead of ending the goal
 	// blocked.
 	WaitOnLimit bool
+	// Reprepare, when set, moves a task retried by RetryBlocked onto its current dependencies
+	// (or base) before it runs, as `mill task rebase` does. It is called, with the task
+	// claimed, only for a task whose branch no longer contains a dependency's branch head (or,
+	// without dependencies, the tip of BaseBranch). RepoDir is the repository the branches are
+	// read from.
+	Reprepare  func(ctx context.Context, t store.Task) error
+	RepoDir    string
+	BaseBranch string
 }
 
 // Result is how the goal ended.
@@ -352,6 +361,9 @@ func (s *Scheduler) Run(ctx context.Context, o RunOptions) (RunResult, error) {
 			}
 			for _, id := range ids {
 				s.logf("%s: back to pending (%s)", id, ReasonRetry)
+				if err := s.reprepare(bg, st, id); err != nil {
+					return RunResult{}, err
+				}
 			}
 			if len(ids) > 0 {
 				st.take(g)
@@ -646,6 +658,116 @@ func (s *Scheduler) poll(ctx, bg context.Context, st *runState) (waiting bool, e
 		}(t.ID)
 	}
 	return waiting, nil
+}
+
+// reprepare re-prepares task id, just put back to pending by --retry-blocked, when its
+// starting point is stale (see stale). When re-preparing fails, or staleness cannot be
+// decided, the task is blocked again with a reason saying what failed, so it never starts on
+// a stale starting point. A returned error means mill itself failed.
+func (s *Scheduler) reprepare(bg context.Context, st *runState, id string) error {
+	if st.o.Reprepare == nil {
+		return nil
+	}
+	block := func(what string, cause error) error {
+		reason := fmt.Sprintf("%s: %v; fix it, then run `mill task rebase %s` and `mill run --retry-blocked`", what, cause, id)
+		if err := s.Store.SetTaskStatus(bg, id, store.TaskBlocked, store.PhasePrepare, reason); err != nil {
+			return err
+		}
+		s.logf("%s: %s: %s", id, store.TaskBlocked, reason)
+		return nil
+	}
+	t, err := s.Store.GetTask(bg, id)
+	if err != nil {
+		return err
+	}
+	stale, err := s.stale(bg, st.o.Options, t)
+	if err != nil {
+		return block("checking whether its dependencies changed since preparation failed", err)
+	}
+	if !stale {
+		return nil
+	}
+	if err := s.Store.ClaimTasks(bg, st.claimer, []string{id}); err != nil {
+		var busy *store.BusyError
+		if errors.As(err, &busy) {
+			return block("dependencies changed since preparation but the task could not be rebased", err)
+		}
+		return err
+	}
+	rerr := st.o.Reprepare(bg, t)
+	if err := s.Store.ReleaseClaims(bg, st.claimer, []string{id}); err != nil {
+		return err
+	}
+	if rerr != nil {
+		return block("dependencies changed since preparation and rebasing onto them failed", rerr)
+	}
+	s.logf("%s: dependencies changed since preparation; rebased", id)
+	return nil
+}
+
+// stale reports whether task t's branch no longer contains its starting point: a dependency's
+// current branch head, or for a task without dependencies the tip of o.BaseBranch, is not an
+// ancestor of the task's branch head. A task without a branch, or with a dependency that is
+// not verified or published yet, is not stale (it is retried as before); a landed dependency
+// is skipped.
+func (s *Scheduler) stale(bg context.Context, o Options, t store.Task) (bool, error) {
+	br, err := s.Store.GetBranch(bg, t.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	head, err := gitx.RevParse(bg, o.RepoDir, br.Name)
+	if err != nil {
+		return false, fmt.Errorf("branch %q: %w", br.Name, err)
+	}
+	deps, err := s.Store.TaskDeps(bg, t.ID)
+	if err != nil {
+		return false, err
+	}
+	var tips []string
+	if len(deps) == 0 {
+		if o.BaseBranch == "" {
+			return false, errors.New("no base branch is configured")
+		}
+		tip, err := gitx.RevParse(bg, o.RepoDir, o.BaseBranch)
+		if err != nil {
+			return false, fmt.Errorf("base branch %q: %w", o.BaseBranch, err)
+		}
+		tips = append(tips, tip)
+	}
+	for _, d := range deps {
+		dt, err := s.Store.GetTask(bg, d)
+		if err != nil {
+			return false, err
+		}
+		if !store.Done(dt.Status) {
+			return false, nil
+		}
+		if dt.Status == store.TaskLanded {
+			continue
+		}
+		db, err := s.Store.GetBranch(bg, d)
+		if err != nil {
+			return false, fmt.Errorf("dependency %s is %s but has no branch: %w", d, dt.Status, err)
+		}
+		tip, err := gitx.RevParse(bg, o.RepoDir, db.Name)
+		if err != nil {
+			return false, fmt.Errorf("dependency branch %q: %w", db.Name, err)
+		}
+		tips = append(tips, tip)
+	}
+	for _, tip := range tips {
+		ok, err := gitx.IsAncestor(bg, o.RepoDir, tip, head)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // depsDone reads each dependency's status from the store now and reports whether every one

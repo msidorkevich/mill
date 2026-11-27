@@ -82,7 +82,14 @@ func runRun(ctx context.Context, env Env, args []string) int {
 	p.MaxParallelGates = cfg.MaxParallelGates
 	sch := &scheduler.Scheduler{Store: s, MaxParallel: cfg.MaxParallel, MaxInFlight: cfg.MaxInFlight, RunTask: p.Run, Out: out}
 	res, err := sch.Run(ctx, scheduler.RunOptions{
-		Options:      scheduler.Options{RetryBlocked: *retry, WaitOnLimit: *waitLimit},
+		Options: scheduler.Options{RetryBlocked: *retry, WaitOnLimit: *waitLimit,
+			// A retried task whose dependencies moved is first moved onto them, as
+			// `mill task rebase` does.
+			Reprepare: func(ctx context.Context, t store.Task) error {
+				_, err := moveTaskOntoBase(ctx, s, cfg, paths, t)
+				return err
+			},
+			RepoDir: paths.Root, BaseBranch: cfg.BaseBranch},
 		Goal:         id,
 		PollInterval: env.SchedulerPoll,
 	})
