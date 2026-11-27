@@ -16,6 +16,7 @@ import (
 
 	"github.com/msidorkevich/mill/internal/budget"
 	"github.com/msidorkevich/mill/internal/config"
+	"github.com/msidorkevich/mill/internal/hook"
 	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/pipeline"
 	"github.com/msidorkevich/mill/internal/price"
@@ -456,6 +457,93 @@ type taskView struct {
 	DepsAdded []depsAdded `json:"deps_added,omitempty"`
 	// SkippedTests are the test skips the task's latest skipped-tests event recorded.
 	SkippedTests []skiptest.Skip `json:"skipped_tests,omitempty"`
+	// Hooks are the latest hook run of each event that has one, keyed by event.
+	Hooks map[string]hookRun `json:"hooks,omitempty"`
+}
+
+// hookEvents are the hook events a task can run, in the order they are shown.
+var hookEvents = []string{"publish", "update"}
+
+// hookRun is the latest run of one hook, as task show and review show report it.
+type hookRun struct {
+	ExitCode   int       `json:"exit_code"`
+	DurationMS int64     `json:"duration_ms"`
+	TimedOut   bool      `json:"timed_out"`
+	OutputTail string    `json:"output_tail"`
+	At         time.Time `json:"at"`
+}
+
+// latestHookRuns returns the newest hook-run event of each hook event, keyed by event;
+// events with no run are absent. evs are the task's events in seq order.
+func latestHookRuns(evs []store.Event) (map[string]hookRun, error) {
+	runs := map[string]hookRun{}
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Kind != hook.RunEvent {
+			continue
+		}
+		var d struct {
+			Event      string `json:"event"`
+			ExitCode   int    `json:"exit_code"`
+			DurationMS int64  `json:"duration_ms"`
+			TimedOut   bool   `json:"timed_out"`
+			OutputTail string `json:"output_tail"`
+		}
+		if err := json.Unmarshal(evs[i].Data, &d); err != nil {
+			return nil, fmt.Errorf("corrupt %s event %d: %w", hook.RunEvent, evs[i].Seq, err)
+		}
+		if !slices.Contains(hookEvents, d.Event) {
+			continue
+		}
+		if _, seen := runs[d.Event]; seen {
+			continue
+		}
+		runs[d.Event] = hookRun{ExitCode: d.ExitCode, DurationMS: d.DurationMS, TimedOut: d.TimedOut,
+			OutputTail: d.OutputTail, At: evs[i].At}
+	}
+	if len(runs) == 0 {
+		return nil, nil
+	}
+	return runs, nil
+}
+
+// printHookRuns prints one line per hook event that has a run, and nothing when none does.
+func printHookRuns(w io.Writer, runs map[string]hookRun) {
+	for _, event := range hookEvents {
+		r, ok := runs[event]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(w, "  %s\n", hookRunLine(event, r))
+	}
+}
+
+// hookRunLine describes one hook run: its outcome, duration and time, then the first line
+// of its output tail when it did not succeed.
+func hookRunLine(event string, r hookRun) string {
+	outcome := "ok"
+	switch {
+	case r.TimedOut:
+		outcome = "timed out"
+	case r.ExitCode != 0:
+		outcome = fmt.Sprintf("exit %d", r.ExitCode)
+	}
+	dur := (time.Duration(r.DurationMS) * time.Millisecond).Round(100 * time.Millisecond)
+	line := fmt.Sprintf("hook %s: %s (%s, %s)", event, outcome, dur, r.At.Local().Format("2006-01-02 15:04"))
+	if outcome != "ok" {
+		if first := firstLine(r.OutputTail); first != "" {
+			line += ": " + first
+		}
+	}
+	return line
+}
+
+// firstLine returns the first non-blank line of s, trimmed.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(s)
 }
 
 // latestSkippedTests returns the test skips recorded by the last skipped-tests event of a
@@ -576,6 +664,9 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 		}
 	}
 	if v.SkippedTests, err = latestSkippedTests(evs); err != nil {
+		return fail(fmt.Errorf("task %s: %w", id, err))
+	}
+	if v.Hooks, err = latestHookRuns(evs); err != nil {
 		return fail(fmt.Errorf("task %s: %w", id, err))
 	}
 	for _, e := range evs {
@@ -829,6 +920,7 @@ func printTask(env Env, v taskView) {
 	}
 	fmt.Fprintf(w, "  spend     %s tokens (billable), $%.2f%s\n", fmtInt(v.Usage.Tokens(budget.CountBillable)), v.Usage.CostUSD, total)
 	fmt.Fprintf(w, "  runs      %s\n", v.RunsDir)
+	printHookRuns(w, v.Hooks)
 
 	if len(v.Attempts) > 0 {
 		fmt.Fprintln(w, "\nAttempts:")
