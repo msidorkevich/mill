@@ -72,6 +72,17 @@ func runReviewList(ctx context.Context, env Env, args []string) int {
 				return fail(err)
 			}
 		}
+		published := ""
+		if t.Status == store.TaskPublished {
+			br, err := s.GetBranch(ctx, t.ID)
+			if err != nil {
+				return fail(err)
+			}
+			published = br.PublishedSHA
+		}
+		if r.CI, err = loadCI(ctx, s, t.ID, published); err != nil {
+			return fail(err)
+		}
 		rows = append(rows, r)
 	}
 	if *asJSON {
@@ -86,7 +97,7 @@ func runReviewList(ctx context.Context, env Env, args []string) int {
 		return ExitOK
 	}
 	tw := tabwriter.NewWriter(env.Stdout, 2, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSTATUS\tATTEMPTS\tCOST\tTITLE\tBRANCH\tWAITING FOR")
+	fmt.Fprintln(tw, "ID\tSTATUS\tATTEMPTS\tCOST\tTITLE\tBRANCH\tCI\tWAITING FOR")
 	for _, t := range rows {
 		branch := "-"
 		if t.Status == store.TaskPublished && t.PublishedRef != "" {
@@ -98,18 +109,24 @@ func runReviewList(ctx context.Context, env Env, args []string) int {
 				waiting = t.Waiting
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%.2f\t%s\t%s\t%s\n", t.ID, t.Status, t.Attempts, t.Usage.CostUSD, t.Title, branch, waiting)
+		// An unpublished task has no CI to show.
+		ci := "-"
+		if t.Status == store.TaskPublished && t.CI != nil {
+			ci = t.CI.display
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%.2f\t%s\t%s\t%s\t%s\n", t.ID, t.Status, t.Attempts, t.Usage.CostUSD, t.Title, branch, ci, waiting)
 	}
 	tw.Flush()
 	return ExitOK
 }
 
 // reviewRow is one task of `mill review`: a verified task with a queued approval has status
-// approved and says what it waits for.
+// approved and says what it waits for. CI is its latest recorded CI status, nil when none is.
 type reviewRow struct {
 	store.ReviewTask
-	Status  string `json:"status"`
-	Waiting string `json:"waiting,omitempty"`
+	Status  string  `json:"status"`
+	Waiting string  `json:"waiting,omitempty"`
+	CI      *ciView `json:"ci"`
 }
 
 func encodeJSON(env Env, name string, v any) int {
@@ -177,6 +194,8 @@ type reviewView struct {
 	// BaseChanged are the files changed on the base since the task started that the task
 	// owns or changed.
 	BaseChanged []string `json:"base_changed,omitempty"`
+	// CI is the task's latest recorded CI status, nil when none is recorded.
+	CI *ciView `json:"ci"`
 	// skipped are the test skips the latest skipped-tests event recorded; text only, so
 	// --json keeps its fields as they are.
 	skipped []skiptest.Skip
@@ -221,6 +240,9 @@ func runReviewShow(ctx context.Context, env Env, args []string) int {
 		return fail(err)
 	}
 	if v.Attempts, err = s.MaxAttemptN(ctx, id); err != nil {
+		return fail(err)
+	}
+	if v.CI, err = loadCI(ctx, s, id, v.Branch.PublishedSHA); err != nil {
 		return fail(err)
 	}
 	if v.Usage, err = s.TaskUsage(ctx, id); err != nil {
@@ -368,6 +390,7 @@ func printReview(env Env, v reviewView) {
 	} else {
 		fmt.Fprintln(w, "\nLast gate: none recorded")
 	}
+	printCIBlock(w, v.CI)
 	printSkippedTests(w, v.skipped)
 	if len(v.Events) > 0 {
 		fmt.Fprintf(w, "\nNotes from attempt %d:\n", v.Attempts)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/msidorkevich/mill/internal/budget"
+	"github.com/msidorkevich/mill/internal/cistatus"
 	"github.com/msidorkevich/mill/internal/config"
 	"github.com/msidorkevich/mill/internal/hook"
 	"github.com/msidorkevich/mill/internal/host"
@@ -460,6 +461,67 @@ type taskView struct {
 	SkippedTests []skiptest.Skip `json:"skipped_tests,omitempty"`
 	// Hooks are the latest hook run of each event that has one, keyed by event.
 	Hooks map[string]hookRun `json:"hooks,omitempty"`
+	// CI is the task's latest recorded CI status, nil when none is recorded.
+	CI *ciView `json:"ci"`
+}
+
+// ciView is a task's latest ci-status record as task show and review report it. Stale means
+// the record is of another head than the published one.
+type ciView struct {
+	State  string             `json:"state"`
+	SHA    string             `json:"sha"`
+	URL    string             `json:"url"`
+	Stale  bool               `json:"stale"`
+	Checks []hook.StatusCheck `json:"checks"`
+	// display is the CI column text (cistatus.Display); text only.
+	display string
+}
+
+// loadCI reads the latest ci-status record of taskID and compares it with publishedSHA; nil
+// when nothing is recorded.
+func loadCI(ctx context.Context, s *store.Store, taskID, publishedSHA string) (*ciView, error) {
+	rec, found, err := cistatus.Latest(ctx, s, taskID)
+	if err != nil || !found {
+		return nil, err
+	}
+	checks := rec.Checks
+	if checks == nil {
+		checks = []hook.StatusCheck{}
+	}
+	return &ciView{State: rec.State, SHA: rec.SHA, URL: rec.URL, Stale: rec.SHA != publishedSHA, Checks: checks,
+		display: cistatus.Display(rec, found, publishedSHA)}, nil
+}
+
+// printCIBlock prints the CI block of task show and review show: the state (or stale), the sha,
+// the url and each failing check with its url. Nothing when no CI status is recorded.
+func printCIBlock(w io.Writer, ci *ciView) {
+	if ci == nil {
+		return
+	}
+	fmt.Fprintln(w, "\nCI:")
+	fmt.Fprintf(w, "  state  %s\n", ci.display)
+	fmt.Fprintf(w, "  sha    %s\n", sha8(ci.SHA))
+	if ci.URL != "" {
+		fmt.Fprintf(w, "  url    %s\n", ci.URL)
+	}
+	failing := cistatus.FailingChecks(cistatus.Record{Checks: ci.Checks})
+	if len(failing) > 0 {
+		fmt.Fprintln(w, "  failing checks:")
+	}
+	for _, c := range failing {
+		line := "  " + c.Name
+		if c.URL != "" {
+			line += "  " + c.URL
+		}
+		fmt.Fprintln(w, line)
+	}
+}
+
+func sha8(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }
 
 // hookEvents are the hook events a task can run, in the order they are shown.
@@ -624,6 +686,13 @@ func runTaskShow(ctx context.Context, env Env, args []string) int {
 	}
 	if br, err := s.GetBranch(ctx, id); err == nil {
 		v.Branch = &br
+	}
+	published := ""
+	if v.Branch != nil {
+		published = v.Branch.PublishedSHA
+	}
+	if v.CI, err = loadCI(ctx, s, id, published); err != nil {
+		return fail(err)
 	}
 	if v.Attempts, err = s.Attempts(ctx, id); err != nil {
 		return fail(err)
@@ -949,6 +1018,7 @@ func printTask(env Env, v taskView) {
 			fmt.Fprintf(w, "\nLast verdict: %s: %s\n", vd.Verdict, vd.Summary)
 		}
 	}
+	printCIBlock(w, v.CI)
 	printSkippedTests(w, v.SkippedTests)
 	if len(v.Findings) > 0 {
 		fmt.Fprintln(w, "\nLast findings:")
