@@ -123,3 +123,91 @@ func TestOpenWithoutWorktreeReportsAndRunsNothing(t *testing.T) {
 		})
 	}
 }
+
+// tmuxRecorder records the tmux calls of a model and answers them with the given result.
+func tmuxRecorder(m *Model, stderr string, code int, err error) *[][]string {
+	calls := &[][]string{}
+	m.opts.Tmux = func(_ context.Context, args []string) (string, string, int, error) {
+		*calls = append(*calls, args)
+		return "", stderr, code, err
+	}
+	return calls
+}
+
+func TestOpenWithTmuxHostRunsNewWindowInWorktree(t *testing.T) {
+	t.Parallel()
+	s := seed(t)
+	saveBranch(t, s, "/wt/b")
+	m, herdr, shell := openModel(t, s, map[string]string{}, false)
+	m.opts.HostKind = "tmux"
+	calls := tmuxRecorder(m, "", 0, nil)
+	if cmd := m.openWorktree("g1/b"); cmd != nil {
+		t.Errorf("want no tea command for tmux")
+	}
+	want := [][]string{{"new-window", "-c", "/wt/b"}}
+	if !reflect.DeepEqual(*calls, want) || len(*herdr) != 0 || len(*shell) != 0 {
+		t.Errorf("tmux = %v, herdr = %v, shell = %v", *calls, *herdr, *shell)
+	}
+	if out := m.cmds.render(100, 10); !strings.Contains(out, "opened /wt/b in a tmux window") {
+		t.Errorf("panel lacks success note:\n%s", out)
+	}
+}
+
+func TestOpenWithTmuxFailureShowsError(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		stderr string
+		code   int
+		err    error
+		want   string
+	}{
+		"exit status": {"no server running on /tmp/tmux-501/default\n", 1, nil, "tmux exited 1: no server running"},
+		"cannot run":  {"", -1, errors.New("exec: \"tmux\": executable file not found"), "run tmux: exec: \"tmux\""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := seed(t)
+			saveBranch(t, s, "/wt/b")
+			m, _, shell := openModel(t, s, map[string]string{}, false)
+			m.opts.HostKind = "tmux"
+			tmuxRecorder(m, tc.stderr, tc.code, tc.err)
+			m.openWorktree("g1/b")
+			if out := m.cmds.render(100, 10); !strings.Contains(out, tc.want) || strings.Contains(out, "opened") {
+				t.Errorf("panel lacks error %q:\n%s", tc.want, out)
+			}
+			if len(*shell) != 0 {
+				t.Errorf("ran a shell after a tmux failure: %v", *shell)
+			}
+		})
+	}
+}
+
+func TestOpenWithTmuxHostInsideHerdrUsesHerdr(t *testing.T) {
+	t.Parallel()
+	s := seed(t)
+	saveBranch(t, s, "/wt/b")
+	m, herdr, shell := openModel(t, s, map[string]string{"HERDR_ENV": "1"}, true)
+	m.opts.HostKind = "tmux"
+	calls := tmuxRecorder(m, "", 0, nil)
+	m.openWorktree("g1/b")
+	want := [][]string{{"pane", "split", "--current", "--direction", "right", "--cwd", "/wt/b"}}
+	if !reflect.DeepEqual(*herdr, want) || len(*calls) != 0 || len(*shell) != 0 {
+		t.Errorf("herdr = %v, tmux = %v, shell = %v", *herdr, *calls, *shell)
+	}
+}
+
+func TestOpenWithExecHostRunsShellNotTmux(t *testing.T) {
+	t.Parallel()
+	s := seed(t)
+	saveBranch(t, s, "/wt/b")
+	m, herdr, shell := openModel(t, s, map[string]string{"SHELL": "/bin/zsh"}, false)
+	m.opts.HostKind = "exec"
+	calls := tmuxRecorder(m, "", 0, nil)
+	if cmd := m.openWorktree("g1/b"); cmd == nil {
+		t.Fatal("want a tea command")
+	}
+	want := [][2]string{{"/bin/zsh", "/wt/b"}}
+	if !reflect.DeepEqual(*shell, want) || len(*herdr) != 0 || len(*calls) != 0 {
+		t.Errorf("shell = %v, herdr = %v, tmux = %v", *shell, *herdr, *calls)
+	}
+}

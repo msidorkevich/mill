@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/msidorkevich/mill/internal/host"
 	"github.com/msidorkevich/mill/internal/tui"
 )
 
@@ -19,7 +20,7 @@ func runTUI(ctx context.Context, env Env, args []string) int {
 		fmt.Fprintf(env.Stderr, "mill tui: %v\n", err)
 		return ExitError
 	}
-	paths, _, s, err := openProject(ctx, env)
+	paths, cfg, s, err := openProject(ctx, env)
 	if err != nil {
 		return fail(err)
 	}
@@ -28,7 +29,12 @@ func runTUI(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	m := tui.New(tui.Options{Store: s, Paths: paths, Runner: r, Getenv: env.getenv, LookPath: env.lookPath})
+	h, _, err := host.Select(cfg.Host.Kind, host.Settings{TmuxBin: cfg.Host.TmuxBin, RepoRoot: paths.Root}, env.getenv, env.lookPath)
+	if err != nil {
+		return fail(err)
+	}
+	m := tui.New(tui.Options{Store: s, Paths: paths, Runner: r, Getenv: env.getenv, LookPath: env.lookPath,
+		HostKind: h.Name(), TmuxBin: cfg.Host.TmuxBin})
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithOutput(env.Stdout))
 	if _, err := p.Run(); err != nil {
 		return fail(fmt.Errorf("the terminal UI stopped: %w", err))

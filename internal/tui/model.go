@@ -39,6 +39,13 @@ type Options struct {
 	Edit     EditFunc                     // runs $EDITOR on a file; defaults to tea.ExecProcess
 	// Herdr runs herdr with args and captures it; defaults to exec'ing herdr.
 	Herdr func(ctx context.Context, args []string) (stdout, stderr string, code int, err error)
+	// HostKind is the host mill selected for agent processes: "exec", "herdr" or "tmux". Outside
+	// herdr, o opens the worktree in a tmux window when it is "tmux"; otherwise in a shell.
+	HostKind string
+	// TmuxBin is the tmux binary (host.tmux_bin); "" = "tmux".
+	TmuxBin string
+	// Tmux runs tmux with args and captures it; defaults to exec'ing TmuxBin.
+	Tmux func(ctx context.Context, args []string) (stdout, stderr string, code int, err error)
 	// ShellCmd builds the interactive shell command for o outside herdr; defaults to exec.Command.
 	ShellCmd func(shell, dir string) *exec.Cmd
 	// TempDir holds the comment and spec files the review actions write; "" = os.TempDir().
@@ -89,6 +96,15 @@ func New(opts Options) *Model {
 	}
 	if opts.Herdr == nil {
 		opts.Herdr = execHerdr
+	}
+	if opts.Tmux == nil {
+		bin := opts.TmuxBin
+		if bin == "" {
+			bin = "tmux"
+		}
+		opts.Tmux = func(ctx context.Context, args []string) (string, string, int, error) {
+			return runCapture(ctx, bin, args)
+		}
 	}
 	if opts.ShellCmd == nil {
 		opts.ShellCmd = func(shell, dir string) *exec.Cmd {

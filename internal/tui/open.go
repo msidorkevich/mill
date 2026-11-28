@@ -15,7 +15,12 @@ import (
 
 // execHerdr runs the herdr executable and captures its output.
 func execHerdr(ctx context.Context, args []string) (string, string, int, error) {
-	cmd := exec.CommandContext(ctx, "herdr", args...)
+	return runCapture(ctx, "herdr", args)
+}
+
+// runCapture runs bin with args and captures its output.
+func runCapture(ctx context.Context, bin string, args []string) (string, string, int, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	code, err := exitCode(cmd.Run())
@@ -23,7 +28,8 @@ func execHerdr(ctx context.Context, args []string) (string, string, int, error) 
 }
 
 // openWorktree opens the task's worktree: in a new herdr pane when mill runs inside herdr,
-// otherwise in a shell that suspends the TUI until it exits.
+// in a new tmux window when the selected host is tmux, otherwise in a shell that suspends the
+// TUI until it exits.
 func (m *Model) openWorktree(taskID string) tea.Cmd {
 	if taskID == "" {
 		m.cmds.note("open worktree: select a task first")
@@ -52,6 +58,19 @@ func (m *Model) openWorktree(taskID string) tea.Cmd {
 			m.cmds.note("open worktree: herdr exited %d: %s", code, strings.TrimSpace(stderr))
 		default:
 			m.cmds.note("opened %s in a herdr pane", b.Worktree)
+		}
+		return nil
+	}
+	if m.opts.HostKind == "tmux" {
+		// No -t: tmux opens the window in the session of the client that runs mill.
+		_, stderr, code, err := m.opts.Tmux(ctx, []string{"new-window", "-c", b.Worktree})
+		switch {
+		case err != nil:
+			m.cmds.note("open worktree: run tmux: %v", err)
+		case code != 0:
+			m.cmds.note("open worktree: tmux exited %d: %s", code, strings.TrimSpace(stderr))
+		default:
+			m.cmds.note("opened %s in a tmux window", b.Worktree)
 		}
 		return nil
 	}
