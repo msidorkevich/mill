@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,15 @@ type Herdr struct {
 	// Pgrun is the argv prefix that runs a command as the leader of a new process group, in
 	// place; empty = the running mill binary with `__pgrun --`.
 	Pgrun []string
+	// KeepFailed is how long the tab of a failed worker (non-zero exit or lost attempt)
+	// stays open after Wait; 0 = close at once. Successful and killed workers always close
+	// at once. The delayed close needs this process to still be running.
+	KeepFailed time.Duration
+	// AfterFunc schedules the delayed close; nil = time.AfterFunc.
+	AfterFunc func(time.Duration, func())
+	// Errors receives errors of delayed closes; nil = os.Stderr. It must be safe for
+	// concurrent use.
+	Errors io.Writer
 }
 
 // NewHerdr returns the herdr host using the herdr binary on PATH and the workspace in
@@ -63,7 +73,8 @@ type herdrHandle struct{ *wrapperHandle }
 
 // Start implements Host.
 func (h *Herdr) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
-	cfg := wrapperConfig{poll: h.poll(), startTimeout: h.startTimeout(), grace: h.grace(), pgrun: h.Pgrun}
+	cfg := wrapperConfig{poll: h.poll(), startTimeout: h.startTimeout(), grace: h.grace(), pgrun: h.Pgrun,
+		keepFailed: h.KeepFailed, afterFunc: h.AfterFunc, errors: h.Errors}
 	hd, err := startWrapped(ctx, herdrTerminal{h}, cfg, spec)
 	if err != nil {
 		return nil, err

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -74,6 +75,10 @@ type wrapperConfig struct {
 	startTimeout time.Duration // how long Start waits for the pid file
 	grace        time.Duration // how long Wait waits for the exit file once the wrapper is gone
 	pgrun        []string      // argv prefix that starts the worker in a new process group; empty = pgrunPrefix's default
+
+	keepFailed time.Duration               // how long a failed worker's window stays open; 0 = close at once
+	afterFunc  func(time.Duration, func()) // schedules the delayed close; nil = time.AfterFunc
+	errors     io.Writer                   // receives errors of delayed closes; nil = os.Stderr
 }
 
 // startWrapped writes the wrapper for spec, runs it in a new window of term and waits for
@@ -259,6 +264,34 @@ func (h *wrapperHandle) closeWindow() error {
 	return h.closeErr
 }
 
+// releaseWindow closes the window of a worker that has ended. With keepFailed set, the
+// window of a failed worker that nobody stopped through Kill is closed later by a timer
+// instead; an error of that close has no caller left, so it goes to the error sink.
+func (h *wrapperHandle) releaseWindow(failed bool) error {
+	h.mu.Lock()
+	killed := h.killed
+	h.mu.Unlock()
+	if !failed || killed || h.cfg.keepFailed <= 0 {
+		return h.closeWindow()
+	}
+	after := h.cfg.afterFunc
+	if after == nil {
+		after = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	}
+	after(h.cfg.keepFailed, func() {
+		err := h.closeWindow()
+		if err == nil {
+			return
+		}
+		sink := h.cfg.errors
+		if sink == nil {
+			sink = os.Stderr
+		}
+		fmt.Fprintf(sink, "%s host: close %s, kept open after its worker failed: %v; close %s by hand if it is still open\n", h.kind, h.win, err, h.win)
+	})
+	return nil
+}
+
 // waitPID waits for the pid file, which holds the pid of the worker's process group leader
 // and the pid of the outer wrapper that writes the exit file.
 func (h *wrapperHandle) waitPID() (pid, wrapperPID int, err error) {
@@ -361,7 +394,7 @@ func (h *wrapperHandle) Wait() (Exit, error) {
 			ex.Signaled = true
 			err = errors.Join(err, KillGroup(h.pid))
 		}
-		return ex, errors.Join(err, h.closeWindow())
+		return ex, errors.Join(err, h.releaseWindow(lost))
 	}
 	// Kill anything the process left running in its group (e.g. backgrounded children).
 	killErr := KillGroup(h.pid)
@@ -370,7 +403,7 @@ func (h *wrapperHandle) Wait() (Exit, error) {
 	killErr = errors.Join(killErr, h.killErr)
 	h.mu.Unlock()
 	ex := Exit{Code: code, Signaled: code > 128 || killed}
-	return ex, errors.Join(killErr, h.closeWindow())
+	return ex, errors.Join(killErr, h.releaseWindow(code != 0))
 }
 
 // Kill stops the process group, waits for the wrapper to record the exit and closes the
