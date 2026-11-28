@@ -991,7 +991,7 @@ mill tui
 | `r` | retry the selected task |
 | `l` | show the task's log |
 | `p` | pause: interrupt the latest `mill run` or `mill keep` started from the TUI |
-| `o` | open the task's worktree (in a tmux window under tmux, otherwise in a shell) |
+| `o` | open the task's worktree (a herdr pane inside herdr, else a tmux window when the host is tmux, else a shell) |
 | `n` | plan a new goal (Goals) |
 | `R` | run the selected goal (Goals) |
 | `k` | keep the goal mergeable (`mill keep --watch`); press again to stop (Goals) |
@@ -1062,23 +1062,39 @@ tmux) each worker runs in its own new detached tmux window, and each gate comman
   current. Use `tmux attach -t mill-<repo>` (or switch to the window by name) to watch workers.
 - `mill doctor` reports a `host` line with the choice (`auto → tmux`, `tmux`, and so on), the
   tmux version (from `tmux -V`) and the session workers open in, for example
-  `tmux (tmux 3.4, session mill-myrepo)`. A missing tmux binary or a session that cannot be
-  found or created is an error that names the fix.
+  `tmux (tmux 3.4, session mill-myrepo)`. Doctor creates no session: outside tmux it only reports
+  the name `mill-<repo>`, without checking that the session exists. It reports an error that names
+  the fix when `tmux -V` fails or prints nothing, or when it cannot find the current session inside
+  tmux. A missing tmux binary is an error only with `host.kind = "tmux"`; under `auto` mill falls
+  back to exec.
 - Crash recovery: when mill is killed, its workers' windows are left open. The next
   `mill run` or `mill task run` (the one that runs crash recovery) closes the recorded window
   of each worker whose mill process is dead, and prints `closed tmux window <window> of <task>
-  attempt <n> <role>` for each one it closed. A window that is already gone prints nothing; one
-  that cannot be closed fails the recovery and names the window to close by hand.
-- The TUI's `o` opens the task's worktree in a new tmux window when the host is tmux. Inside
-  tmux the window opens in the current session; outside tmux it opens in the running tmux
-  server, so mill prints the `tmux attach` hint to see it.
+  attempt <n> <role>` for each one it closed. Other windows left by a dead mill (a gate command's,
+  or a failed worker's kept by `host.keep_failed`) print as `closed tmux window <window> of <run
+  directory> (mill <pid> is gone)`. A window that is already gone prints nothing; one that cannot
+  be closed fails the recovery and names the window to close by hand.
+- The TUI's `o` opens the task's worktree in a new tmux window when the host is tmux. herdr takes
+  precedence: inside herdr, `o` opens a herdr pane instead. Inside tmux the window opens in the
+  current session; outside tmux it opens in the running tmux server (it fails if there is none),
+  so mill prints the `tmux attach` hint to see it.
 
 **`host.keep_failed`.** `host.keep_failed` (a duration such as `"5m"`, default `"0s"`) is how long
-the window (or herdr tab) of a failed worker stays open after it ends, so you can read its output.
-A worker fails when it exits non-zero or its attempt is lost. Successful and killed workers close
-at once, and `0s` closes a failed worker at once too. The delay runs in the mill process that
-started the worker; if mill is killed before the delay ends, the window is left for crash
-recovery to close. A negative value is an error. The same setting applies to herdr tabs.
+mill waits before it closes the tmux window (or herdr tab) of a failed worker, so you can read its
+output. A worker fails when it exits non-zero or its attempt is lost. Successful and killed workers
+close at once, and `0s` closes a failed worker at once too. A negative value is an error. The same
+setting applies to herdr tabs.
+
+With tmux, `keep_failed` has a visible effect only when tmux's `remain-on-exit` option is on:
+otherwise tmux itself closes the window as soon as the worker ends, and mill does not change the
+option. To enable it, add `set-option -wg remain-on-exit on` to `~/.tmux.conf`, or run
+`tmux set-option -wg remain-on-exit on` against a running server. This applies to all your tmux
+windows, not only mill's.
+
+The delay runs in the mill process that started the worker, and mill does not wait for it before it
+exits. If mill exits before the delay ends, whether normally (for example `mill task run` right
+after a failure) or because it was killed, the window or tab stays open until the crash recovery of
+a later `mill run` or `mill task run` closes it.
 
 When the herdr host starts a process, it waits up to 30 seconds for the wrapper to write the
 process's pid file. A start that does not get one in time fails. For gate commands the gate
