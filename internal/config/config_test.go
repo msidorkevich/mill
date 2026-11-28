@@ -113,7 +113,7 @@ func TestValidationErrors(t *testing.T) {
 		{"start_children_on", `start_children_on = "merged"`, "start_children_on"},
 		{"runner kind", "[runner]\nkind = \"gpt\"", "runner.kind"},
 		{"fake needs script", "[runner]\nkind = \"fake\"", "fake_script"},
-		{"host kind", "[host]\nkind = \"tmux\"", "host.kind"},
+		{"host kind", "[host]\nkind = \"screen\"", "host.kind"},
 		{"count", "[budget]\ncount = \"some\"", "budget.count"},
 		{"negative usd", "[budget.task]\nusd = -1.0", "budget.task"},
 		{"negative size tokens", "[budget.size.S]\nattempt = { tokens = -5 }", "budget.size.S.attempt"},
@@ -753,6 +753,74 @@ func TestConfigStatusLoadsFromConfigFile(t *testing.T) {
 	}
 	if cfg.Status != "x" || cfg.StatusInterval.Duration != 30*time.Second || !cfg.CIFix {
 		t.Fatalf("status, status_interval, ci_fix = %q, %v, %v; want x, 30s, true", cfg.Status, cfg.StatusInterval, cfg.CIFix)
+	}
+}
+
+func TestHostKindTmuxIsAccepted(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("[host]\nkind = \"tmux\"\n")
+	if err != nil || cfg.Host.Kind != "tmux" {
+		t.Fatalf("host.kind = tmux: kind %q, err %v", cfg.Host.Kind, err)
+	}
+}
+
+func TestUnknownHostKindErrorListsTmux(t *testing.T) {
+	t.Parallel()
+	_, err := Parse("[host]\nkind = \"screen\"\n")
+	if err == nil || !strings.Contains(err.Error(), "host.kind") || !strings.Contains(err.Error(), "tmux") {
+		t.Fatalf("err = %v, want a host.kind error listing tmux", err)
+	}
+}
+
+func TestHostTmuxBinAndKeepFailedDefaults(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host.TmuxBin != "tmux" {
+		t.Fatalf("host.tmux_bin = %q, want tmux", cfg.Host.TmuxBin)
+	}
+	if cfg.Host.KeepFailed.Duration != 0 {
+		t.Fatalf("host.keep_failed = %v, want 0", cfg.Host.KeepFailed)
+	}
+}
+
+func TestHostKeepFailedParses(t *testing.T) {
+	t.Parallel()
+	cfg, err := Parse("[host]\nkeep_failed = \"5m\"\ntmux_bin = \"/opt/tmux\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Host.KeepFailed.Duration != 5*time.Minute || cfg.Host.TmuxBin != "/opt/tmux" {
+		t.Fatalf("keep_failed = %v, tmux_bin = %q; want 5m, /opt/tmux", cfg.Host.KeepFailed, cfg.Host.TmuxBin)
+	}
+}
+
+func TestHostKeepFailedInvalidIsRejected(t *testing.T) {
+	t.Parallel()
+	for _, v := range []string{"soon", "5"} {
+		_, err := Parse("[host]\nkeep_failed = \"" + v + "\"\n")
+		if err == nil || !strings.Contains(err.Error(), "host.keep_failed") {
+			t.Errorf("keep_failed = %q: err = %v, want a host.keep_failed error", v, err)
+		}
+	}
+}
+
+func TestHostKeepFailedNegativeIsRejected(t *testing.T) {
+	t.Parallel()
+	_, err := Parse("[host]\nkeep_failed = \"-1m\"\n")
+	if err == nil || !strings.Contains(err.Error(), "host.keep_failed must be >= 0") {
+		t.Fatalf("keep_failed = -1m: err = %v, want a host.keep_failed >= 0 error", err)
+	}
+}
+
+func TestDefaultTOMLDocumentsHostKeys(t *testing.T) {
+	t.Parallel()
+	for _, s := range []string{"tmux", "# tmux_bin = \"tmux\"", "# keep_failed = \"0s\""} {
+		if !strings.Contains(DefaultTOML, s) {
+			t.Errorf("DefaultTOML lacks %q", s)
+		}
 	}
 }
 
