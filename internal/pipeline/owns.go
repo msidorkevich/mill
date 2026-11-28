@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/msidorkevich/mill/internal/plan"
 	"github.com/msidorkevich/mill/internal/prompt"
@@ -100,8 +101,9 @@ func (p *Pipeline) dependencies(ctx context.Context, id string) (map[string]bool
 // out-of-scope file to the ids of those tasks, in plan order. changed lists the files
 // outside t's owns that t's attempt changed: a finding about one of them that a not yet
 // landed dependency of t owns stays with t, since t's edit to it was exempt from the owns
-// check and only the verifier can still reject it.
-func (p *Pipeline) splitOutOfScope(ctx context.Context, t store.Task, findings []prompt.Finding, changed []string) (in, out []prompt.Finding, owners map[string][]string, err error) {
+// check and only the verifier can still reject it. A finding about a file one of requests
+// names also stays with t: the request made it part of t's scope.
+func (p *Pipeline) splitOutOfScope(ctx context.Context, t store.Task, findings []prompt.Finding, changed []string, requests []prompt.Finding) (in, out []prompt.Finding, owners map[string][]string, err error) {
 	owners = map[string][]string{}
 	if t.GoalID == "" {
 		return findings, nil, owners, nil
@@ -121,7 +123,7 @@ func (p *Pipeline) splitOutOfScope(ctx context.Context, t store.Task, findings [
 		touched[f] = true
 	}
 	for _, f := range findings {
-		if f.File == "" || len(plan.OutsideOwns(t.Owns, []string{f.File})) == 0 {
+		if f.File == "" || len(plan.OutsideOwns(t.Owns, []string{f.File})) == 0 || len(requestedFiles(requests, []string{f.File})) > 0 {
 			in = append(in, f)
 			continue
 		}
@@ -160,4 +162,28 @@ func ownsFile(s store.Task, file string) bool {
 		}
 	}
 	return false
+}
+
+// requestedFiles returns the files among files that one of requests names, in input order.
+// A request's File may list several files separated by ", ", as merge-check findings do;
+// each is matched as an owns pattern, so a plain path matches only itself.
+func requestedFiles(requests []prompt.Finding, files []string) []string {
+	var names []string
+	for _, r := range requests {
+		for _, n := range strings.Split(r.File, ", ") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	var out []string
+	for _, f := range files {
+		for _, n := range names {
+			if plan.MatchOwns(n, f) {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out
 }
