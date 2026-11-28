@@ -1574,24 +1574,67 @@ test binary did not provide `__pgrun`; and a README detail.
 
 ### Found while running and publishing `g26`
 
-- [ ] **44. A hook timeout that expires while the hook starts is reported as a failure.**
+- [x] **44. A hook timeout that expires while the hook starts is reported as a failure.**
       `internal/hook/run.go`: with a tight timeout the deadline can pass during `cmd.Start`, and
       the run is recorded as "start sh -c: context deadline exceeded" (exit -1, not timed out).
       `TestRunTimeoutKillsHook` and `TestCheckReportsFailureAndTimeout` (5ms timeouts) are flaky
       under load and turned PR #225's macOS CI red. Count a deadline during start as a timeout,
       and give the tests a timeout the start cannot exceed.
-- [ ] **45. "Validation failed" when merging a child PR right after its parent.** When the
+      Done in `g27` (`hook-start-timeout`): a deadline before or during start is a timeout;
+      the tight-timeout tests got bounds the start cannot exceed.
+- [x] **45. "Validation failed" when merging a child PR right after its parent.** When the
       parent merges and GitHub deletes its branch, the child PR is retargeted to `master`; a
       merge clicked during the switch fails. The README's stacking advice could say to refresh
       the child PR before merging it.
-- [ ] **46. Parallel `git worktree add` races.** PR #226's macOS CI:
+      Done in `g27` (`readme-locks-flaky-retarget`): the README says to refresh the child PR
+      before merging it.
+- [x] **46. Parallel `git worktree add` races.** PR #226's macOS CI:
       `TestApproveGoalNoCombinedPublishesAll` failed when sibling tasks prepared their worktrees
       at once: `git worktree add ... fatal: could not open '.git/worktrees/c/locked'`. Concurrent
       `worktree add`/`remove`/`prune` in one repository race on `.git/worktrees`; serialize them
       in `internal/gitx` (a per-repository lock), in tests and in real runs.
-- [ ] **47. Two git processes in one worktree during a restack.** PR #226's Linux CI:
+      Done in `g27` (`worktree-admin-lock`): worktree add/remove/prune hold a per-repository
+      lock, in-process and through flock across processes.
+- [x] **47. Two git processes in one worktree during a restack.** PR #226's Linux CI:
       `TestPipelinedRestackKeepChildOfFixedParentIsRestackedOntoFix` failed with "Unable to create
       '.git/worktrees/t3/index.lock': File exists" during the keeper's rebase. Find what else runs
       git in that worktree at the same time (or a lock left by an earlier command) and make the
       keeper wait for it or own the worktree exclusively.
+      Done in `g27` (`keeper-restack-exclusive`, `callers-hold-worktree-lock`): the cause was
+      the keeper's own cancelled gate SIGKILLing `git status`; the gate's git reads are
+      shielded from the cancel, every rebase/merge/commit holds the worktree's lock, and a
+      stale index.lock older than a minute is removed with a note.
 
+## Races and flaky tests: done (goal `g27` landed 2026-11-28, $7.69)
+
+Seven tasks (PRs #229–#235), planned at $4.81–$12.47; planning cost $0.52. Hook deadlines
+during start are timeouts. Worktree administration is serialized per repository, in-process and
+across processes (`flock`). A task worktree is held exclusively while mill rebases, merges or
+commits in it; a stale `index.lock` is cleared with a note. The keeper task found the cause of
+the `index.lock` failure: its own cancelled gate killed `git status` with SIGKILL, which leaves
+the lock (255 of 2000 random cancels in an experiment); the CI failure did not reproduce locally
+(0/50 before and after). CI gained a `flaky` job (`make flaky`: `go test -count=3 -race ./...`
+on Linux).
+
+Before publishing, draft probe PRs ran CI over the verified branches. The first found eight
+data races in the hooks tests' fake API servers and a new gitx lock test whose 50 ms bound
+included starting git (the same mistake as item 44). Sending `ci-flaky-job` back with those
+findings was undone: the verifier called the fixes out of scope of the task's spec and the next
+attempt reverted them (item 49). After the spec, owns and acceptance were extended with
+`mill task edit`, the fixes stayed and the second probe was green on Linux, macOS and `flaky`.
+
+### Found while running and publishing `g27`
+
+- [ ] **48. Cancelled git commands are killed with SIGKILL.** `internal/gitx` runs git through
+      `exec.CommandContext`, which SIGKILLs on cancel; git then leaves lock files
+      (`index.lock`, `HEAD.lock`, ref locks) behind. Send SIGTERM (git removes its locks on
+      signals) with a short `WaitDelay` before the hard kill, for every git mill runs.
+- [ ] **49. The verifier overrides operator findings.** Findings from `mill review changes`
+      reach the implementer, but the verifier judges the change against the original spec and
+      calls the requested fixes out of scope, so the next attempt reverts them. Operator
+      findings should become part of the task's scope for the verifier (and widen the owns
+      check), or `review changes` should offer to extend the spec.
+- [ ] **50. Probing CI before publishing is manual.** Twice a draft "do not merge" PR caught
+      problems the local gate could not (Linux, races on slow runners). Consider a
+      `mill review approve --goal --ci-probe` that pushes the combined branch, opens a draft PR
+      through a hook, waits for the status hook and publishes only when it is green.
