@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -39,6 +40,16 @@ type Options struct {
 	Edit     EditFunc                     // runs $EDITOR on a file; defaults to tea.ExecProcess
 	// Herdr runs herdr with args and captures it; defaults to exec'ing herdr.
 	Herdr func(ctx context.Context, args []string) (stdout, stderr string, code int, err error)
+	// HostKind is the host mill selected for agent processes: "exec", "herdr" or "tmux". Outside
+	// herdr, o opens the worktree in a tmux window when it is "tmux"; otherwise in a shell.
+	HostKind string
+	// HostErr is why no host could be selected, if so. The TUI still opens, shows the error in
+	// the output panel, and o opens a shell.
+	HostErr error
+	// TmuxBin is the tmux binary (host.tmux_bin); "" = "tmux".
+	TmuxBin string
+	// Tmux runs tmux with args and captures it; defaults to exec'ing TmuxBin.
+	Tmux func(ctx context.Context, args []string) (stdout, stderr string, code int, err error)
 	// ShellCmd builds the interactive shell command for o outside herdr; defaults to exec.Command.
 	ShellCmd func(shell, dir string) *exec.Cmd
 	// TempDir holds the comment and spec files the review actions write; "" = os.TempDir().
@@ -90,6 +101,15 @@ func New(opts Options) *Model {
 	if opts.Herdr == nil {
 		opts.Herdr = execHerdr
 	}
+	if opts.TmuxBin == "" {
+		opts.TmuxBin = "tmux"
+	}
+	if opts.Tmux == nil {
+		bin := opts.TmuxBin
+		opts.Tmux = func(ctx context.Context, args []string) (string, string, int, error) {
+			return runCapture(ctx, bin, args)
+		}
+	}
 	if opts.ShellCmd == nil {
 		opts.ShellCmd = func(shell, dir string) *exec.Cmd {
 			c := exec.Command(shell)
@@ -98,6 +118,13 @@ func New(opts Options) *Model {
 		}
 	}
 	cmds := &commands{runner: opts.Runner}
+	if opts.HostErr != nil {
+		// Wrapped: the panel truncates long lines, which would cut off what to do next.
+		text := lipgloss.NewStyle().Width(78).Render(fmt.Sprintf("no host selected (o opens a shell): %v", opts.HostErr))
+		for _, l := range strings.Split(text, "\n") {
+			cmds.note("%s", strings.TrimRight(l, " "))
+		}
+	}
 	acts := newTaskActions(cmds, opts.Getenv, opts.Edit, opts.TempDir)
 	detail := newDetailView(acts, opts.Store)
 	return &Model{
