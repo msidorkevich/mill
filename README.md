@@ -272,7 +272,7 @@ task's `owns` (a task with empty `owns` is never restricted):
 
 **Files named in requests.** A file outside `owns` that a request names (see `mill review changes`
 above) is exempt from the owns refusal under `warn` and `enforce`: it is recorded in the
-`owns-outside` event with the request in `requested`, and the attempt is not refused for it.
+`owns-outside` event, listed under `requested`, and the attempt is not refused for it.
 
 **Files owned by a dependency.** A task's dependencies and dependents, direct or transitive, do
 not count as its siblings (below), so editing a file they own does not by itself fail the attempt.
