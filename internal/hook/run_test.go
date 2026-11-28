@@ -246,7 +246,7 @@ func TestRunTimeoutKillsHook(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	cfg := hookConfig()
-	cfg.HookTimeout = config.Duration{Duration: 5 * time.Millisecond}
+	cfg.HookTimeout = config.Duration{Duration: 300 * time.Millisecond}
 	cfg.OnPublish = "sleep 5"
 
 	start := time.Now()
@@ -260,7 +260,7 @@ func TestRunTimeoutKillsHook(t *testing.T) {
 	if !res.TimedOut || res.ExitCode != -1 {
 		t.Errorf("result = %+v, want timed out with exit -1", res)
 	}
-	if !strings.HasPrefix(f.stderr.String(), "hook on_publish for g1/a failed (timed out after 5ms): ") ||
+	if !strings.HasPrefix(f.stderr.String(), "hook on_publish for g1/a failed (timed out after 300ms): ") ||
 		!strings.HasSuffix(f.stderr.String(), "; re-run it with `mill hook run g1/a`\n") {
 		t.Errorf("stderr = %q", f.stderr.String())
 	}
@@ -366,8 +366,64 @@ func TestCheckReportsFailureAndTimeout(t *testing.T) {
 		t.Errorf("Check = %q, %v; want exit 2 error with tail nope", tail, err)
 	}
 
-	cfg.HookTimeout = config.Duration{Duration: 5 * time.Millisecond}
-	if _, err := Check(context.Background(), cfg, f.root, "sleep 5"); err == nil || !strings.Contains(err.Error(), "timed out") {
+	cfg.HookTimeout = config.Duration{Duration: 300 * time.Millisecond}
+	start := time.Now()
+	if _, err := Check(context.Background(), cfg, f.root, "sleep 5"); err == nil || !strings.Contains(err.Error(), "timed out after 300ms") {
 		t.Errorf("Check of a slow hook = %v, want timed out", err)
+	}
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Errorf("Check took %s; the hook was not killed at the timeout", elapsed)
+	}
+}
+
+func TestRunDeadlinePassedBeforeStartIsTimedOut(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	cfg := hookConfig()
+	cfg.OnPublish = "touch '" + f.path("ran") + "'"
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	res, err := f.runner(cfg, 0).Run(ctx, "publish", "g1", "g1/a", struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TimedOut || strings.Contains(res.Tail, "start sh -c") {
+		t.Errorf("result = %+v, want timed out without a start failure", res)
+	}
+	if msg := f.stderr.String(); !strings.Contains(msg, "timed out after 10s") || strings.Contains(msg, "start sh -c") {
+		t.Errorf("stderr = %q", msg)
+	}
+	_, d := onlyEvent(t, f.st)
+	if !d.TimedOut || strings.Contains(d.OutputTail, "start sh -c") {
+		t.Errorf("event data = %+v", d)
+	}
+	if _, err := os.Stat(f.path("ran")); err == nil {
+		t.Error("the hook ran after its deadline")
+	}
+
+	tail, err := Check(ctx, cfg, f.root, "true")
+	if err == nil || !strings.Contains(err.Error(), "timed out after 10s") || strings.Contains(tail, "start sh -c") {
+		t.Errorf("Check = %q, %v; want timed out", tail, err)
+	}
+}
+
+func TestStartFailureWithoutDeadlineIsNotTimedOut(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	cfg := hookConfig()
+	cfg.OnPublish = "true"
+	f.root = f.path("missing")
+
+	res, err := f.runner(cfg, 0).Run(context.Background(), "publish", "g1", "g1/a", struct{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TimedOut || res.ExitCode != -1 || !strings.Contains(res.Tail, "start sh -c") {
+		t.Errorf("result = %+v, want a start failure", res)
+	}
+	_, d := onlyEvent(t, f.st)
+	if d.TimedOut || d.ExitCode != -1 {
+		t.Errorf("event data = %+v", d)
 	}
 }
