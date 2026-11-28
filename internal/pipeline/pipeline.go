@@ -197,6 +197,10 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 	if err != nil {
 		return Outcome{}, err
 	}
+	requests, err := ScopeRequests(ctx, p.Store, t.ID)
+	if err != nil {
+		return Outcome{}, err
+	}
 	gateCmds := append([]string{p.Cfg.CheckCmd}, t.Checks...)
 	limits := p.Cfg.AttemptBudget(t.Size)
 	out := Outcome{}
@@ -219,6 +223,12 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		out.Attempts++
 		logDir := filepath.Join(p.Paths.Runs, t.ID, fmt.Sprintf("a%d", n))
 		transient = false
+		// A request recorded while the run was going joins the scope of the next attempt.
+		if n > prev+1 {
+			if requests, err = ScopeRequests(ctx, p.Store, t.ID); err != nil {
+				return out, err
+			}
+		}
 
 		// An attempt after a failed gate waits for an agent slot.
 		if err := slot.Acquire(ctx); err != nil {
@@ -260,7 +270,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		implPrompt := prompt.Implementer(prompt.ImplementerInput{
-			Task: t.Spec, CheckCmd: p.Cfg.CheckCmd, RunsCheck: p.Cfg.ImplementerRunsCheck, Attempt: n - prev, MaxAttempts: p.Cfg.MaxAttempts, Findings: findings,
+			Task: t.Spec, CheckCmd: p.Cfg.CheckCmd, RunsCheck: p.Cfg.ImplementerRunsCheck, Attempt: n - prev, MaxAttempts: p.Cfg.MaxAttempts, Findings: findings, Requests: requests,
 		})
 		ar, err := p.agent(ctx, t, n, runner.RoleImplementer, implModel, implWhy, implPrompt, prompt.ImplementerSchema, ImplementerTools, limits, br.Worktree, logDir)
 		if err != nil {
@@ -496,7 +506,11 @@ func (p *Pipeline) verifyRun(ctx context.Context, t store.Task, v verifyStep, ou
 	if err != nil {
 		return out, nil, true, false, err
 	}
-	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky, Siblings: sibs, BaseChanged: bc.Files, BaseChangedStat: bc.Stat})
+	requests, err := ScopeRequests(ctx, p.Store, t.ID)
+	if err != nil {
+		return out, nil, true, false, err
+	}
+	verPrompt := prompt.Verifier(prompt.VerifierInput{Task: t.Spec, BaseSHA: v.startSHA, Diff: diff, DiffStat: stat, Gate: v.gate, OutsideOwns: v.outside, Flaky: v.flaky, Siblings: sibs, BaseChanged: bc.Files, BaseChangedStat: bc.Stat, Requests: requests})
 	verModel, verWhy := p.verifierModel(v.implModel)
 	vr, err := p.agent(ctx, t, n, runner.RoleVerifier, verModel, verWhy, verPrompt, prompt.VerifierSchema, VerifierTools, v.limits, v.br.Worktree, v.logDir)
 	if err != nil {
