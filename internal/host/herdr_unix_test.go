@@ -310,7 +310,7 @@ func TestSelect(t *testing.T) {
 		{"herdr", env("1"), missing, "", "", `set host.kind = "auto" or "exec"`},
 		{"bogus", env("1"), found, "", "", "unknown host.kind"},
 	} {
-		h, desc, err := Select(tc.kind, tc.getenv, tc.lookPath)
+		h, desc, err := Select(tc.kind, Settings{}, tc.getenv, tc.lookPath)
 		if tc.err != "" {
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
 				t.Errorf("Select(%q): err = %v, want %q", tc.kind, err, tc.err)

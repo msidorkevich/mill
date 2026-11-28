@@ -403,7 +403,9 @@ func newPipeline(env Env, name string, paths project.Paths, cfg config.Config, h
 	if hostKind == "" {
 		hostKind = cfg.Host.Kind
 	}
-	h, _, err := host.Select(hostKind, env.getenv, env.lookPath)
+	h, _, err := host.Select(hostKind, host.Settings{
+		TmuxBin: cfg.Host.TmuxBin, KeepFailed: cfg.Host.KeepFailed.Duration, RepoRoot: paths.Root, Out: env.Stderr,
+	}, env.getenv, env.lookPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1182,14 +1184,14 @@ func insideDir(pid int, dir string) bool {
 
 // hostFlagVar registers --host, which overrides host.kind for one command.
 func hostFlagVar(fs *flag.FlagSet) *string {
-	return fs.String("host", "", "host for agent processes: auto, exec or herdr (default: host.kind from the config)")
+	return fs.String("host", "", "host for agent processes: auto, exec, herdr or tmux (default: host.kind from the config)")
 }
 
 func validHostFlag(env Env, name, v string) bool {
 	switch v {
-	case "", "auto", "exec", "herdr":
+	case "", "auto", "exec", "herdr", "tmux":
 		return true
 	}
-	fmt.Fprintf(env.Stderr, "mill %s: --host must be auto, exec or herdr, got %q\n", name, v)
+	fmt.Fprintf(env.Stderr, "mill %s: --host must be auto, exec, herdr or tmux, got %q\n", name, v)
 	return false
 }
