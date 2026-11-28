@@ -1,0 +1,30 @@
+# Repeats the tests under the race detector (make flaky: go test -count=3 -race ./...) to expose
+# flaky tests and data races. It runs after every push to master and once a night, not on pull
+# requests, so a flaky test never turns a PR's checks red; a failure here is a finding to fix.
+name: flaky
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "17 3 * * *" # 03:17 UTC every night
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flaky-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flaky:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: make flaky
+        run: make flaky
