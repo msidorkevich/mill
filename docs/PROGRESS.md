@@ -1665,4 +1665,20 @@ attempt reverted them (item 49). After the spec, owns and acceptance were extend
       re-publishes without a local gate, and the status hook's result for the new head is the
       check (a failure starts the fixer with `ci_fix`, or appears for the operator). The
       identical-tree reuse stays. This repository would use "ci" with `ci_fix = true`.
+- [ ] **55. `TestTmuxWaitReportsClosedWindow` leaves files behind after it ends.** PR #254's
+      Linux CI: "TempDir RemoveAll cleanup: unlinkat .../001: directory not empty" (the same
+      test passed on #251–#253). The test closes the fake tmux window while the worker
+      (`sleep 30`) still runs; `Wait` reports the attempt lost, but something (the wrapper's outer
+      copy writing the exit file, or the worker itself) keeps writing into the attempt's log
+      directory after `Wait` returned. Find out which, and whether the tmux host (and the herdr
+      host, which shares the wrapper) kills the worker's process group and waits for the wrapper
+      before reporting a closed window as lost; a lost attempt must not leave a running worker
+      or a late write behind. Then make the test wait for the group to be gone. Also covers the
+      pipeline triage and resume tests that failed under load in `keep`'s restack gates
+      (`TestGoTestFailingInTwoOfThreeRunsIsTheOnlyFinding`,
+      `TestOverlappingGoTestFailuresAreARealFailureWithoutThirdRun`,
+      `TestRetryWithoutRecordedPassedGateStartsImplementer`,
+      `TestStartFailureBesideFlakyCommandTriagesOnlyTheCommandThatRan`), which started two paid
+      fixers for nothing: reproduce them under load (`GOMAXPROCS=2`, CPU burners, `-count=20`)
+      and record why each fails.
 
