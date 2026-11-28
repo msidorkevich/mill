@@ -58,7 +58,7 @@ func TestRecoveryKillsLeftoverWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -81,7 +81,7 @@ func TestRecoveryLeavesMismatchedAndMissingProcessesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -104,7 +104,7 @@ func TestRecoveryLeavesMismatchedAndMissingProcessesAlone(t *testing.T) {
 	if _, _, alive, _ := host.ProcessInfo(gone.Process.Pid); alive {
 		t.Skip("pid was reused immediately")
 	}
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{}); err != nil || out.Len() != 0 {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{}); err != nil || out.Len() != 0 {
 		t.Fatalf("err=%v output=%q", err, out.String())
 	}
 }
@@ -202,7 +202,7 @@ func TestRecoveryKillsChildrenOfExitedAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &buf, s, herdrTabs{}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &buf, s, hostWindows{}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -230,7 +230,7 @@ func TestRecoveryLeavesLeaderlessMemberOutsideWorktreeAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &buf, s, herdrTabs{}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &buf, s, hostWindows{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := syscall.Kill(child, 0); err != nil {
@@ -250,7 +250,7 @@ func TestRecoveryKillsNothingWithoutRecordedWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &buf, s, herdrTabs{}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &buf, s, hostWindows{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := syscall.Kill(child, 0); err != nil {

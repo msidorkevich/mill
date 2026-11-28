@@ -12,10 +12,57 @@ import (
 	"github.com/msidorkevich/mill/internal/store"
 )
 
-// herdrTabs is what recovery needs to close the herdr tabs killed workers left open.
-type herdrTabs struct {
-	runs     string                       // the project's runs directory; "" = no tabs to close
-	lookPath func(string) (string, error) // finds herdr; nil = exec.LookPath
+// hostWindows is what recovery needs to close the herdr tabs and tmux windows killed
+// workers left open.
+type hostWindows struct {
+	runs     string                       // the project's runs directory; "" = no windows to close
+	lookPath func(string) (string, error) // finds herdr and tmux; nil = exec.LookPath
+	tmuxBin  string                       // tmux executable (host.tmux_bin), looked up on PATH; "" = "tmux"
+}
+
+// recordedWindow is a worker window recorded in a run directory by either host: a herdr tab
+// or a tmux window.
+type recordedWindow struct {
+	file    string // the record's file
+	id      string // the tab or window id
+	millPID int    // the mill process that started the worker; 0 = not recorded
+	kind    string // "herdr tab" or "tmux window", for messages
+	bin     string // the executable that closes it, looked up through lookPath
+	// close closes the window with the resolved executable; closed=false and no error
+	// when the window no longer exists.
+	close func(bin string) (closed bool, err error)
+}
+
+func (w recordedWindow) describe() string { return w.kind + " " + w.id }
+
+// recordedWindows returns the herdr tabs and tmux windows recorded in dir.
+func recordedWindows(dir string, windows hostWindows) ([]recordedWindow, error) {
+	tabs, err := host.RecordedHerdrTabs(dir)
+	if err != nil {
+		return nil, err
+	}
+	tmuxWindows, err := host.RecordedTmuxWindows(dir)
+	if err != nil {
+		return nil, err
+	}
+	var recorded []recordedWindow
+	for _, t := range tabs {
+		recorded = append(recorded, recordedWindow{
+			file: t.File, id: t.Tab, millPID: t.MillPID, kind: "herdr tab", bin: "herdr",
+			close: func(bin string) (bool, error) { t.Bin = bin; return host.CloseHerdrTab(t) },
+		})
+	}
+	tmuxBin := windows.tmuxBin
+	if tmuxBin == "" {
+		tmuxBin = "tmux"
+	}
+	for _, w := range tmuxWindows {
+		recorded = append(recorded, recordedWindow{
+			file: w.File, id: w.Window, millPID: w.MillPID, kind: "tmux window", bin: tmuxBin,
+			close: func(bin string) (bool, error) { w.Bin = bin; return host.CloseTmuxWindow(w) },
+		})
+	}
+	return recorded, nil
 }
 
 // attemptRunDir is the attempt's run directory, derived like the pipeline's attempt LogDir.
@@ -23,42 +70,42 @@ func attemptRunDir(runs string, a store.Attempt) string {
 	return filepath.Join(runs, a.TaskID, fmt.Sprintf("a%d", a.N))
 }
 
-// closeRecordedTabs closes the herdr tabs recorded in the attempt's run directory and
-// prints a line for each tab it closed. A tab whose recorded mill process is still alive
-// belongs to a running mill and stays open. Tabs already gone, and herdr not being
-// installed, are not errors and print nothing.
-func closeRecordedTabs(out io.Writer, tabs herdrTabs, a store.Attempt) error {
-	if tabs.runs == "" {
+// closeRecordedTabs closes the herdr tabs and tmux windows recorded in the attempt's run
+// directory and prints a line for each one it closed. A window whose recorded mill process
+// is still alive belongs to a running mill and stays open. Windows already gone, and the
+// host's binary not being installed, are not errors and print nothing.
+func closeRecordedTabs(out io.Writer, windows hostWindows, a store.Attempt) error {
+	if windows.runs == "" {
 		return nil
 	}
 	what := fmt.Sprintf("%s attempt %d %s", a.TaskID, a.N, a.Role)
-	recorded, err := host.RecordedHerdrTabs(attemptRunDir(tabs.runs, a))
+	recorded, err := recordedWindows(attemptRunDir(windows.runs, a), windows)
 	if err != nil {
-		return fmt.Errorf("recover herdr tabs of %s: %w", what, err)
+		return fmt.Errorf("recover worker windows of %s: %w", what, err)
 	}
-	var orphaned []host.HerdrTab
-	for _, t := range recorded {
-		alive, err := millAlive(t)
+	var orphaned []recordedWindow
+	for _, w := range recorded {
+		alive, err := millAlive(w)
 		if err != nil {
-			return fmt.Errorf("recover herdr tabs of %s: %w", what, err)
+			return fmt.Errorf("recover worker windows of %s: %w", what, err)
 		}
 		if !alive {
-			orphaned = append(orphaned, t)
+			orphaned = append(orphaned, w)
 		}
 	}
-	return closeTabs(out, tabs, orphaned, func(host.HerdrTab) string { return what })
+	return closeWindows(out, windows, orphaned, func(recordedWindow) string { return what })
 }
 
-// closeOrphanedTabs closes every herdr tab recorded anywhere under the runs directory
-// (pipeline attempts, keeper, sync and combined-check dirs) whose recorded mill process is
-// gone, and prints a line for each tab it closed. Tab files without a mill pid are left to
-// closeRecordedTabs, which closes them only for a running attempt.
-func closeOrphanedTabs(out io.Writer, tabs herdrTabs) error {
-	if tabs.runs == "" {
+// closeOrphanedTabs closes every herdr tab and tmux window recorded anywhere under the runs
+// directory (pipeline attempts, keeper, sync and combined-check dirs) whose recorded mill
+// process is gone, and prints a line for each one it closed. Records without a mill pid are
+// left to closeRecordedTabs, which closes them only for a running attempt.
+func closeOrphanedTabs(out io.Writer, windows hostWindows) error {
+	if windows.runs == "" {
 		return nil
 	}
-	var orphaned []host.HerdrTab
-	err := filepath.WalkDir(tabs.runs, func(path string, d fs.DirEntry, err error) error {
+	var orphaned []recordedWindow
+	err := filepath.WalkDir(windows.runs, func(path string, d fs.DirEntry, err error) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			// No runs yet, or a run dir removed while recovery walks: nothing to close there.
 			return nil
@@ -69,77 +116,86 @@ func closeOrphanedTabs(out io.Writer, tabs herdrTabs) error {
 		if !d.IsDir() {
 			return nil
 		}
-		recorded, err := host.RecordedHerdrTabs(path)
+		recorded, err := recordedWindows(path, windows)
 		if err != nil {
 			return err
 		}
-		for _, t := range recorded {
-			if t.MillPID <= 0 {
+		for _, w := range recorded {
+			if w.millPID <= 0 {
 				continue
 			}
-			alive, err := millAlive(t)
+			alive, err := millAlive(w)
 			if err != nil {
 				return err
 			}
 			if !alive {
-				orphaned = append(orphaned, t)
+				orphaned = append(orphaned, w)
 			}
 		}
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("recover orphaned herdr tabs under %s: %w", tabs.runs, err)
+		return fmt.Errorf("recover orphaned worker windows under %s: %w", windows.runs, err)
 	}
-	return closeTabs(out, tabs, orphaned, func(t host.HerdrTab) string {
-		rel, err := filepath.Rel(tabs.runs, filepath.Dir(t.File))
+	return closeWindows(out, windows, orphaned, func(w recordedWindow) string {
+		rel, err := filepath.Rel(windows.runs, filepath.Dir(w.file))
 		if err != nil {
-			rel = filepath.Dir(t.File)
+			rel = filepath.Dir(w.file)
 		}
-		return fmt.Sprintf("%s (mill %d is gone)", rel, t.MillPID)
+		return fmt.Sprintf("%s (mill %d is gone)", rel, w.millPID)
 	})
 }
 
-// millAlive reports whether the mill process that recorded t is still running. A tab file
+// millAlive reports whether the mill process that recorded w is still running. A record
 // without a mill pid has no live owner.
-func millAlive(t host.HerdrTab) (bool, error) {
-	if t.MillPID <= 0 {
+func millAlive(w recordedWindow) (bool, error) {
+	if w.millPID <= 0 {
 		return false, nil
 	}
-	_, _, alive, err := host.ProcessInfo(t.MillPID)
+	_, _, alive, err := host.ProcessInfo(w.millPID)
 	if err != nil {
-		return false, fmt.Errorf("check mill process %d of herdr tab %s (%s): %w; close the tab by hand if its mill is gone", t.MillPID, t.Tab, t.File, err)
+		return false, fmt.Errorf("check mill process %d of %s (%s): %w; close the %s by hand if its mill is gone", w.millPID, w.describe(), w.file, err, w.kind)
 	}
 	return alive, nil
 }
 
-// closeTabs closes each tab, removes its tab file and prints a line naming it with what(t)
-// for each tab it closed. herdr not being installed closes nothing and keeps the files.
-func closeTabs(out io.Writer, tabs herdrTabs, recorded []host.HerdrTab, what func(host.HerdrTab) string) error {
+// closeWindows closes each window, removes its record and prints a line naming it with
+// what(w) for each window it closed. A host binary that is not installed closes nothing of
+// that host and keeps its files.
+func closeWindows(out io.Writer, windows hostWindows, recorded []recordedWindow, what func(recordedWindow) string) error {
 	if len(recorded) == 0 {
 		return nil
 	}
-	lookPath := tabs.lookPath
+	lookPath := windows.lookPath
 	if lookPath == nil {
 		lookPath = Env{}.lookPath
 	}
-	bin, err := lookPath("herdr")
-	if err != nil {
-		// herdr is not installed: there is no tab to close, and the files stay for a later
-		// recovery that has herdr.
-		return nil
-	}
-	for _, t := range recorded {
-		t.Bin = bin
-		closed, err := host.CloseHerdrTab(t)
-		if err != nil {
-			return fmt.Errorf("recover herdr tabs of %s: %w", what(t), err)
+	bins := map[string]string{} // executable name -> path; "" = not installed
+	for _, w := range recorded {
+		bin, looked := bins[w.bin]
+		if !looked {
+			// A lookup failure means the binary is not installed: there is no window to
+			// close, and the files stay for a later recovery that has it.
+			path, err := lookPath(w.bin)
+			if err != nil {
+				path = ""
+			}
+			bin, bins[w.bin] = path, path
 		}
-		// The tab is gone either way: drop its file so a later tab reusing the id is safe.
-		if err := os.Remove(t.File); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove tab file %s of %s: %w; delete it by hand", t.File, what(t), err)
+		if bin == "" {
+			continue
+		}
+		closed, err := w.close(bin)
+		if err != nil {
+			return fmt.Errorf("recover %ss of %s: %w", w.kind, what(w), err)
+		}
+		// The window is gone either way: drop its record so a later window reusing the id
+		// is safe.
+		if err := os.Remove(w.file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s file %s of %s: %w; delete it by hand", w.kind, w.file, what(w), err)
 		}
 		if closed {
-			fmt.Fprintf(out, "closed herdr tab %s of %s\n", t.Tab, what(t))
+			fmt.Fprintf(out, "closed %s of %s\n", w.describe(), what(w))
 		}
 	}
 	return nil

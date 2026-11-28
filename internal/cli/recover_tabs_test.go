@@ -38,7 +38,7 @@ func TestRecoverClosesRecordedHerdrTab(t *testing.T) {
 	runs, file := recordTab(t, `{"tab":"w8:t2","workspace":"w8"}`)
 	lookPath, log := fakeHerdr(t)
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: runs, lookPath: lookPath}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{runs: runs, lookPath: lookPath}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := out.String(), "closed herdr tab w8:t2 of t1 attempt 2 implementer\n"; got != want {
@@ -59,7 +59,7 @@ func TestRecoverWithHerdrUnavailablePrintsNothing(t *testing.T) {
 	runs, file := recordTab(t, `{"tab":"w8:t2","workspace":"w8"}`)
 	noHerdr := func(string) (string, error) { return "", errors.New("not found") }
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: runs, lookPath: noHerdr}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{runs: runs, lookPath: noHerdr}); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -80,7 +80,7 @@ func TestRecoverWithHerdrTabAlreadyGonePrintsNothing(t *testing.T) {
 	testenv.WriteExecutable(t, bin, []byte(script))
 	lookPath := func(string) (string, error) { return bin, nil }
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: runs, lookPath: lookPath}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{runs: runs, lookPath: lookPath}); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -96,7 +96,7 @@ func TestRecoverWithoutRecordedHerdrTabsCallsNoHerdr(t *testing.T) {
 	s, _ := recoverStore(t)
 	lookPath, log := fakeHerdr(t)
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: filepath.Join(t.TempDir(), "runs"), lookPath: lookPath}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{runs: filepath.Join(t.TempDir(), "runs"), lookPath: lookPath}); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -152,7 +152,7 @@ func TestRecoverTabsClosesTabsOfDeadMillInEveryRunDir(t *testing.T) {
 	}
 	lookPath, log := fakeHerdr(t)
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: runs, lookPath: lookPath}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{runs: runs, lookPath: lookPath}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(log)
@@ -192,7 +192,7 @@ func TestRecoverTabsLeavesTabsOfLiveMill(t *testing.T) {
 	}
 	lookPath, log := fakeHerdr(t)
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: runs, lookPath: lookPath}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{runs: runs, lookPath: lookPath}); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -216,7 +216,7 @@ func TestRecoverTabsClosesRunningAttemptTabOfDeadMill(t *testing.T) {
 	file := writeTab(t, runs, "t1/a2", "1", `{"tab":"w8:t2","workspace":"w8","mill_pid":`+strconv.Itoa(deadPid(t))+`}`)
 	lookPath, log := fakeHerdr(t)
 	var out bytes.Buffer
-	if err := killLeftoverWorkers(context.Background(), &out, s, herdrTabs{runs: runs, lookPath: lookPath}); err != nil {
+	if err := killLeftoverWorkers(context.Background(), &out, s, hostWindows{runs: runs, lookPath: lookPath}); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := out.String(), "closed herdr tab w8:t2 of t1 attempt 2 implementer\n"; got != want {
