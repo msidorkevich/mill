@@ -11,9 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -40,38 +38,14 @@ func NewHerdr() *Herdr {
 // Name implements Host.
 func (*Herdr) Name() string { return "herdr" }
 
-func (h *Herdr) grace() time.Duration {
-	if h.Grace <= 0 {
-		return 2 * time.Second
-	}
-	return h.Grace
-}
+func (h *Herdr) grace() time.Duration { return orDefault(h.Grace, defaultGrace) }
 
-func (h *Herdr) poll() time.Duration {
-	if h.Poll <= 0 {
-		return 50 * time.Millisecond
-	}
-	return h.Poll
-}
+func (h *Herdr) poll() time.Duration { return orDefault(h.Poll, defaultPoll) }
 
-func (h *Herdr) startTimeout() time.Duration {
-	if h.StartTimeout <= 0 {
-		return 30 * time.Second
-	}
-	return h.StartTimeout
-}
+func (h *Herdr) startTimeout() time.Duration { return orDefault(h.StartTimeout, defaultStartTimeout) }
 
 // pgrun returns the argv prefix that starts the worker in a new process group.
-func (h *Herdr) pgrun() ([]string, error) {
-	if len(h.Pgrun) > 0 {
-		return h.Pgrun, nil
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("herdr host: find the mill binary to start the worker's process group with `mill __pgrun`: %w; set host.kind = \"exec\" to run workers without herdr", err)
-	}
-	return []string{exe, "__pgrun", "--"}, nil
-}
+func (h *Herdr) pgrun() ([]string, error) { return pgrunPrefix("herdr", h.Pgrun) }
 
 // herdr runs the herdr binary and returns its stdout. A failure includes herdr's stderr.
 func (h *Herdr) herdr(args ...string) ([]byte, error) {
@@ -84,46 +58,33 @@ func (h *Herdr) herdr(args ...string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
+// herdrHandle is a worker running in a herdr tab.
+type herdrHandle struct{ *wrapperHandle }
+
 // Start implements Host.
 func (h *Herdr) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
-	if len(spec.Argv) == 0 {
-		return nil, errors.New("herdr host: empty argv")
-	}
-	if spec.StdinPath != "" {
-		if _, err := os.Stat(spec.StdinPath); err != nil {
-			return nil, fmt.Errorf("herdr host: stdin: %w", err)
-		}
-	}
-	for _, p := range []string{spec.StdoutPath, spec.StderrPath} {
-		if p == "" {
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return nil, fmt.Errorf("herdr host: %w", err)
-		}
-	}
-	pgrun, err := h.pgrun()
+	cfg := wrapperConfig{poll: h.poll(), startTimeout: h.startTimeout(), grace: h.grace(), pgrun: h.Pgrun}
+	hd, err := startWrapped(ctx, herdrTerminal{h}, cfg, spec)
 	if err != nil {
 		return nil, err
 	}
-	files, err := writeWrapper(spec, pgrun)
-	if err != nil {
-		return nil, err
-	}
+	return &herdrHandle{hd}, nil
+}
 
-	dir := spec.Dir
-	if dir == "" {
-		if dir, err = os.Getwd(); err != nil {
-			return nil, fmt.Errorf("herdr host: working directory: %w", err)
-		}
-	}
+// herdrTerminal opens worker windows as herdr tabs.
+type herdrTerminal struct{ h *Herdr }
+
+func (herdrTerminal) kind() string { return "herdr" }
+
+// open creates a tab, records it in the tab file and runs argv in the tab's root pane.
+func (t herdrTerminal) open(label, dir string, argv []string, record string) (window, error) {
 	// Each worker gets its own tab, never --focus: the operator's focus stays where it is.
 	args := []string{"tab", "create"}
-	if h.Workspace != "" {
-		args = append(args, "--workspace", h.Workspace)
+	if t.h.Workspace != "" {
+		args = append(args, "--workspace", t.h.Workspace)
 	}
-	args = append(args, "--label", "mill "+workerName(spec), "--cwd", dir)
-	out, err := h.herdr(args...)
+	args = append(args, "--label", label, "--cwd", dir)
+	out, err := t.h.herdr(args...)
 	if err != nil {
 		return nil, err
 	}
@@ -131,45 +92,41 @@ func (h *Herdr) Start(ctx context.Context, spec ProcSpec) (Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	hd := &herdrHandle{host: h, ctx: ctx, pane: pane, tab: tab, files: files, done: make(chan struct{}), watched: make(chan struct{})}
+	w := &herdrWindow{host: t.h, tab: tab, file: record}
 	// The tab file lets crash recovery close a tab a killed mill left open; the mill pid
 	// tells recovery whether the mill that started the worker is still running.
-	if err := writeTabFile(files.tab, HerdrTab{Tab: tab, Workspace: h.Workspace, MillPID: os.Getpid()}); err != nil {
-		return nil, errors.Join(err, hd.closeTab())
+	if err := writeTabFile(record, HerdrTab{Tab: tab, Workspace: t.h.Workspace, MillPID: os.Getpid()}); err != nil {
+		return nil, errors.Join(err, w.close())
 	}
-
-	if _, err := h.herdr("pane", "run", hd.pane, "sh", files.wrapper); err != nil {
-		return nil, errors.Join(err, hd.closeTab())
+	if _, err := t.h.herdr(append([]string{"pane", "run", pane}, argv...)...); err != nil {
+		return nil, errors.Join(err, w.close())
 	}
-	pid, wrapperPID, err := h.waitPID(files.pid)
-	if err != nil {
-		return nil, errors.Join(err, hd.closeTab())
-	}
-	hd.pid, hd.wrapperPID = pid, wrapperPID
-
-	go func() {
-		defer close(hd.watched)
-		select {
-		case <-ctx.Done():
-			// Wait returns this error alongside the exit.
-			err := hd.Kill()
-			hd.mu.Lock()
-			hd.killErr = err
-			hd.mu.Unlock()
-		case <-hd.done:
-		}
-	}()
-	return hd, nil
+	return w, nil
 }
 
-// workerName is the name shown in the tab label and the notice line.
-func workerName(spec ProcSpec) string {
-	name := strings.TrimSpace(strings.Join(strings.Fields(spec.Name), " "))
-	if name == "" {
-		return "worker"
-	}
-	return name
+// herdrWindow is a worker's herdr tab and the tab file recording it.
+type herdrWindow struct {
+	host *Herdr
+	tab  string
+	file string
 }
+
+// close closes the tab. A closed tab's tab file goes with it, so recovery never closes a
+// later tab that reuses its id.
+func (w *herdrWindow) close() error {
+	if _, err := w.host.herdr("tab", "close", w.tab); err != nil {
+		return err
+	}
+	if err := os.Remove(w.file); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("herdr host: remove tab file of closed tab %s: %w; delete it by hand", w.tab, err)
+	}
+	return nil
+}
+
+// exists reports true: herdr is not asked, a closed tab kills the wrapper running in it.
+func (*herdrWindow) exists() (bool, error) { return true, nil }
+
+func (w *herdrWindow) String() string { return "herdr tab " + w.tab }
 
 // parseTabCreate returns the root pane id and the tab id from herdr's tab create response.
 func parseTabCreate(out []byte) (pane, tab string, err error) {
@@ -286,254 +243,4 @@ func tabMissing(msg string) bool {
 		}
 	}
 	return false
-}
-
-// waitPID waits for the pid file, which holds the pid of the worker's process group leader
-// and the pid of the outer wrapper that writes the exit file.
-func (h *Herdr) waitPID(path string) (pid, wrapperPID int, err error) {
-	deadline := time.Now().Add(h.startTimeout())
-	for {
-		if b, err := os.ReadFile(path); err == nil {
-			if f := strings.Fields(string(b)); len(f) == 2 {
-				pid, err1 := strconv.Atoi(f[0])
-				wpid, err2 := strconv.Atoi(f[1])
-				if err1 == nil && err2 == nil && pid > 0 && wpid > 0 {
-					return pid, wpid, nil
-				}
-			}
-		}
-		if time.Now().After(deadline) {
-			return 0, 0, fmt.Errorf("herdr host: the wrapper never wrote its pid to %s within %s: check the herdr tab for errors", path, h.startTimeout())
-		}
-		time.Sleep(h.poll())
-	}
-}
-
-// wrapperFiles are the files one run uses to talk to mill.
-type wrapperFiles struct {
-	wrapper, pid, rc, exit, tab string
-}
-
-// writeWrapper writes the wrapper script into the log directory. Run as `sh wrapper`, it
-// prints a notice naming the worker, then starts itself again as `sh wrapper run <pid>`
-// through the pgrun prefix, which makes the inner copy the leader of a new process group
-// without job control, so its pid is the group id. That inner copy writes its own pid and
-// the outer one, runs the command and records its exit code; the outer copy survives a kill
-// of the group and writes the final exit code atomically.
-func writeWrapper(spec ProcSpec, pgrun []string) (wrapperFiles, error) {
-	dir := spec.LogDir
-	if dir == "" && spec.StdoutPath != "" {
-		dir = filepath.Dir(spec.StdoutPath)
-	}
-	if dir == "" {
-		d, err := os.MkdirTemp("", "mill-herdr-")
-		if err != nil {
-			return wrapperFiles{}, fmt.Errorf("herdr host: log dir: %w", err)
-		}
-		dir = d
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return wrapperFiles{}, fmt.Errorf("herdr host: log dir: %w", err)
-	}
-	f, err := os.CreateTemp(dir, "herdr-*.sh")
-	if err != nil {
-		return wrapperFiles{}, fmt.Errorf("herdr host: wrapper: %w", err)
-	}
-	base := strings.TrimSuffix(f.Name(), ".sh")
-	files := wrapperFiles{wrapper: f.Name(), pid: base + ".pid", rc: base + ".rc", exit: base + ".exit", tab: base + ".tab"}
-
-	orNull := func(p string) string {
-		if p == "" {
-			return "/dev/null"
-		}
-		return p
-	}
-	cmd := []string{"env", "-i"}
-	for _, kv := range spec.Env {
-		cmd = append(cmd, shQuote(kv))
-	}
-	for _, a := range spec.Argv {
-		cmd = append(cmd, shQuote(a))
-	}
-	cd := ""
-	if spec.Dir != "" {
-		cd = "cd " + shQuote(spec.Dir) + " && "
-	}
-	prefix := make([]string, len(pgrun))
-	for i, a := range pgrun {
-		prefix[i] = shQuote(a)
-	}
-	w, pid, rc, exit := shQuote(files.wrapper), shQuote(files.pid), shQuote(files.rc), shQuote(files.exit)
-	script := "#!/bin/sh\n" +
-		"# mill herdr wrapper" + strings.ReplaceAll(" "+spec.Name, "\n", " ") + "\n" +
-		"if [ \"$1\" = run ]; then\n" +
-		"  printf '%s %s\\n' \"$$\" \"$2\" > " + pid + ".tmp && mv " + pid + ".tmp " + pid + " || exit 1\n" +
-		"  { " + cd + strings.Join(cmd, " ") + " < " + shQuote(orNull(spec.StdinPath)) + " 2>> " + shQuote(orNull(spec.StderrPath)) +
-		"; printf '%s\\n' \"$?\" > " + rc + ".tmp && mv " + rc + ".tmp " + rc + "; } | tee -a " + shQuote(orNull(spec.StdoutPath)) + "\n" +
-		"  exit 0\n" +
-		"fi\n" +
-		"printf '%s\\n' " + shQuote("mill worker: "+workerName(spec)+". Closing this tab stops the task.") + "\n" +
-		strings.Join(prefix, " ") + " sh " + w + " run \"$$\" &\n" +
-		"wait \"$!\"\n" +
-		"code=$?\n" +
-		"if [ -f " + rc + " ]; then code=$(cat " + rc + "); fi\n" +
-		"printf '%s\\n' \"$code\" > " + exit + ".tmp && mv " + exit + ".tmp " + exit + "\n"
-	if _, err := f.WriteString(script); err != nil {
-		f.Close()
-		return wrapperFiles{}, fmt.Errorf("herdr host: wrapper: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return wrapperFiles{}, fmt.Errorf("herdr host: wrapper: %w", err)
-	}
-	return files, nil
-}
-
-// shQuote quotes s as a single POSIX sh word.
-func shQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-type herdrHandle struct {
-	host       *Herdr
-	ctx        context.Context
-	pane, tab  string
-	files      wrapperFiles
-	pid        int           // the worker's process group leader
-	wrapperPID int           // the outer wrapper, which writes the exit file
-	done       chan struct{} // closed when Wait has seen the exit
-	// closed when the context watcher has returned
-	watched chan struct{}
-
-	mu      sync.Mutex
-	killed  bool
-	killErr error
-
-	closeOnce sync.Once
-	closeErr  error
-}
-
-func (h *herdrHandle) PID() int { return h.pid }
-
-// closeTab closes the worker's tab once; later calls return the first result. A closed tab's
-// tab file goes with it, so recovery never closes a later tab that reuses its id.
-func (h *herdrHandle) closeTab() error {
-	h.closeOnce.Do(func() {
-		if _, h.closeErr = h.host.herdr("tab", "close", h.tab); h.closeErr != nil {
-			return
-		}
-		if err := os.Remove(h.files.tab); err != nil && !errors.Is(err, os.ErrNotExist) {
-			h.closeErr = fmt.Errorf("herdr host: remove tab file of closed tab %s: %w; delete it by hand", h.tab, err)
-		}
-	})
-	return h.closeErr
-}
-
-// readExit returns the code from the exit file, or ok=false while it does not exist yet.
-func (h *herdrHandle) readExit() (code int, ok bool, err error) {
-	b, err := os.ReadFile(h.files.exit)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("herdr host: exit file: %w", err)
-	}
-	code, err = strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return 0, false, fmt.Errorf("herdr host: exit file %s holds %q, not an exit code", h.files.exit, strings.TrimSpace(string(b)))
-	}
-	return code, true, nil
-}
-
-// wrapperGone reports whether the outer wrapper has died: it is gone, or its pid now runs
-// another command. A wrapper that died never writes the exit file.
-func (h *herdrHandle) wrapperGone() (bool, error) {
-	_, command, alive, err := ProcessInfo(h.wrapperPID)
-	if err != nil {
-		return false, fmt.Errorf("herdr host: check wrapper %d in herdr tab %s: %w", h.wrapperPID, h.tab, err)
-	}
-	return !alive || !strings.Contains(command, h.files.wrapper), nil
-}
-
-// waitExit polls for the exit file. It gives up, with lost=true, when the wrapper has died
-// and the file has not appeared within the grace period (the tab was closed or the wrapper
-// killed), or when the context was cancelled and the file has not appeared within
-// StartTimeout plus the grace period.
-func (h *herdrHandle) waitExit() (code int, lost bool, err error) {
-	grace := h.host.grace()
-	checkEvery := grace / 4
-	var lastCheck, goneAt, cancelDeadline time.Time
-	for {
-		code, ok, err := h.readExit()
-		if err != nil || ok {
-			return code, false, err
-		}
-		now := time.Now()
-		if cancelDeadline.IsZero() && h.ctx.Err() != nil {
-			cancelDeadline = now.Add(h.host.startTimeout() + grace)
-		}
-		if !cancelDeadline.IsZero() && now.After(cancelDeadline) {
-			return -1, true, fmt.Errorf("herdr host: cancelled, but the wrapper in herdr tab %s never wrote %s: the attempt is lost; close the tab by hand if it is still open", h.tab, h.files.exit)
-		}
-		if goneAt.IsZero() && now.Sub(lastCheck) >= checkEvery {
-			lastCheck = now
-			gone, err := h.wrapperGone()
-			if err != nil {
-				return -1, true, err
-			}
-			if gone {
-				goneAt = now
-			}
-		}
-		if !goneAt.IsZero() && now.Sub(goneAt) >= grace {
-			return -1, true, fmt.Errorf("herdr host: the herdr pane running the worker (tab %s) was closed or killed before %s was written: the attempt is lost", h.tab, h.files.exit)
-		}
-		time.Sleep(h.host.poll())
-	}
-}
-
-func (h *herdrHandle) Wait() (Exit, error) {
-	code, lost, err := h.waitExit()
-	close(h.done)
-	<-h.watched
-	if err != nil {
-		ex := Exit{Code: -1}
-		if lost {
-			// Whatever the worker left running goes with it.
-			ex.Signaled = true
-			err = errors.Join(err, KillGroup(h.pid))
-		}
-		return ex, errors.Join(err, h.closeTab())
-	}
-	// Kill anything the process left running in its group (e.g. backgrounded children).
-	killErr := KillGroup(h.pid)
-	h.mu.Lock()
-	killed := h.killed
-	killErr = errors.Join(killErr, h.killErr)
-	h.mu.Unlock()
-	ex := Exit{Code: code, Signaled: code > 128 || killed}
-	return ex, errors.Join(killErr, h.closeTab())
-}
-
-// Kill stops the process group, waits for the wrapper to record the exit and closes the tab.
-func (h *herdrHandle) Kill() error {
-	h.mu.Lock()
-	h.killed = true
-	h.mu.Unlock()
-	if err := KillGroup(h.pid); err != nil {
-		return fmt.Errorf("herdr host: kill process group %d: %w", h.pid, err)
-	}
-	deadline := time.Now().Add(h.host.startTimeout())
-	for {
-		_, ok, err := h.readExit()
-		if err != nil {
-			return err
-		}
-		if ok {
-			return h.closeTab()
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("herdr host: process group %d killed but %s never appeared: close herdr tab %s by hand", h.pid, h.files.exit, h.tab)
-		}
-		time.Sleep(h.host.poll())
-	}
 }
