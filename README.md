@@ -991,7 +991,7 @@ mill tui
 | `r` | retry the selected task |
 | `l` | show the task's log |
 | `p` | pause: interrupt the latest `mill run` or `mill keep` started from the TUI |
-| `o` | open the task's worktree |
+| `o` | open the task's worktree (in a tmux window under tmux, otherwise in a shell) |
 | `n` | plan a new goal (Goals) |
 | `R` | run the selected goal (Goals) |
 | `k` | keep the goal mergeable (`mill keep --watch`); press again to stop (Goals) |
@@ -1012,18 +1012,22 @@ what it shows.
 A host starts the agent processes. `host.kind` in the config chooses it:
 
 - `auto` (default in a new config): herdr when mill runs inside a herdr pane (`HERDR_ENV=1`)
-  and `herdr` is on `PATH`; otherwise exec.
+  and `herdr` is on `PATH`; otherwise tmux when mill runs inside tmux (`TMUX` is set) and the
+  tmux binary is found; otherwise exec.
 - `exec`: plain child processes. This is the default behaviour everywhere, and everything
-  works without herdr.
+  works without herdr or tmux.
 - `herdr`: always herdr. Outside herdr (no `HERDR_ENV=1`, or no `herdr` on `PATH`) this is an
   error that names the fix: set `host.kind = "auto"` or `"exec"`.
+- `tmux`: always tmux. Without the tmux binary this is an error that names the fix: install
+  tmux, point `host.tmux_bin` at it, or set `host.kind = "auto"` or `"exec"`.
 
 ```
 mill task run <id> --host exec          # override host.kind for one command
 mill run <goal> --host herdr
+mill run <goal> --host tmux
 ```
 
-`--host auto|exec|herdr` is accepted by `mill task run` and `mill run`. With the herdr host
+`--host auto|exec|herdr|tmux` is accepted by `mill task run` and `mill run`. With the herdr host
 each worker runs in its own new herdr tab in your workspace (`HERDR_WORKSPACE_ID`), labelled
 `mill <task> <role>` (for example `mill g12/docs a1 implementer`), so you can watch agents work.
 Each gate command gets a tab too. It is labelled `mill <task> a<n> gate <i>` for a task gate,
@@ -1042,6 +1046,39 @@ was closed or killed and the attempt is lost, and a retry continues. mill still 
 from files, never from the pane. `mill doctor` reports a `host` line with the choice
 (`auto → exec`, `auto → herdr`, `exec`, `herdr`) or the error when `host.kind = herdr` cannot
 be satisfied.
+
+**The tmux host.** With `--host tmux` (or `host.kind = "tmux"`, or `auto` outside herdr inside
+tmux) each worker runs in its own new detached tmux window, and each gate command gets one too.
+`host.tmux_bin` names the tmux executable (default `tmux`, looked up on `PATH`).
+
+- Session: inside tmux, mill opens the windows in the session of the pane it runs in. Outside
+  tmux, it uses a detached session named `mill-<repo>` (the repository's directory name, with
+  `.` and `:` replaced by `-`), creating it when missing. mill then prints once
+  `mill: workers run in tmux session mill-<repo>; watch them with: tmux attach -t mill-<repo>`.
+- Window names: a worker's window is labelled `mill <task> a<n> implementer` (or `reviewer`,
+  and so on); a gate command's is `mill <task> a<n> gate <i>`, where `<i>` counts the gate's
+  commands from 1.
+- Focus: windows are opened detached, so the window that is current in your tmux client stays
+  current. Use `tmux attach -t mill-<repo>` (or switch to the window by name) to watch workers.
+- `mill doctor` reports a `host` line with the choice (`auto → tmux`, `tmux`, and so on), the
+  tmux version (from `tmux -V`) and the session workers open in, for example
+  `tmux (tmux 3.4, session mill-myrepo)`. A missing tmux binary or a session that cannot be
+  found or created is an error that names the fix.
+- Crash recovery: when mill is killed, its workers' windows are left open. The next
+  `mill run` or `mill task run` (the one that runs crash recovery) closes the recorded window
+  of each worker whose mill process is dead, and prints `closed tmux window <window> of <task>
+  attempt <n> <role>` for each one it closed. A window that is already gone prints nothing; one
+  that cannot be closed fails the recovery and names the window to close by hand.
+- The TUI's `o` opens the task's worktree in a new tmux window when the host is tmux. Inside
+  tmux the window opens in the current session; outside tmux it opens in the running tmux
+  server, so mill prints the `tmux attach` hint to see it.
+
+**`host.keep_failed`.** `host.keep_failed` (a duration such as `"5m"`, default `"0s"`) is how long
+the window (or herdr tab) of a failed worker stays open after it ends, so you can read its output.
+A worker fails when it exits non-zero or its attempt is lost. Successful and killed workers close
+at once, and `0s` closes a failed worker at once too. The delay runs in the mill process that
+started the worker; if mill is killed before the delay ends, the window is left for crash
+recovery to close. A negative value is an error. The same setting applies to herdr tabs.
 
 When the herdr host starts a process, it waits up to 30 seconds for the wrapper to write the
 process's pid file. A start that does not get one in time fails. For gate commands the gate
