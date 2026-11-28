@@ -282,7 +282,7 @@ func runInit(ctx context.Context, env Env, args []string) int {
 // currentBranch returns the branch HEAD points to; it works before the first commit.
 // It fails on a detached HEAD.
 func currentBranch(ctx context.Context, root string) (string, error) {
-	out, err := exec.CommandContext(ctx, gitx.Bin(), "-C", root, "symbolic-ref", "--short", "HEAD").Output()
+	out, err := gitx.Command(ctx, "-C", root, "symbolic-ref", "--short", "HEAD").Output()
 	if err != nil {
 		return "", fmt.Errorf("HEAD is detached or unreadable: %w", err)
 	}
