@@ -4,7 +4,8 @@ Requirement IDs refer to [REQUIREMENTS.md](REQUIREMENTS.md).
 
 **The MVP is M0–M3**: planning, execution, review, publishing and merge detection, all from the
 CLI. M4 makes parallel work safe at scale, M5 makes it pleasant to use, M6 connects forges, more
-agent runners and Java + Gradle projects.
+agent runners and Java + Gradle projects, and M7 turns the TUI into a one-screen operator
+dashboard.
 
 ## Dogfood gate
 
@@ -159,3 +160,23 @@ flagged correctly.
   implementer and a `claude` verifier;
 - a goal runs to verified with `--host tmux`, both inside a tmux session and from a plain
   terminal, and a killed mill leaves no tmux window open after the next run's recovery.
+
+## M7. Operator dashboard
+
+Built after M6. The TUI becomes one screen an operator can watch without switching tabs:
+
+- Three panes on one screen: every goal with its progress; the selected goal's tasks as a tree;
+  and "Needs you", the items across all goals that wait for the operator, and nothing else.
+- The task tree replaces today's lane graph (`git log --graph` style, unreadable with fan-in):
+  redundant edges are dropped, each task hangs under the dependency it waits on longest, a task
+  that gathers several sibling branches is drawn as a join below them, and a task's other
+  dependencies are listed only while they are unfinished ("+ waits for X").
+- Colours carry status everywhere (done, running, blocked or failed, published, pending), and
+  the selected task's dependency path is highlighted.
+- The same tree is used by `mill goal graph` and `mill plan show`.
+
+**Requirements:** UI4–UI8
+**Exit criterion:** an operator runs a goal from plan to landed PRs watching only the dashboard:
+every decision mill needs appears in "Needs you" with the key or command that resolves it, and
+the tree shows at a glance what runs, what waits and on what.
+

@@ -403,6 +403,51 @@ agent, and delivers each task as its own branch for a human to review and merge 
   - live log tail.
 - **UI3.** Keys: `a` approve, `c` request changes (`$EDITOR`), `x` reject, `r` retry, `s` skip,
   `p` pause, `o` open worktree (a new herdr pane if available, otherwise a shell), `l` log.
+- **UI4. One-screen dashboard (M7).** All panes on one screen, no tab switching needed to
+  operate:
+  - **Goals:** every goal, newest first, with status, a progress bar (tasks landed and verified
+    out of all), spend, and a mark when it has items in "Needs you";
+  - **Tasks:** the selected goal's tasks as a tree (UI5), each with status, attempt, cost and,
+    for running tasks, the current step and its duration;
+  - **Needs you:** the items of UI6 across all goals;
+  - **Detail:** the selected task or item (reason, findings, fix command), shown in place of
+    the tree or below it, as the terminal size allows.
+  The layout adapts to the terminal: three columns when wide, stacked panes when narrow; it
+  stays readable at 100×30. Today's views (review, agents, log, task detail) stay reachable from
+  the dashboard by key.
+- **UI5. Task tree.** A goal's dependency graph drawn as a tree that stays readable with
+  fan-in:
+  - transitive reduction first: an edge implied by a longer path is not drawn;
+  - each task sits under its primary parent, the reduced dependency with the longest chain from
+    a root (ties: plan order), so the critical path runs down the spine;
+  - a task whose reduced dependencies are all children of one task is drawn as a join below
+    those siblings (`└─▶ readme ⇐ joins a, b, c`);
+  - any other reduced dependency is listed after the task, and only while it is unfinished
+    (`+ waits for X`, red when X is blocked or failed);
+  - roots with no dependents are grouped at the bottom;
+  - selecting a task highlights its dependency path and the tasks that wait on it.
+  The same renderer serves `mill goal graph` and `mill plan show` (with `--color` / `NO_COLOR`
+  support); Mermaid output stays as it is.
+- **UI6. "Needs you".** Only items that wait for an operator decision, each with what to do and
+  the key or command that does it; informational states (running, queued behind a dependency,
+  paused at a usage limit) are not listed:
+  - a draft plan to approve;
+  - verified tasks to approve for publishing (`review approve`), and tasks sent back that need a
+    retry decision;
+  - published tasks with an open PR to merge, in stack order ("merge #246 first"), with the CI
+    state from the status hook;
+  - blocked or failed tasks, with the reason and the suggested fix (`task rebase`, `task edit`,
+    `run --retry-blocked`);
+  - failed hooks to re-run (`mill hook run`).
+  An item disappears as soon as its condition clears. The count is shown in the dashboard's
+  title so it is visible from a glance.
+- **UI7. Colours.** Status colours are consistent across panes and commands: done/landed green,
+  running yellow, blocked/failed red, published/in review blue, pending grey; "Needs you" items
+  are highlighted. Colour is never the only signal: every status keeps its mark
+  (✔ ● ✖ ◆ ○). `NO_COLOR` and non-terminal output disable colours.
+- **UI8. Actions from the dashboard.** The UI3 keys act on the selected task or "Needs you"
+  item (approve, request changes, reject, retry, open worktree, log), so every item can be
+  resolved without leaving the screen.
 
 ### Testing (TS)
 
