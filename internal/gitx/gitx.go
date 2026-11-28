@@ -68,23 +68,33 @@ func BranchExists(ctx context.Context, dir, name string) bool {
 	return err == nil
 }
 
+// worktreeAdmin runs `git worktree <args>` in repo while holding the repository's worktree
+// administration lock (lockWorktreeAdmin): git commands that change .git/worktrees race
+// when run concurrently in one repository.
+func worktreeAdmin(ctx context.Context, repo string, args ...string) error {
+	unlock, err := lockWorktreeAdmin(ctx, repo)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	_, err = Run(ctx, repo, append([]string{"worktree"}, args...)...)
+	return err
+}
+
 // AddWorktree creates a new branch at startSHA and checks it out in a new worktree at path.
 func AddWorktree(ctx context.Context, repo, path, branch, startSHA string) error {
-	_, err := Run(ctx, repo, "worktree", "add", "-q", "-b", branch, path, startSHA)
-	return err
+	return worktreeAdmin(ctx, repo, "add", "-q", "-b", branch, path, startSHA)
 }
 
 // AddWorktreeForBranch checks out an existing branch in a new worktree at path.
 func AddWorktreeForBranch(ctx context.Context, repo, path, branch string) error {
-	_, err := Run(ctx, repo, "worktree", "add", "-q", path, branch)
-	return err
+	return worktreeAdmin(ctx, repo, "add", "-q", path, branch)
 }
 
 // AddDetachedWorktree checks out sha with a detached HEAD in a new worktree at path (no
 // branch is created). Remove it with RemoveWorktree.
 func AddDetachedWorktree(ctx context.Context, repo, path, sha string) error {
-	_, err := Run(ctx, repo, "worktree", "add", "-q", "--detach", path, sha)
-	return err
+	return worktreeAdmin(ctx, repo, "add", "-q", "--detach", path, sha)
 }
 
 // IsWorktreeOn reports whether path is a work tree with branch checked out.
@@ -98,8 +108,7 @@ func IsWorktreeOn(ctx context.Context, path, branch string) bool {
 
 // PruneWorktrees removes git's records of worktrees whose directories are gone.
 func PruneWorktrees(ctx context.Context, repo string) error {
-	_, err := Run(ctx, repo, "worktree", "prune")
-	return err
+	return worktreeAdmin(ctx, repo, "prune")
 }
 
 // HasChanges reports whether the work tree has staged, unstaged or untracked changes
@@ -187,8 +196,7 @@ func Merge(ctx context.Context, dir, branch, message string) error {
 
 // RemoveWorktree deletes a worktree directory and git's record of it, even when it is dirty.
 func RemoveWorktree(ctx context.Context, repo, path string) error {
-	_, err := Run(ctx, repo, "worktree", "remove", "--force", path)
-	return err
+	return worktreeAdmin(ctx, repo, "remove", "--force", path)
 }
 
 // DeleteBranch force-deletes a local branch.
