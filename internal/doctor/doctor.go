@@ -36,6 +36,10 @@ type Check struct {
 	Name   string `json:"name"`
 	Status Status `json:"status"`
 	Detail string `json:"detail"`
+	// TmuxVersion and TmuxSession are set by the host check when the host is tmux:
+	// what `tmux -V` printed and the session worker windows open in.
+	TmuxVersion string `json:"tmux_version,omitempty"`
+	TmuxSession string `json:"tmux_session,omitempty"`
 }
 
 // Report is the result of all checks.
@@ -197,10 +201,8 @@ func Run(ctx context.Context, opts Options) Report {
 	// host
 	if !cfgOK {
 		add("host", Skip, "needs a valid config")
-	} else if _, desc, err := host.Select(cfg.Host.Kind, host.Settings{TmuxBin: cfg.Host.TmuxBin}, opts.Getenv, opts.LookPath); err != nil {
-		add("host", Fail, "%v", err)
 	} else {
-		add("host", OK, "%s", desc)
+		r.Checks = append(r.Checks, checkHost(opts, cfg, paths.Root))
 	}
 
 	// gate_nice
@@ -259,6 +261,74 @@ func Run(ctx context.Context, opts Options) Report {
 		}
 	}
 	return r
+}
+
+// checkHost selects the host as a run would and, for the tmux host, reports the tmux
+// version and the session worker windows will open in.
+func checkHost(opts Options, cfg config.Config, root string) Check {
+	c := Check{Name: "host", Status: Fail}
+	bin := cfg.Host.TmuxBin
+	if bin == "" {
+		bin = "tmux"
+	}
+	if cfg.Host.Kind == "tmux" {
+		if _, err := opts.LookPath(bin); err != nil {
+			c.Detail = fmt.Sprintf("host.kind = tmux but the tmux binary %q was not found: install tmux (e.g. `brew install tmux` or your package manager), point host.tmux_bin at it, or set host.kind = \"auto\" in .mill/config.toml", bin)
+			return c
+		}
+	}
+	h, desc, err := host.Select(cfg.Host.Kind, host.Settings{
+		TmuxBin: cfg.Host.TmuxBin, KeepFailed: cfg.Host.KeepFailed.Duration, RepoRoot: root,
+	}, opts.Getenv, opts.LookPath)
+	if err != nil {
+		c.Detail = err.Error()
+		return c
+	}
+	tm, ok := h.(*host.Tmux)
+	if !ok {
+		c.Status, c.Detail = OK, desc
+		return c
+	}
+
+	out, err := opts.Output(tm.Bin, "-V")
+	if err != nil {
+		c.Detail = fmt.Sprintf("%s: `%s -V` failed: %v; fix the tmux install or set host.kind = \"exec\"", desc, tm.Bin, err)
+		return c
+	}
+	version := strings.TrimSpace(out)
+	if version == "" {
+		c.Detail = fmt.Sprintf("%s: `%s -V` printed no version; fix the tmux install or set host.kind = \"exec\"", desc, tm.Bin)
+		return c
+	}
+	session, err := tmuxSession(opts, tm.Bin, root)
+	if err != nil {
+		c.Detail = fmt.Sprintf("%s (%s): %v; unset TMUX or set host.kind = \"exec\"", desc, version, err)
+		return c
+	}
+	c.Status, c.Detail = OK, fmt.Sprintf("%s (%s, session %s)", desc, version, session)
+	c.TmuxVersion, c.TmuxSession = version, session
+	return c
+}
+
+// tmuxSession is the session the tmux host will use: inside tmux the one of $TMUX_PANE,
+// outside it the detached session named after the repository. It creates nothing.
+func tmuxSession(opts Options, bin, root string) (string, error) {
+	if opts.Getenv("TMUX") == "" {
+		return host.TmuxSessionName(root), nil
+	}
+	args := []string{"display-message", "-p"}
+	if pane := opts.Getenv("TMUX_PANE"); pane != "" {
+		args = append(args, "-t", pane)
+	}
+	out, err := opts.Output(bin, append(args, "#{session_name}")...)
+	if err != nil {
+		return "", fmt.Errorf("find the current tmux session: %w", err)
+	}
+	name := strings.TrimSpace(out)
+	if name == "" {
+		return "", errors.New("tmux printed no name for the current session")
+	}
+	return name, nil
 }
 
 var assignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
