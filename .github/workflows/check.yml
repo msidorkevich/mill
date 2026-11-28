@@ -1,6 +1,6 @@
 # The same check mill's gate runs (make check), on every push to master and every pull request.
 # mill's status hook reads this run's result as the PR's CI signal.
-# The flaky job repeats the tests under -race (make flaky) to expose flaky tests.
+# The flaky job (make flaky: -count=3 -race) is in flaky.yml: master and nightly only.
 name: check
 
 on:
@@ -31,13 +31,3 @@ jobs:
       - name: make check
         run: make check GOTESTFLAGS=-count=1
 
-  flaky:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: make flaky
-        run: make flaky
