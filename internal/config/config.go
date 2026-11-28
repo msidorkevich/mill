@@ -128,7 +128,11 @@ type RunnerConfig struct {
 
 // HostConfig selects where worker processes run.
 type HostConfig struct {
-	Kind string `toml:"kind"` // "auto", "exec" or "herdr"
+	Kind string `toml:"kind"` // "auto", "exec", "herdr" or "tmux"
+	// TmuxBin is the tmux executable, looked up on PATH.
+	TmuxBin string `toml:"tmux_bin"`
+	// KeepFailed is how long a failed worker's pane stays open for inspection; 0 closes it at once.
+	KeepFailed Duration `toml:"keep_failed"`
 }
 
 // Size maps a task size to a model (PL6).
@@ -165,7 +169,7 @@ type SizeBudget struct {
 // Known values.
 var (
 	RunnerKinds      = []string{"claude", "fake"}
-	HostKinds        = []string{"auto", "exec", "herdr"}
+	HostKinds        = []string{"auto", "exec", "herdr", "tmux"}
 	OwnsPolicies     = []string{"warn", "enforce", "off"}
 	ChildrenOnModes  = []string{"verified", "published"}
 	CleanOnLandModes = []string{"all", "local", "off"}
@@ -201,7 +205,7 @@ func Default() Config {
 			AttemptTimeout: Duration{30 * time.Minute},
 			APITimeout:     Duration{15 * time.Minute},
 		},
-		Host: HostConfig{Kind: "auto"},
+		Host: HostConfig{Kind: "auto", TmuxBin: "tmux", KeepFailed: Duration{0}},
 		Models: map[string]map[string]string{
 			"S": {"low": "haiku", "medium": "sonnet", "high": "opus"},
 			"M": {"low": "sonnet", "medium": "opus", "high": "opus"},
@@ -276,7 +280,9 @@ attempt_timeout = "30m"   # per agent run
 api_timeout = "15m"       # per API request of a claude run, passed as API_TIMEOUT_MS
 
 [host]
-kind = "auto"             # "auto": herdr inside a herdr pane (HERDR_ENV=1, herdr on PATH), else exec; "exec": plain processes; "herdr": always herdr, fails outside a herdr pane
+kind = "auto"             # "auto": herdr inside a herdr pane (HERDR_ENV=1, herdr on PATH), else tmux inside tmux with tmux on PATH, else exec; "exec": plain processes; "herdr": always herdr, fails outside a herdr pane; "tmux": always tmux, fails outside tmux
+# tmux_bin = "tmux"       # tmux executable, looked up on PATH
+# keep_failed = "0s"      # how long a failed worker's pane stays open for inspection; "0s" closes it at once
 
 # Model per task size and complexity. A file with [models] uses only its entries; a file
 # without [models] but with legacy [sizes.X] model = "..." blocks maps every complexity of a
@@ -338,6 +344,9 @@ func Parse(text string) (Config, error) {
 	cfg.Models = nil
 	cfg.ModelTiers = nil
 	cfg.Budget.Size = nil
+	if err := checkKeepFailed(text); err != nil {
+		return Config{}, err
+	}
 	md, err := toml.Decode(text, &cfg)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
@@ -372,6 +381,24 @@ func Parse(text string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// checkKeepFailed reports a host.keep_failed that is not a duration string. The TOML decoder's
+// own error for a bad duration does not name the key, so the value is read here first. Text the
+// probe cannot decode is left to the main decode, which reports it.
+func checkKeepFailed(text string) error {
+	var probe struct {
+		Host struct {
+			KeepFailed *string `toml:"keep_failed"`
+		} `toml:"host"`
+	}
+	if _, err := toml.Decode(text, &probe); err != nil || probe.Host.KeepFailed == nil {
+		return nil
+	}
+	if _, err := time.ParseDuration(*probe.Host.KeepFailed); err != nil {
+		return fmt.Errorf("host.keep_failed: %q is not a duration such as \"0s\" or \"5m\": %w", *probe.Host.KeepFailed, err)
+	}
+	return nil
 }
 
 // Validate checks every field and reports all problems at once.
@@ -445,6 +472,9 @@ func (c Config) Validate() error {
 	}
 	if !oneOf(c.Host.Kind, HostKinds) {
 		add("host.kind must be one of %v, got %q", HostKinds, c.Host.Kind)
+	}
+	if c.Host.KeepFailed.Duration < 0 {
+		add("host.keep_failed must be >= 0, got %s", c.Host.KeepFailed)
 	}
 	for name, s := range c.Sizes {
 		if !oneOf(name, SizeNames) {
