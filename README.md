@@ -29,7 +29,9 @@ make install   # go install (only from a merged main)
 **Linux.** mill runs on Linux and macOS. The herdr wrapper and the tests also work under dash
 (Ubuntu's `/bin/sh`), which has no job control: the herdr host starts each worker's process group
 through the hidden `mill __pgrun` command instead of relying on the shell. CI runs `make check` on
-ubuntu-latest and macos-latest (`.github/workflows/check.yml`).
+ubuntu-latest and macos-latest (`.github/workflows/check.yml`). The `flaky` CI job runs
+`make flaky` (`go test -count=3 -race ./...`) on ubuntu-latest to repeat the tests under the race
+detector and expose flaky tests; it is not part of `make check`.
 
 ## Use
 
@@ -815,6 +817,11 @@ branch that is already gone. If you merge and delete a parent's branch before it
 exists, the hook cannot open that child's PR. So first let every PR of the stack exist (run
 `mill review approve --goal` or `mill keep --watch`), then merge from the bottom of the stack up.
 
+**Refresh a child PR after its parent merges.** When you merge a parent PR, GitHub retargets its
+open child PR to the base branch. A merge clicked while that switch is still running fails with
+`Validation failed`. Refresh the child PR page, check that its base is now the base branch, and
+then merge it.
+
 ### CI status
 
 A status hook reads the review status (CI checks) of each published task from your forge. It is
@@ -947,6 +954,18 @@ Flags:
 
 **mill only ever pushes `review/*` branches.** It never pushes to `main` or any other branch;
 merging stays with you and your forge.
+
+**Lock files.** Concurrent `mill keep` and `mill run` in one repository do not step on each other
+through two lock files:
+
+- `<git common dir>/mill-worktrees.lock` (for example `.git/mill-worktrees.lock`) serializes
+  `git worktree add`, `remove` and `prune` for the whole repository, one at a time.
+- `.git/worktrees/<name>/mill-worktree.lock` holds one task worktree exclusively while mill
+  rebases, merges or commits there. Another process that needs that worktree waits for it.
+
+A crash can leave `index.lock` in a task worktree. When a restack finds one that is older than one
+minute and no git process is running in that worktree, mill removes it and logs a line saying so.
+A younger `index.lock`, or one while a git process may still be running there, is left alone.
 
 Exit codes: 0 ok, 1 error, 2 usage error, 3 check failed, 4 task or goal not verified.
 
