@@ -52,7 +52,8 @@ type Options struct {
 	Tasks    []string  // only these tasks (full ids); empty means every ready task
 	Out      io.Writer // one progress line per action; nil discards
 	Stderr   io.Writer // status hook failures; nil discards
-	// Now is the clock the CI status query runs on; nil means time.Now.
+	// Now is the clock the CI status query and the age check of a stale index.lock run on;
+	// nil means time.Now.
 	Now   func() time.Time
 	Force bool // run the combined check even when nothing changed since the last one
 	// Claimer claims each task before the pass changes it; the zero value means
@@ -147,6 +148,63 @@ func (k *keeper) gateOptions(ctx context.Context, id string) (po publish.Options
 		return *actErr
 	}
 	return po, actErr
+}
+
+// staleIndexLockAge is how old an index.lock in a task worktree must be before a restack
+// removes it as left behind by a crashed git; a younger one may belong to a running git.
+const staleIndexLockAge = time.Minute
+
+func (k *keeper) now() time.Time {
+	if k.Now != nil {
+		return k.Now()
+	}
+	return time.Now()
+}
+
+// lockWorktree holds the task worktree wt exclusively (gitx.LockWorktree) while the keeper
+// rebases, merges, commits or reads there; pass the returned context down so that nested calls
+// re-enter the lock. A wt that is not a checkout of branch cannot be locked: it is returned
+// unlocked, so that the caller's own check reports it.
+func lockWorktree(ctx context.Context, wt, branch string) (context.Context, func(), error) {
+	lctx, unlock, err := gitx.LockWorktree(ctx, wt)
+	if err != nil {
+		if !gitx.IsWorktreeOn(ctx, wt, branch) {
+			return ctx, func() {}, nil
+		}
+		return nil, nil, err
+	}
+	return lctx, unlock, nil
+}
+
+// lockTask holds the worktree of task id while the fixer commits there. A task without a
+// branch or worktree is not locked: the pipeline creates or restores it.
+func (k *keeper) lockTask(ctx context.Context, id string) (context.Context, func(), error) {
+	br, err := k.Store.GetBranch(ctx, id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && br.Worktree == "") {
+		return ctx, func() {}, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: load its branch to lock its worktree: %w", id, err)
+	}
+	return lockWorktree(ctx, br.Worktree, br.Name)
+}
+
+// lockRestack records the restack of the claimed task t on its claim, then holds its worktree
+// for the restack (lockWorktree). Unlock before the gate runs.
+func (k *keeper) lockRestack(ctx context.Context, t store.Task, br store.Branch) (context.Context, func(), error) {
+	if err := k.activity(ctx, t.ID, "restack"); err != nil {
+		return nil, nil, err
+	}
+	return lockWorktree(ctx, br.Worktree, br.Name)
+}
+
+// clearStaleIndexLock removes an index.lock that a crashed git left in the worktree wt of task
+// id, older than staleIndexLockAge, and says so in the output. ctx must hold wt's lock.
+func (k *keeper) clearStaleIndexLock(ctx context.Context, id, wt string) error {
+	_, err := gitx.ClearStaleIndexLock(ctx, wt, staleIndexLockAge, k.now, func(format string, a ...any) {
+		k.logf("%s: %s", id, fmt.Sprintf(format, a...))
+	})
+	return err
 }
 
 func (k *keeper) logf(format string, a ...any) {
@@ -506,11 +564,8 @@ func (k *keeper) blockRestack(ctx context.Context, t store.Task, reason string) 
 
 // preflight checks the task's worktree can be rebased onto onto: it has a starting point and
 // is a clean checkout of the branch at the recorded head. A failed check blocks the task and
-// returns ok false.
+// returns ok false. ctx holds the worktree (lockRestack).
 func (k *keeper) preflight(ctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
-	if err := k.activity(ctx, t.ID, "restack"); err != nil {
-		return false, err
-	}
 	if br.StartSHA == "" && br.BaseSHA == "" {
 		return false, k.block(ctx, t.ID, "keeper: no recorded starting point, so its own commits cannot be told apart; rebase it by hand")
 	}
@@ -587,8 +642,15 @@ func (k *keeper) resolve(ctx context.Context, t store.Task, wt, onto string, bas
 
 // rebase replays the net change of the task's own commits onto tip (KP6), resolving stops
 // with rerere or the resolver agent. Any failure puts the branch back where it was and blocks the task.
+// The worktree is held exclusively from the preflight through the squash, the rebase, its
+// conflict resolution and continue or abort; the gate runs once it is released.
 func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto, tip string, landed bool) error {
-	if ok, err := k.preflight(ctx, t, br, onto); err != nil || !ok {
+	lctx, unlock, err := k.lockRestack(ctx, t, br)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if ok, err := k.preflight(lctx, t, br, onto); err != nil || !ok {
 		return err
 	}
 	oldStart := br.StartSHA
@@ -599,7 +661,7 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	if oldBase == "" {
 		oldBase = oldStart
 	}
-	baseCommits, err := k.baseCommits(ctx, oldBase, tip)
+	baseCommits, err := k.baseCommits(lctx, oldBase, tip)
 	if err != nil {
 		return err
 	}
@@ -608,7 +670,7 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	wt := br.Worktree
 	// undo undoes the rebase and blocks the task; step names what failed. A block during the
 	// rebase itself (restack) is retried by later syncs.
-	undo := func(restack bool, step string, files []string, detail string) error {
+	undo := func(ctx context.Context, restack bool, step string, files []string, detail string) error {
 		if err := k.restore(ctx, old); err != nil {
 			return fmt.Errorf("%s: rebasing onto %s failed (%s: %s) and the branch could not be restored: %w", t.ID, onto, step, detail, err)
 		}
@@ -623,14 +685,17 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 		}
 		return k.block(ctx, t.ID, reason)
 	}
-	fail := func(step string, files []string, detail string) error { return undo(true, step, files, detail) }
+	fail := func(step string, files []string, detail string) error { return undo(lctx, true, step, files, detail) }
 
+	if err := k.clearStaleIndexLock(lctx, t.ID, wt); err != nil {
+		return fail("clearing a stale index.lock", nil, err.Error())
+	}
 	// Replay the net change of the task's commits, so attempts that undo each other cannot
 	// conflict on their own.
-	if _, _, err := gitx.SquashOwn(ctx, wt, t.ID, oldStart); err != nil {
+	if _, _, err := gitx.SquashOwn(lctx, wt, t.ID, oldStart); err != nil {
 		return fail("squashing the own commits", nil, err.Error())
 	}
-	st, err := gitx.RebaseStart(ctx, wt, tip, oldStart, true)
+	st, err := gitx.RebaseStart(lctx, wt, tip, oldStart, true)
 	if err != nil {
 		return fail("the rebase", nil, err.Error())
 	}
@@ -640,10 +705,10 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 		files := st.Files
 		k.logf("%s: stopped at %s on conflicts in %s; running the resolver", t.ID, short(st.Stopped), strings.Join(files, ", "))
 		agent = true
-		if step, marked, detail := k.resolve(ctx, t, wt, onto, baseCommits, files); step != "" {
+		if step, marked, detail := k.resolve(lctx, t, wt, onto, baseCommits, files); step != "" {
 			return fail(step, marked, detail)
 		}
-		if st, err = gitx.RebaseContinue(ctx, wt, files, true); err != nil {
+		if st, err = gitx.RebaseContinue(lctx, wt, files, true); err != nil {
 			return fail("continuing the rebase", files, err.Error())
 		}
 		rerere += st.RerereResolved
@@ -653,8 +718,10 @@ func (k *keeper) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 		br.Base = k.Cfg.BaseBranch
 	}
 	br.BaseSHA, br.StartSHA, br.HeadSHA = tip, tip, st.Head
+	// The gate reads the worktree under its own lock; lctx no longer holds it from here on.
+	unlock()
 	return k.settle(ctx, t, old, br, restacked{onto: onto, tip: tip, oldStart: oldStart, agent: agent, rerere: rerere},
-		func(step string, files []string, detail string) error { return undo(false, step, files, detail) })
+		func(step string, files []string, detail string) error { return undo(ctx, false, step, files, detail) })
 }
 
 // restacked describes a finished rebase or fan-in restack for settle.
@@ -718,7 +785,7 @@ func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br
 		if err := k.activity(ctx, t.ID, "waiting for gate"); err != nil {
 			return false, err
 		}
-		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
+		g, err := k.gateAtHead(ctx, gctx, po, t, br)
 		if *actErr != nil {
 			return false, *actErr
 		}
@@ -778,7 +845,7 @@ func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br
 		if err := k.activity(ctx, t.ID, "waiting for gate"); err != nil {
 			return false, err
 		}
-		g, err := publish.GateAtHead(gctx, po, t, br, "keeper")
+		g, err := k.gateAtHead(ctx, gctx, po, t, br)
 		if *actErr != nil {
 			return false, *actErr
 		}
@@ -810,10 +877,53 @@ func (k *keeper) gateAndPublish(ctx, gctx context.Context, t store.Task, old, br
 	return true, k.republish(ctx, t.ID)
 }
 
+// gateAtHead re-runs the gate of the restacked task t at br's head with po, holding its
+// worktree while the gate reads it. gctx, cancelled when a parent's gate fails, stops the gate
+// only once its git reads in the worktree are done (when it starts waiting for a gate slot):
+// git killed in the middle of a command can leave the worktree's index.lock behind, which
+// then fails the next restack of the task.
+func (k *keeper) gateAtHead(ctx, gctx context.Context, po publish.Options, t store.Task, br store.Branch) (gate.Result, error) {
+	lctx, unlock, err := lockWorktree(ctx, br.Worktree, br.Name)
+	if err != nil {
+		return gate.Result{}, err
+	}
+	defer unlock()
+	rctx, cancel := context.WithCancel(lctx)
+	defer cancel()
+	stop := func() bool { return false }
+	defer func() { stop() }()
+	activity := po.GateActivity
+	po.GateActivity = func(step string) error {
+		if step == "waiting for gate" {
+			stop()
+			if gctx.Err() != nil {
+				cancel()
+			} else {
+				stop = context.AfterFunc(gctx, cancel)
+			}
+		}
+		if activity == nil {
+			return nil
+		}
+		return activity(step)
+	}
+	g, err := publish.GateAtHead(rctx, po, t, br, "keeper")
+	if err == nil && gctx.Err() != nil {
+		err = fmt.Errorf("gate re-run interrupted: %w", gctx.Err())
+	}
+	return g, err
+}
+
 // restore puts the branch back at the old head: it aborts a rebase in progress, resets a
-// finished one, restores the branch row and checks the worktree is clean at the old head.
+// finished one, restores the branch row and checks the worktree is clean at the old head. It
+// holds the worktree throughout (re-entering a lock ctx already holds).
 func (k *keeper) restore(ctx context.Context, old store.Branch) error {
 	wt := old.Worktree
+	ctx, unlock, err := lockWorktree(ctx, wt, old.Name)
+	if err != nil {
+		return fmt.Errorf("restore %s: %w", old.Name, err)
+	}
+	defer unlock()
 	in, err := rebaseInProgress(ctx, wt)
 	if err != nil {
 		return err
@@ -884,7 +994,12 @@ func (k *keeper) fix(ctx context.Context, t store.Task, g gate.Result, wasPublis
 		return false, err
 	}
 	k.logf("%s: the gate failed after the restack; running the fixer", t.ID)
-	out, err := k.Pipeline.Run(ctx, t.ID)
+	lctx, unlock, err := k.lockTask(ctx, t.ID)
+	if err != nil {
+		return false, err
+	}
+	out, err := k.Pipeline.Run(lctx, t.ID)
+	unlock()
 	if err != nil {
 		return false, fmt.Errorf("fixer for %s: %w", t.ID, err)
 	}

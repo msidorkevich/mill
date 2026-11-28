@@ -303,10 +303,16 @@ func (c *combined) logf(format string, a ...any) {
 // check_cmd plus each merged task's checks. A merge conflict is red. An error means the state
 // could not be built or the gate could not run.
 func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResult, error) {
-	if _, err := gitx.Run(ctx, c.dir, "reset", "-q", "--hard", c.base); err != nil {
+	// The reset, clean and merges hold the throwaway worktree exclusively; the gate runs after.
+	lctx, unlock, err := gitx.LockWorktree(ctx, c.dir)
+	if err != nil {
+		return probeResult{}, fmt.Errorf("combined check: %w", err)
+	}
+	defer unlock()
+	if _, err := gitx.Run(lctx, c.dir, "reset", "-q", "--hard", c.base); err != nil {
 		return probeResult{}, fmt.Errorf("combined check: reset the throwaway worktree to %s: %w", short(c.base), err)
 	}
-	if _, err := gitx.Run(ctx, c.dir, "clean", "-q", "-ffdx"); err != nil {
+	if _, err := gitx.Run(lctx, c.dir, "clean", "-q", "-ffdx"); err != nil {
 		return probeResult{}, fmt.Errorf("combined check: clean the throwaway worktree: %w", err)
 	}
 	c.res.Probes++
@@ -314,7 +320,7 @@ func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResu
 	cmds := []string{c.Cfg.CheckCmd}
 	for _, b := range branches {
 		ids = append(ids, b.task.ID)
-		err := gitx.Merge(ctx, c.dir, b.br.HeadSHA, fmt.Sprintf("mill: combined check merges %s (%s)", b.br.Name, b.task.ID))
+		err := gitx.Merge(lctx, c.dir, b.br.HeadSHA, fmt.Sprintf("mill: combined check merges %s (%s)", b.br.Name, b.task.ID))
 		var ce *gitx.ConflictError
 		if errors.As(err, &ce) {
 			failed := fmt.Sprintf("  merge conflict: %s (%s) conflicts in %s", b.task.ID, b.br.Name, strings.Join(ce.Files, ", "))
@@ -326,6 +332,7 @@ func (c *combined) probe(ctx context.Context, branches []readyBranch) (probeResu
 		}
 		cmds = append(cmds, b.task.Checks...)
 	}
+	unlock()
 	g, err := c.gateInSlot(ctx, gate.Options{
 		Host: c.host, Dir: c.dir, Cmds: cmds, LogDir: filepath.Join(c.logDir, fmt.Sprintf("probe-%d", c.res.Probes)),
 		Env: c.env, Timeout: c.Cfg.GateTimeout.Duration, Nice: c.Cfg.GateNice, Label: "combined check",
