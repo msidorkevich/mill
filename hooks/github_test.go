@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -145,6 +146,20 @@ func (s *ghServer) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		reply(http.StatusNotFound, map[string]string{"message": "Not Found"})
 	}
+}
+
+// ghLocked runs f with the server's mutex held: tests set scripted state through it.
+func (s *ghServer) ghLocked(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f()
+}
+
+// ghOpen returns a copy of the open pull requests.
+func (s *ghServer) ghOpen() map[string]int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return maps.Clone(s.open)
 }
 
 func (s *ghServer) recorded() []ghRequest {
@@ -308,7 +323,7 @@ func TestGitHubCreatesDraftPRWhenNoneIsOpen(t *testing.T) {
 func TestGitHubUpdatesExistingPRWithoutDuplicate(t *testing.T) {
 	ghRequireTools(t)
 	s := ghNewServer(t, "acme", "widgets")
-	s.open["mill/g1/feature"] = 7
+	s.ghLocked(func() { s.open["mill/g1/feature"] = 7 })
 	res := ghRunHook(t, t.TempDir(), ghInput(t, map[string]any{"event": "update", "title": "New title"}), ghEnv(s)...)
 	ghExpectSuccess(t, res, "https://github.example/acme/widgets/pull/7")
 
@@ -338,7 +353,7 @@ func TestGitHubSecondRunUpdatesWhatFirstCreated(t *testing.T) {
 func TestGitHubUpdateRetargetsToNewBase(t *testing.T) {
 	ghRequireTools(t)
 	s := ghNewServer(t, "acme", "widgets")
-	s.open["mill/g1/child"] = 12
+	s.ghLocked(func() { s.open["mill/g1/child"] = 12 })
 	in := ghInput(t, map[string]any{
 		"event":         "update",
 		"review_branch": "mill/g1/child",
@@ -355,7 +370,7 @@ func TestGitHubUpdateRetargetsToNewBase(t *testing.T) {
 func TestGitHubStackedBodyNamesParentPR(t *testing.T) {
 	ghRequireTools(t)
 	s := ghNewServer(t, "acme", "widgets")
-	s.open["mill/g1/parent"] = 41
+	s.ghLocked(func() { s.open["mill/g1/parent"] = 41 })
 	in := ghInput(t, map[string]any{
 		"review_branch":        "mill/g1/child",
 		"base_branch":          "mill/g1/parent",
@@ -472,7 +487,7 @@ func TestGitHubCheckModeSucceedsWithRepositoryAccess(t *testing.T) {
 func TestGitHubCheckModeFailsWithoutRepositoryAccess(t *testing.T) {
 	ghRequireTools(t, "git")
 	s := ghNewServer(t, "acme", "widgets")
-	s.noRepo = true
+	s.ghLocked(func() { s.noRepo = true })
 	dir := ghGitRepo(t, "git@github.com:acme/widgets.git")
 	res := ghRunHook(t, dir, "", append(ghEnv(s), "MILL_HOOK_CHECK=1")...)
 	if res.Code == 0 {
@@ -612,13 +627,15 @@ const ghSHA = "0123456789abcdef0123456789abcdef01234567"
 func TestGhStatusFailedCheckRunReportsFailureWithSummaryAndPR(t *testing.T) {
 	ghRequireTools(t)
 	s := ghNewServer(t, "acme", "widgets")
-	s.open["mill/g1/feature"] = 9
+	s.ghLocked(func() { s.open["mill/g1/feature"] = 9 })
 	long := strings.Repeat("é", 1500) // 3000 bytes
-	s.checkRuns = []map[string]any{
-		{"name": "build", "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/1"},
-		{"name": "test", "status": "completed", "conclusion": "failure", "html_url": "https://github.example/runs/2",
-			"output": map[string]any{"title": "2 tests failed", "summary": long}},
-	}
+	s.ghLocked(func() {
+		s.checkRuns = []map[string]any{
+			{"name": "build", "status": "completed", "conclusion": "success", "html_url": "https://github.example/runs/1"},
+			{"name": "test", "status": "completed", "conclusion": "failure", "html_url": "https://github.example/runs/2",
+				"output": map[string]any{"title": "2 tests failed", "summary": long}},
+		}
+	})
 	doc := ghRunStatus(t, s)
 	if doc.State != "failure" {
 		t.Fatalf("state = %q, want failure", doc.State)
@@ -688,7 +705,7 @@ func TestGhStatusStates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := ghNewServer(t, "acme", "widgets")
-			s.statuses, s.checkRuns = tc.statuses, tc.runs
+			s.ghLocked(func() { s.statuses, s.checkRuns = tc.statuses, tc.runs })
 			doc := ghRunStatus(t, s)
 			if doc.State != tc.want {
 				t.Fatalf("state = %q, want %q (checks %+v)", doc.State, tc.want, doc.Checks)
@@ -706,7 +723,9 @@ func TestGhStatusStates(t *testing.T) {
 func TestGhStatusListsStatusContextAndTargetURL(t *testing.T) {
 	ghRequireTools(t)
 	s := ghNewServer(t, "acme", "widgets")
-	s.statuses = []map[string]any{{"context": "ci/deploy", "state": "error", "target_url": "https://ci.example/2"}}
+	s.ghLocked(func() {
+		s.statuses = []map[string]any{{"context": "ci/deploy", "state": "error", "target_url": "https://ci.example/2"}}
+	})
 	doc := ghRunStatus(t, s)
 	if len(doc.Checks) != 1 || doc.Checks[0].Name != "ci/deploy" || doc.Checks[0].URL != "https://ci.example/2" ||
 		doc.Checks[0].State != "failure" {
@@ -750,8 +769,8 @@ func TestGhCheckPassesWhenProbeGets422(t *testing.T) {
 	if !strings.HasPrefix(head, "mill-permission-probe-") || len(head) <= len("mill-permission-probe-") || posts[0].Body["base"] != "main" {
 		t.Fatalf("probe body = %v, want head mill-permission-probe-<random> and base main", posts[0].Body)
 	}
-	if len(s.open) != 0 {
-		t.Fatalf("open PRs = %v after the probe, want none", s.open)
+	if open := s.ghOpen(); len(open) != 0 {
+		t.Fatalf("open PRs = %v after the probe, want none", open)
 	}
 }
 
@@ -759,7 +778,7 @@ func TestGhCheckFailsWhenTokenCannotCreatePulls(t *testing.T) {
 	for _, code := range []int{http.StatusForbidden, http.StatusNotFound} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			s := ghNewServer(t, "acme", "widgets")
-			s.probeStatus = code
+			s.ghLocked(func() { s.probeStatus = code })
 			res := ghRunCheck(t, s)
 			if res.Code == 0 {
 				t.Fatalf("exit 0 with HTTP %d from the probe, want non-zero", code)
@@ -774,7 +793,7 @@ func TestGhCheckFailsWhenTokenCannotCreatePulls(t *testing.T) {
 
 func TestGhCheckFailsOnUnexpectedProbeStatus(t *testing.T) {
 	s := ghNewServer(t, "acme", "widgets")
-	s.probeStatus = http.StatusInternalServerError
+	s.ghLocked(func() { s.probeStatus = http.StatusInternalServerError })
 	res := ghRunCheck(t, s)
 	if res.Code == 0 || !strings.Contains(res.Stderr, "500") {
 		t.Fatalf("exit %d, stderr %q; want a failure naming HTTP 500", res.Code, res.Stderr)
@@ -783,7 +802,7 @@ func TestGhCheckFailsOnUnexpectedProbeStatus(t *testing.T) {
 
 func TestGhCheckStatusEventFailsWhenStatusesAreRefused(t *testing.T) {
 	s := ghNewServer(t, "acme", "widgets")
-	s.defaultStatus = http.StatusForbidden
+	s.ghLocked(func() { s.defaultStatus = http.StatusForbidden })
 	res := ghRunCheck(t, s, "MILL_HOOK_EVENT=status")
 	if res.Code == 0 {
 		t.Fatalf("exit 0 when commit statuses are refused, want non-zero")
