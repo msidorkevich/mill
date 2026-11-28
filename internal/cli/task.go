@@ -124,7 +124,7 @@ func runTaskRun(ctx context.Context, env Env, args []string) int {
 		return joinScheduler(ctx, env, paths, cfg, *hostFlag, s, spec, *retry, pid)
 	}
 
-	release, err := lockAndRecover(ctx, env, "task run", paths, s, cfg.Prices)
+	release, err := lockAndRecover(ctx, env, "task run", paths, s, cfg.Prices, cfg.Host.TmuxBin)
 	if err != nil {
 		// A scheduler may have started between the probe and taking the lock.
 		if pid, held, herr := runlock.Held(paths.RunLock); herr == nil && held {
@@ -251,7 +251,7 @@ func joinScheduler(ctx context.Context, env Env, paths project.Paths, cfg config
 		}
 		if !held {
 			// The scheduler stopped without finishing the task: run it here.
-			release, err := lockAndRecover(ctx, env, "task run", paths, s, cfg.Prices)
+			release, err := lockAndRecover(ctx, env, "task run", paths, s, cfg.Prices, cfg.Host.TmuxBin)
 			if err != nil {
 				if _, h, herr := runlock.Held(paths.RunLock); herr == nil && h {
 					continue // another scheduler took the lock first; it runs the task
@@ -324,7 +324,7 @@ func printJoinedOutcome(ctx context.Context, env Env, s *store.Store, t store.Ta
 
 // lockAndRecover takes the run lock and repairs what a killed run left behind. Call release
 // when the run ends.
-func lockAndRecover(ctx context.Context, env Env, name string, paths project.Paths, s *store.Store, prices map[string]price.Rates) (release func(), err error) {
+func lockAndRecover(ctx context.Context, env Env, name string, paths project.Paths, s *store.Store, prices map[string]price.Rates, tmuxBin string) (release func(), err error) {
 	lock, err := runlock.Acquire(paths.RunLock)
 	if err != nil {
 		return nil, err
@@ -334,7 +334,7 @@ func lockAndRecover(ctx context.Context, env Env, name string, paths project.Pat
 			fmt.Fprintf(env.Stderr, "mill %s: %v\n", name, err)
 		}
 	}
-	if err := killLeftoverWorkers(ctx, env.Stdout, s, herdrTabs{runs: paths.Runs, lookPath: env.lookPath}); err != nil {
+	if err := killLeftoverWorkers(ctx, env.Stdout, s, hostWindows{runs: paths.Runs, lookPath: env.lookPath, tmuxBin: tmuxBin}); err != nil {
 		release()
 		return nil, err
 	}
@@ -1068,11 +1068,11 @@ func fmtInt(n int64) string {
 }
 
 // killLeftoverWorkers kills the process groups of workers that outlived a killed mill and
-// closes the herdr tabs they ran in, plus every herdr tab under the runs directory whose
-// recorded mill process is gone. A recorded process is only killed when it is alive,
-// leads its own group and its command line contains the recorded command; anything else
-// (gone, or pid reused) is left alone.
-func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store, tabs herdrTabs) error {
+// closes the herdr tabs or tmux windows they ran in, plus every one recorded under the runs
+// directory whose recorded mill process is gone. A recorded process is only killed when it
+// is alive, leads its own group and its command line contains the recorded command;
+// anything else (gone, or pid reused) is left alone.
+func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store, windows hostWindows) error {
 	running, err := s.RunningAttempts(ctx)
 	if err != nil {
 		return err
@@ -1081,11 +1081,11 @@ func killLeftoverWorkers(ctx context.Context, out io.Writer, s *store.Store, tab
 		if err := killLeftoverProcesses(ctx, out, s, a); err != nil {
 			return err
 		}
-		if err := closeRecordedTabs(out, tabs, a); err != nil {
+		if err := closeRecordedTabs(out, windows, a); err != nil {
 			return err
 		}
 	}
-	return closeOrphanedTabs(out, tabs)
+	return closeOrphanedTabs(out, windows)
 }
 
 // killLeftoverProcesses kills what is left of one running attempt's worker.

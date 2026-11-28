@@ -66,7 +66,7 @@ func runRun(ctx context.Context, env Env, args []string) int {
 		return fail(errors.New(`start_children_on = "published" is not supported yet (publishing does not exist); set start_children_on = "verified" in .mill/config.toml`))
 	}
 
-	release, code := acquireScheduler(ctx, env, paths, s, cfg.Prices)
+	release, code := acquireScheduler(ctx, env, paths, s, cfg.Prices, cfg.Host.TmuxBin)
 	if release == nil {
 		return code
 	}
@@ -143,7 +143,7 @@ func runRun(ctx context.Context, env Env, args []string) int {
 // acquireScheduler makes this process the repository's single scheduler: it takes the run
 // lock, then repairs what a killed run left behind. When it fails it prints why and returns a
 // nil release with the exit code; otherwise call release when the run ends.
-func acquireScheduler(ctx context.Context, env Env, paths project.Paths, s *store.Store, prices map[string]price.Rates) (release func(), code int) {
+func acquireScheduler(ctx context.Context, env Env, paths project.Paths, s *store.Store, prices map[string]price.Rates, tmuxBin string) (release func(), code int) {
 	lock, err := runlock.Acquire(paths.RunLock)
 	if err != nil {
 		if pid, held, herr := runlock.Held(paths.RunLock); herr == nil && held {
@@ -163,7 +163,7 @@ func acquireScheduler(ctx context.Context, env Env, paths project.Paths, s *stor
 		fmt.Fprintf(env.Stderr, "mill run: %v\n", err)
 		return nil, ExitError
 	}
-	if err := killLeftoverWorkers(ctx, env.Stdout, s, herdrTabs{runs: paths.Runs, lookPath: env.lookPath}); err != nil {
+	if err := killLeftoverWorkers(ctx, env.Stdout, s, hostWindows{runs: paths.Runs, lookPath: env.lookPath, tmuxBin: tmuxBin}); err != nil {
 		return fail(err)
 	}
 	usage, err := interruptedUsage(ctx, env.Stdout, s, prices)
