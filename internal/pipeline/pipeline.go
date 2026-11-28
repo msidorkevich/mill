@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -326,17 +327,30 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 			return out, err
 		}
 		if len(outside) > 0 {
-			owners, err := p.siblingOwners(ctx, t, outside)
+			// Files a request names are part of the task's scope: noted, never refused.
+			requested := requestedFiles(requests, outside)
+			var refusable []string
+			for _, f := range outside {
+				if !slices.Contains(requested, f) {
+					refusable = append(refusable, f)
+				}
+			}
+			owners, err := p.siblingOwners(ctx, t, refusable)
 			if err != nil {
 				return out, err
 			}
-			if _, err := p.Store.AppendEvent(ctx, "owns-outside", "", t.ID, map[string]any{"attempt": n, "files": outside, "owners": owners}); err != nil {
+			ev := map[string]any{"attempt": n, "files": outside, "owners": owners}
+			if len(requested) > 0 {
+				ev["requested"] = requested
+				p.logf("%s a%d owns      %d file(s) outside owns named in requests: %s", t.ID, n, len(requested), strings.Join(requested, ", "))
+			}
+			if _, err := p.Store.AppendEvent(ctx, "owns-outside", "", t.ID, ev); err != nil {
 				return out, err
 			}
-			if len(owners) > 0 || p.Cfg.OwnsPolicy == "enforce" {
+			if len(owners) > 0 || (p.Cfg.OwnsPolicy == "enforce" && len(refusable) > 0) {
 				var ownerIDs []string
 				seen := map[string]bool{}
-				for _, f := range outside {
+				for _, f := range refusable {
 					ids, owned := owners[f]
 					if owned {
 						for _, id := range ids {
@@ -353,7 +367,7 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 				if len(owners) > 0 {
 					p.logf("%s a%d owns      %d file(s) owned by %s", t.ID, n, len(owners), strings.Join(ownerIDs, ", "))
 				} else {
-					p.logf("%s a%d owns      %d file(s) outside owns", t.ID, n, len(outside))
+					p.logf("%s a%d owns      %d file(s) outside owns", t.ID, n, len(refusable))
 				}
 				if err := p.recordFindings(ctx, t.ID, n, findings); err != nil {
 					return out, err
@@ -550,7 +564,7 @@ func (p *Pipeline) verifyRun(ctx context.Context, t store.Task, v verifyStep, ou
 		out, err = p.verified(ctx, t, v, out)
 		return out, nil, true, false, err
 	}
-	findings, outScope, owners, err := p.splitOutOfScope(ctx, t, verdict.Findings, v.outside)
+	findings, outScope, owners, err := p.splitOutOfScope(ctx, t, verdict.Findings, v.outside, requests)
 	if err != nil {
 		return out, nil, true, false, err
 	}
