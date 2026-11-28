@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -759,4 +760,85 @@ func TestHerdrWrapperUnderDashRecordsExitWithoutJobControlNoise(t *testing.T) {
 	if got, want := read(t, filepath.Join(fake, "pane.out")), "mill worker: worker. Closing this tab stops the task.\ndone\n"; got != want {
 		t.Fatalf("pane shows %q, want %q", got, want)
 	}
+}
+
+// fakeTerminal runs the wrapper as a plain child process; its window reports itself gone
+// once closed is set.
+type fakeTerminal struct {
+	mu     sync.Mutex
+	gone   bool
+	closes int
+}
+
+func (*fakeTerminal) kind() string { return "fake" }
+
+func (t *fakeTerminal) open(label, dir string, argv []string, record string) (window, error) {
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	go cmd.Wait()
+	return fakeWindow{t}, nil
+}
+
+type fakeWindow struct{ t *fakeTerminal }
+
+func (w fakeWindow) close() error {
+	w.t.mu.Lock()
+	defer w.t.mu.Unlock()
+	w.t.closes++
+	return nil
+}
+
+func (w fakeWindow) exists() (bool, error) {
+	w.t.mu.Lock()
+	defer w.t.mu.Unlock()
+	return !w.t.gone, nil
+}
+
+func (fakeWindow) String() string { return "fake window w1" }
+
+func TestWrapperProtocolRunsInAnyTerminalAndReportsClosedWindow(t *testing.T) {
+	t.Parallel()
+	cfg := wrapperConfig{poll: 10 * time.Millisecond, startTimeout: 10 * time.Second, grace: 300 * time.Millisecond, pgrun: testenv.PgrunArgv()}
+	dir := t.TempDir()
+	term := &fakeTerminal{}
+	h, err := startWrapped(context.Background(), term, cfg, ProcSpec{
+		Argv: []string{"/bin/sh", "-c", "echo hi; exit 5"}, Env: []string{"PATH=/usr/bin:/bin"},
+		StdoutPath: filepath.Join(dir, "out"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ex := waitHerdr(t, h); ex.Code != 5 || ex.Signaled {
+		t.Fatalf("exit = %+v, want code 5", ex)
+	}
+	if got := read(t, filepath.Join(dir, "out")); got != "hi\n" {
+		t.Fatalf("stdout = %q", got)
+	}
+	if term.closes != 1 {
+		t.Fatalf("window closed %d times, want once", term.closes)
+	}
+
+	// A window that reports itself gone loses the attempt, even while its wrapper runs.
+	term = &fakeTerminal{}
+	h, err = startWrapped(context.Background(), term, cfg, ProcSpec{
+		Argv: []string{"/bin/sleep", "30"}, Env: []string{"PATH=/usr/bin:/bin"},
+		StdoutPath: filepath.Join(dir, "out2"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	term.mu.Lock()
+	term.gone = true
+	term.mu.Unlock()
+	ex, err, _ := waitHerdrResult(t, h)
+	if err == nil || !strings.Contains(err.Error(), "fake host:") || !strings.Contains(err.Error(), "fake window w1") || !strings.Contains(err.Error(), "was closed or killed") {
+		t.Fatalf("Wait err = %v, want the closed window error", err)
+	}
+	if ex.Code != -1 || !ex.Signaled {
+		t.Fatalf("exit = %+v, want code -1 signaled", ex)
+	}
+	waitGone(t, h.pid)
 }
