@@ -30,7 +30,7 @@ func RunInput(ctx context.Context, dir, stdin string, args ...string) (string, e
 
 // runEnv is RunInput with extra environment variables (added after cleanEnv's).
 func runEnv(ctx context.Context, dir, stdin string, env []string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, Bin(), args...)
+	cmd := Command(ctx, args...)
 	cmd.Dir = dir
 	cmd.Env = append(cleanEnv(), env...)
 	if stdin != "" {
@@ -41,7 +41,7 @@ func runEnv(ctx context.Context, dir, stdin string, env []string, args ...string
 	started(ctx)
 	if err := cmd.Run(); err != nil {
 		failed(ctx, dir)
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), withCtxErr(ctx, err), strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
@@ -207,7 +207,7 @@ func DeleteBranch(ctx context.Context, repo, name string) error {
 
 // IsAncestor reports whether commit ancestor is reachable from descendant.
 func IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, error) {
-	cmd := exec.CommandContext(ctx, Bin(), "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd := Command(ctx, "merge-base", "--is-ancestor", ancestor, descendant)
 	cmd.Dir = dir
 	cmd.Env = cleanEnv()
 	var stderr bytes.Buffer
@@ -218,11 +218,11 @@ func IsAncestor(ctx context.Context, dir, ancestor, descendant string) (bool, er
 		return true, nil
 	}
 	var ee *exec.ExitError
-	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+	if errors.As(err, &ee) && ee.ExitCode() == 1 && ctx.Err() == nil {
 		return false, nil
 	}
 	failed(ctx, dir)
-	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w: %s", ancestor, descendant, err, strings.TrimSpace(stderr.String()))
+	return false, fmt.Errorf("git merge-base --is-ancestor %s %s: %w: %s", ancestor, descendant, withCtxErr(ctx, err), strings.TrimSpace(stderr.String()))
 }
 
 // RebaseConflictError reports a rebase that stopped on conflicts. The rebase has been
@@ -374,7 +374,7 @@ func ReplayOnto(ctx context.Context, dir, task, onto, upstream string) (string, 
 // runExit runs git in dir and returns trimmed stdout and git's exit code. err is set only
 // when git could not run or was killed (not for a non-zero exit).
 func runExit(ctx context.Context, dir string, args ...string) (string, int, error) {
-	cmd := exec.CommandContext(ctx, Bin(), args...)
+	cmd := Command(ctx, args...)
 	cmd.Dir = dir
 	cmd.Env = cleanEnv()
 	var stdout, stderr bytes.Buffer
@@ -382,9 +382,9 @@ func runExit(ctx context.Context, dir string, args ...string) (string, int, erro
 	started(ctx)
 	err := cmd.Run()
 	var ee *exec.ExitError
-	if err != nil && (!errors.As(err, &ee) || ee.ExitCode() < 0) {
+	if err != nil && (!errors.As(err, &ee) || ee.ExitCode() < 0 || ctx.Err() != nil) {
 		failed(ctx, dir)
-		return "", -1, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return "", -1, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), withCtxErr(ctx, err), strings.TrimSpace(stderr.String()))
 	}
 	code := 0
 	if ee != nil {
