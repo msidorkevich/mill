@@ -34,11 +34,25 @@ func wtExclLock(t *testing.T, ctx context.Context, dir string) (context.Context,
 	return lctx, unlock
 }
 
-// wtExclTryLock tries LockWorktree for 50ms and reports whether it got the lock (released
-// again at once).
-func wtExclTryLock(t *testing.T, dir string) bool {
+// wtExclTakes reports whether LockWorktree takes the lock within 10s (released again at
+// once). It returns as soon as the lock is taken; the generous limit only absorbs a slow git
+// start (lockWorktreePoll runs git rev-parse first) on a loaded machine.
+func wtExclTakes(t *testing.T, dir string) bool {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	return wtExclTryLock(t, dir, 10*time.Second)
+}
+
+// wtExclRefused reports whether LockWorktree is still refused after waiting 200ms.
+func wtExclRefused(t *testing.T, dir string) bool {
+	t.Helper()
+	return !wtExclTryLock(t, dir, 200*time.Millisecond)
+}
+
+// wtExclTryLock tries LockWorktree for wait and reports whether it got the lock (released
+// again at once).
+func wtExclTryLock(t *testing.T, dir string, wait time.Duration) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	_, unlock, err := lockWorktreePoll(ctx, dir, time.Millisecond)
 	if err != nil {
@@ -51,7 +65,6 @@ func wtExclTryLock(t *testing.T, dir string) bool {
 	return true
 }
 
-// wtExclIndexLock writes <git dir>/index.lock of dir with modification time mtime.
 func wtExclIndexLock(t *testing.T, dir string, mtime time.Time) string {
 	t.Helper()
 	path := filepath.Join(wtExclGitDir(t, dir), "index.lock")
@@ -137,7 +150,7 @@ func TestLockWorktreeExcludesOtherProcesses(t *testing.T) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	if _, unlock, err := lockWorktreePoll(ctx, r, time.Millisecond); err == nil {
 		unlock()
@@ -148,7 +161,7 @@ func TestLockWorktreeExcludesOtherProcesses(t *testing.T) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
-	if !wtExclTryLock(t, r) {
+	if !wtExclTakes(t, r) {
 		t.Fatal("lock not taken after the other descriptor released the flock")
 	}
 }
@@ -162,10 +175,10 @@ func TestLockWorktreeLeavesOtherWorktreesUnaffected(t *testing.T) {
 	}
 	_, unlock := wtExclLock(t, context.Background(), r)
 	defer unlock()
-	if !wtExclTryLock(t, wt) {
+	if !wtExclTakes(t, wt) {
 		t.Fatal("locking the main worktree blocked another worktree of the same repository")
 	}
-	if wtExclTryLock(t, r) {
+	if !wtExclRefused(t, r) {
 		t.Fatal("main worktree locked twice")
 	}
 }
@@ -196,11 +209,11 @@ func TestLockWorktreeNestedWithReturnedContextDoesNotDeadlock(t *testing.T) {
 		t.Fatal("nested LockWorktree with the returned context deadlocked")
 	}
 	// The nested unlock was a no-op: the outer lock still excludes others.
-	if wtExclTryLock(t, r) {
+	if !wtExclRefused(t, r) {
 		t.Fatal("nested unlock released the outer lock")
 	}
 	unlock()
-	if !wtExclTryLock(t, r) {
+	if !wtExclTakes(t, r) {
 		t.Fatal("lock not free after the outer unlock")
 	}
 }
@@ -220,7 +233,11 @@ func TestLockWorktreeWaitGivesUpWhenContextEnds(t *testing.T) {
 		}
 		done <- err
 	}()
-	cancel()
+	// Cancel once the goroutine is most likely waiting for the lock rather than still
+	// starting git rev-parse, so the error is the wait's.
+	stop := time.AfterFunc(200*time.Millisecond, cancel)
+	defer stop.Stop()
+	defer cancel()
 	select {
 	case err := <-done:
 		if err == nil {
