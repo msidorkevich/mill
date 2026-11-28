@@ -1056,10 +1056,16 @@ func (s *syncer) restackFanInClaimed(ctx context.Context, t store.Task, br store
 	if err := s.activity(ctx, t.ID, "restack"); err != nil {
 		return err
 	}
-	if ok, err := s.preflight(ctx, t, br, tg.Onto); err != nil || !ok {
+	lctx, unlock, err := lockWorktree(ctx, br.Worktree, br.Name)
+	if err != nil {
+		return fmt.Errorf("restack %s onto %s: %w", t.ID, tg.Onto, err)
+	}
+	defer unlock()
+	if ok, err := s.preflight(lctx, t, br, tg.Onto); err != nil || !ok {
 		return err
 	}
-	fr, err := fanin.Restack(ctx, fanin.Options{Branch: br, Target: tg})
+	fr, err := fanin.Restack(lctx, fanin.Options{Branch: br, Target: tg})
+	unlock()
 	var ce *fanin.ConflictError
 	if errors.As(err, &ce) {
 		return s.blockRestack(ctx, t, fmt.Sprintf("sync: restacking fan-in task onto %s (%s) conflicts at %s in %s; the branch is unchanged. Every sync retries the restack; or restack it by hand in %s, then run `mill task rebase %s`",
@@ -1110,6 +1116,21 @@ func (s *syncer) blockPreflight(ctx context.Context, t store.Task, reason string
 	return s.block(ctx, t.ID, reason)
 }
 
+// lockWorktree holds the task worktree wt exclusively (gitx.LockWorktree) while the syncer
+// restacks it; pass the returned context down so that nested calls, and calls made with a
+// context that already holds the lock, re-enter it. A wt that is not a checkout of branch
+// cannot be locked: it is returned unlocked, so that preflight reports it.
+func lockWorktree(ctx context.Context, wt, branch string) (context.Context, func(), error) {
+	lctx, unlock, err := gitx.LockWorktree(ctx, wt)
+	if err != nil {
+		if ctx.Err() == nil && !gitx.IsWorktreeOn(ctx, wt, branch) {
+			return ctx, func() {}, nil
+		}
+		return nil, nil, err
+	}
+	return lctx, unlock, nil
+}
+
 // preflight checks the task's worktree can be restacked onto onto: it has a starting point,
 // is a clean checkout of the branch at the recorded head. A failed check blocks the task.
 func (s *syncer) preflight(ctx context.Context, t store.Task, br store.Branch, onto string) (bool, error) {
@@ -1142,14 +1163,20 @@ func (s *syncer) rebase(ctx context.Context, t store.Task, br store.Branch, onto
 	if err := s.activity(ctx, t.ID, "restack"); err != nil {
 		return err
 	}
-	if ok, err := s.preflight(ctx, t, br, onto); err != nil || !ok {
+	lctx, unlock, err := lockWorktree(ctx, br.Worktree, br.Name)
+	if err != nil {
+		return fmt.Errorf("restack %s onto %s: %w", t.ID, onto, err)
+	}
+	defer unlock()
+	if ok, err := s.preflight(lctx, t, br, onto); err != nil || !ok {
 		return err
 	}
 	oldStart := br.StartSHA
 	if oldStart == "" {
 		oldStart = br.BaseSHA
 	}
-	newHead, err := gitx.ReplayOnto(ctx, br.Worktree, t.ID, ontoSHA, oldStart)
+	newHead, err := gitx.ReplayOnto(lctx, br.Worktree, t.ID, ontoSHA, oldStart)
+	unlock()
 	var ce *gitx.RebaseConflictError
 	if errors.As(err, &ce) {
 		return s.blockRestack(ctx, t, fmt.Sprintf("sync: restacking onto %s (%s) conflicts in %s; the branch is unchanged. Every sync retries the restack; or rebase it by hand in %s, then run `mill task rebase %s`",

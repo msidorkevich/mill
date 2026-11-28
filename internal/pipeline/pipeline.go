@@ -286,16 +286,12 @@ func (p *Pipeline) run(ctx context.Context, t store.Task) (Outcome, error) {
 		}
 
 		// commit whatever changed, even after a failed run, so the next attempt builds on it
-		changed, err := gitx.HasChanges(ctx, br.Worktree)
+		msg := fmt.Sprintf("mill: %s attempt %d\n\n%s\n\nMill-Task: %s\nMill-Attempt: %d\n", t.ID, n, strings.TrimSpace(summary), t.ID, n)
+		head, changed, err := commitWorktree(ctx, br.Worktree, msg)
 		if err != nil {
-			return out, err
+			return out, fmt.Errorf("commit attempt %d: %w", n, err)
 		}
 		if changed {
-			msg := fmt.Sprintf("mill: %s attempt %d\n\n%s\n\nMill-Task: %s\nMill-Attempt: %d\n", t.ID, n, strings.TrimSpace(summary), t.ID, n)
-			head, err := gitx.CommitAll(ctx, br.Worktree, msg)
-			if err != nil {
-				return out, fmt.Errorf("commit attempt %d: %w", n, err)
-			}
 			br.HeadSHA = head
 			if err := p.Store.SaveBranch(ctx, br); err != nil {
 				return out, err
@@ -812,15 +808,12 @@ func (p *Pipeline) prepare(ctx context.Context, t store.Task) (store.Branch, err
 		}
 		br.Worktree = wt
 		// A killed run may have left uncommitted work; keep it so the next attempt builds on it.
-		changed, err := gitx.HasChanges(ctx, wt)
+		msg := fmt.Sprintf("mill: %s interrupted attempt\n\nMill-Task: %s\n", t.ID, t.ID)
+		_, changed, err := commitWorktree(ctx, wt, msg)
 		if err != nil {
-			return br, err
+			return br, fmt.Errorf("commit interrupted work in %s: %w", wt, err)
 		}
 		if changed {
-			msg := fmt.Sprintf("mill: %s interrupted attempt\n\nMill-Task: %s\n", t.ID, t.ID)
-			if _, err := gitx.CommitAll(ctx, wt, msg); err != nil {
-				return br, fmt.Errorf("commit interrupted work in %s: %w", wt, err)
-			}
 			p.logf("%s: committed uncommitted work from an interrupted attempt", t.ID)
 		}
 		if head, err := gitx.RevParse(ctx, wt, "HEAD"); err == nil {
@@ -1352,4 +1345,24 @@ func specSummary(spec string) string {
 		s = string(r[:120])
 	}
 	return s
+}
+
+// commitWorktree commits every change in the task worktree wt with msg while holding the
+// worktree (gitx.LockWorktree; a ctx that already holds it re-enters). It returns the new head
+// and true, or false when there was nothing to commit.
+func commitWorktree(ctx context.Context, wt, msg string) (string, bool, error) {
+	lctx, unlock, err := gitx.LockWorktree(ctx, wt)
+	if err != nil {
+		return "", false, err
+	}
+	defer unlock()
+	changed, err := gitx.HasChanges(lctx, wt)
+	if err != nil || !changed {
+		return "", false, err
+	}
+	head, err := gitx.CommitAll(lctx, wt, msg)
+	if err != nil {
+		return "", false, err
+	}
+	return head, true, nil
 }

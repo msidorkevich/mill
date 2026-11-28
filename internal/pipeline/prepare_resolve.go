@@ -28,6 +28,13 @@ func (e *stoppedError) Error() string { return e.stop }
 // *blockedError (the conflict could not be resolved), a *stoppedError (the resolver had to
 // stop) or mill's own error joined with any cleanup error.
 func (p *Pipeline) mergeDependency(ctx context.Context, t store.Task, wt, name string, m mergeDep) error {
+	// Hold the worktree from the merge through the resolver, the commit or the abort.
+	lctx, unlock, err := gitx.LockWorktree(ctx, wt)
+	if err != nil {
+		return errors.Join(fmt.Errorf("merge dependency %s: %w", m.id, err), p.abortCreated(ctx, wt, name))
+	}
+	defer unlock()
+	ctx = lctx
 	ms, err := gitx.MergeStart(ctx, wt, m.rev, m.message, true)
 	if err != nil {
 		return errors.Join(fmt.Errorf("merge dependency %s: %w", m.id, err), p.abortCreated(ctx, wt, name))
