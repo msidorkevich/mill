@@ -27,7 +27,7 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
-const runUsage = "mill run [<goal>] [--retry-blocked] [--wait-on-limit] [--host auto|exec|herdr]"
+const runUsage = "mill run [<goal>] [--retry-blocked] [--wait-on-limit] [--host auto|exec|herdr|tmux]"
 
 func runRun(ctx context.Context, env Env, args []string) int {
 	fs := newFlags(env, "run")

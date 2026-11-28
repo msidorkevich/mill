@@ -197,7 +197,7 @@ func Run(ctx context.Context, opts Options) Report {
 	// host
 	if !cfgOK {
 		add("host", Skip, "needs a valid config")
-	} else if _, desc, err := host.Select(cfg.Host.Kind, opts.Getenv, opts.LookPath); err != nil {
+	} else if _, desc, err := host.Select(cfg.Host.Kind, host.Settings{TmuxBin: cfg.Host.TmuxBin}, opts.Getenv, opts.LookPath); err != nil {
 		add("host", Fail, "%v", err)
 	} else {
 		add("host", OK, "%s", desc)
