@@ -1638,3 +1638,31 @@ attempt reverted them (item 49). After the spec, owns and acceptance were extend
       problems the local gate could not (Linux, races on slow runners). Consider a
       `mill review approve --goal --ci-probe` that pushes the combined branch, opens a draft PR
       through a hook, waits for the status hook and publishes only when it is green.
+
+### Found while running and publishing `g28` and `g29`
+
+- [ ] **51. The keeper claim-activity tests fail under load.** In the `g29/doctor-tmux` gate
+      (load average about 69) `TestKeepClaimActivityShowsWaitingForGateUntilItHoldsASlot`,
+      `...ErrorStopsThePassNamingTaskAndStep` and `...ShowsGateWhileTheGateRuns` failed: the
+      test's own gate went red, so the keeper started its fixer and the fake runner had no step
+      for it (also `TestRetryWithoutRecordedPassedGateStartsImplementer`). Script the gate result
+      in these tests instead of running a real command, or give them a gate that cannot fail
+      under load. The attempt spent $0.12 on a failure the task did not cause.
+- [ ] **52. The combined check blames a flaky failure on random pairs.** Publishing `g29`, the
+      first probe of all ten branches failed on the flaky herdr start tests in `internal/gate`;
+      the bisect then named `keep-failed`/`readme-tmux` and `config-tmux`/`gate-tmux-test` as
+      clashing and held four tasks back, although CI on GitHub had passed all ten merged
+      together. Before bisecting, re-run the failing probe's failing commands (or use the gate's
+      triage), and only bisect a failure that repeats.
+- [ ] **53. `review approve --goal` exits 1 on an already published task.** A second
+      `approve --goal` after a partial publish refused `wrapper-protocol` ("already published
+      ... nothing to publish") and exited 1 after publishing the rest. For `--goal`, skip
+      published tasks without changes.
+- [ ] **54. The restack gate duplicates CI.** After a dependency lands, `mill keep` restacks every
+      published child and re-runs the whole gate locally, one at a time, although each PR's CI
+      runs the same check on Linux and macOS and the status hook reports it. Add
+      `restack_gate = "local" | "ci"` (default "local"): with "ci" the keeper restacks and
+      re-publishes without a local gate, and the status hook's result for the new head is the
+      check (a failure starts the fixer with `ci_fix`, or appears for the operator). The
+      identical-tree reuse stays. This repository would use "ci" with `ci_fix = true`.
+
