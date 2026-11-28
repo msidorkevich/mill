@@ -20,6 +20,10 @@ resolves to `/usr/bin/git` (Apple's `xcrun` shim), mill asks `xcrun --find git` 
 binary directly, which is faster; if that fails, it keeps `/usr/bin/git`. `mill doctor` prints
 the path of the git it uses.
 
+When mill cancels a git command (for example on Ctrl-C), it sends SIGTERM first, so git removes its
+lock files (`index.lock`, `HEAD.lock`, ref locks) before it exits. A git still running after a grace
+period of about 2s is killed.
+
 ```sh
 make check     # gofmt, go vet, go test (zero tokens, no network)
 make build     # bin/mill
@@ -265,6 +269,10 @@ task's `owns` (a task with empty `owns` is never restricted):
 - `"enforce"`: each such file becomes a mill finding for the next attempt and the gate does not run
   for that attempt.
 - `"off"`: no check.
+
+**Files named in requests.** A file outside `owns` that a request names (see `mill review changes`
+above) is exempt from the owns refusal under `warn` and `enforce`: it is recorded in the
+`owns-outside` event, listed under `requested`, and the attempt is not refused for it.
 
 **Files owned by a dependency.** A task's dependencies and dependents, direct or transitive, do
 not count as its siblings (below), so editing a file they own does not by itself fail the attempt.
@@ -575,6 +583,11 @@ Once a goal's tasks are verified, you review them in mill and publish them for y
 - `mill review approve g1/a` publishes the task. `mill review changes g1/a -m "text"` records
   your comments (a blank line separates findings) and sends the task back for another attempt.
   `mill review reject g1/a -m "why"` blocks the task and puts its non-landed descendants on hold.
+- Findings from `mill review changes -m` or `--file`, the merge check and the CI fixer are requests
+  that stay in the task's scope until the task lands. The implementer and the verifier see them
+  under `Requests made after planning` on every attempt, and the verifier fails a change that does
+  not address one. Files a request names are exempt from the owns refusal: they are recorded as
+  `owns-outside` notes rather than refused.
 
 **The approval queue.** Approving a verified task whose parent is not published or landed yet
 does not fail: mill records the approval and prints
