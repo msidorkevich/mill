@@ -197,6 +197,18 @@ func moveTaskOntoBase(ctx context.Context, s *store.Store, cfg config.Config, pa
 	}
 	mr.OldStart = oldStart
 
+	// Hold the worktree from the checks through the rebase. A worktree that is not a checkout
+	// of the branch is left unlocked so that checkMoveWorktree reports it.
+	lctx, unlock, err := gitx.LockWorktree(ctx, br.Worktree)
+	if err != nil {
+		if ctx.Err() != nil || gitx.IsWorktreeOn(ctx, br.Worktree, br.Name) {
+			return mr, fmt.Errorf("task %s: %w; wait for the step using it to finish, then rebase again", id, err)
+		}
+		lctx, unlock = ctx, func() {}
+	}
+	defer unlock()
+	ctx = lctx
+
 	deps, err := s.TaskDeps(ctx, id)
 	if err != nil {
 		return mr, err
