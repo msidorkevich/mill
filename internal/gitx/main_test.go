@@ -12,5 +12,8 @@ func TestMain(m *testing.M) {
 	if err := testenv.DisableGitMaintenance(); err != nil {
 		panic(err)
 	}
+	if os.Getenv(wtAdminHelperEnv) != "" {
+		os.Exit(wtAdminHelperMain())
+	}
 	os.Exit(m.Run())
 }
