@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/msidorkevich/mill/internal/gate"
@@ -127,6 +128,9 @@ type ImplementerInput struct {
 	Attempt     int
 	MaxAttempts int
 	Findings    []Finding // from the previous attempt; empty on the first
+	// Requests are the operator, merge-check and ci findings recorded after planning,
+	// oldest first. They are part of the task's scope.
+	Requests []Finding
 }
 
 // Implementer builds the implementer prompt.
@@ -149,11 +153,21 @@ func Implementer(in ImplementerInput) string {
 		}
 		b.WriteString("\n")
 	}
+	if len(in.Requests) > 0 {
+		writeRequests(&b, in.Requests, "Keep the changes made for these requests and never revert them.")
+	}
 	writeChecks(&b, in.CheckCmd, t.Checks, in.RunsCheck)
-	if len(in.Findings) > 0 {
+	// A finding that is also a request is already listed above.
+	var findings []Finding
+	for _, f := range in.Findings {
+		if !slices.Contains(in.Requests, f) {
+			findings = append(findings, f)
+		}
+	}
+	if len(findings) > 0 {
 		b.WriteString("## Findings from the previous attempt (fix every one)\n")
 		b.WriteString("Your previous changes are already committed in this worktree; build on them.\n")
-		for _, f := range in.Findings {
+		for _, f := range findings {
 			fmt.Fprintf(&b, "- %s\n", f)
 		}
 		b.WriteString("\n")
@@ -211,6 +225,18 @@ func writeChecks(b *strings.Builder, checkCmd string, checks []string, runsCheck
 	}
 }
 
+// writeRequests writes the requests made after planning, followed by the role's own
+// instruction about them.
+func writeRequests(b *strings.Builder, requests []Finding, instruction string) {
+	b.WriteString("## Requests made after planning (part of this task's scope)\n")
+	for _, f := range requests {
+		fmt.Fprintf(b, "- %s\n", f)
+	}
+	b.WriteString("\nThe change must address every one of these requests. Changes needed for them are in scope, even when they go beyond the spec or touch files outside the files the task owns. ")
+	b.WriteString(instruction)
+	b.WriteString("\n\n")
+}
+
 // MaxDiffBytes bounds the diff included in the verifier prompt.
 const MaxDiffBytes = 150_000
 
@@ -231,6 +257,9 @@ type VerifierInput struct {
 	BaseChanged []string
 	// BaseChangedStat is the diffstat of those base changes, shown with BaseChanged.
 	BaseChangedStat string
+	// Requests are the operator, merge-check and ci findings recorded after planning,
+	// oldest first. They are part of the task's scope.
+	Requests []Finding
 }
 
 // SiblingTask is another task of the same goal, shown to the verifier so it can tell which
@@ -254,6 +283,9 @@ func Verifier(in VerifierInput) string {
 			fmt.Fprintf(&b, "%d. %s\n", i+1, a)
 		}
 		b.WriteString("\n")
+	}
+	if len(in.Requests) > 0 {
+		writeRequests(&b, in.Requests, "Fail the verdict with a finding for any request that is not addressed. Do not call changes made for a request out of scope.")
 	}
 	if len(in.Siblings) > 0 {
 		b.WriteString("## Other tasks of this goal\n")
@@ -304,7 +336,11 @@ func Verifier(in VerifierInput) string {
 		for _, f := range in.OutsideOwns {
 			fmt.Fprintf(&b, "- %s\n", f)
 		}
-		b.WriteString("\nThese files are outside the files the task owns. Pass only if the spec or the acceptance criteria require each of them; otherwise fail with a finding naming the file.\n\n")
+		required := "the spec or the acceptance criteria require each of them"
+		if len(in.Requests) > 0 {
+			required = "the spec, the acceptance criteria or a request made after planning require each of them (files named in a request are allowed)"
+		}
+		fmt.Fprintf(&b, "\nThese files are outside the files the task owns. Pass only if %s; otherwise fail with a finding naming the file.\n\n", required)
 	}
 	b.WriteString(`## How to review
 - You may read any file in this directory for context. Do not modify anything.
