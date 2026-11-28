@@ -3,7 +3,9 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -138,7 +140,7 @@ func TestOpenWithTmuxHostRunsNewWindowInWorktree(t *testing.T) {
 	t.Parallel()
 	s := seed(t)
 	saveBranch(t, s, "/wt/b")
-	m, herdr, shell := openModel(t, s, map[string]string{}, false)
+	m, herdr, shell := openModel(t, s, map[string]string{"TMUX": "/tmp/tmux,1,0"}, false)
 	m.opts.HostKind = "tmux"
 	calls := tmuxRecorder(m, "", 0, nil)
 	if cmd := m.openWorktree("g1/b"); cmd != nil {
@@ -150,6 +152,9 @@ func TestOpenWithTmuxHostRunsNewWindowInWorktree(t *testing.T) {
 	}
 	if out := m.cmds.render(100, 10); !strings.Contains(out, "opened /wt/b in a tmux window") {
 		t.Errorf("panel lacks success note:\n%s", out)
+	}
+	if out := m.cmds.render(100, 10); strings.Contains(out, "attach") {
+		t.Errorf("attach hint inside tmux:\n%s", out)
 	}
 }
 
@@ -209,5 +214,80 @@ func TestOpenWithExecHostRunsShellNotTmux(t *testing.T) {
 	want := [][2]string{{"/bin/zsh", "/wt/b"}}
 	if !reflect.DeepEqual(*shell, want) || len(*herdr) != 0 || len(*calls) != 0 {
 		t.Errorf("shell = %v, herdr = %v, tmux = %v", *shell, *herdr, *calls)
+	}
+}
+
+func TestOpenWithTmuxHostOutsideTmuxSaysToAttach(t *testing.T) {
+	t.Parallel()
+	s := seed(t)
+	saveBranch(t, s, "/wt/b")
+	m, _, shell := openModel(t, s, map[string]string{}, false)
+	m.opts.HostKind = "tmux"
+	calls := tmuxRecorder(m, "", 0, nil)
+	m.openWorktree("g1/b")
+	want := [][]string{{"new-window", "-c", "/wt/b"}}
+	if !reflect.DeepEqual(*calls, want) || len(*shell) != 0 {
+		t.Errorf("tmux = %v, shell = %v", *calls, *shell)
+	}
+	out := m.cmds.render(100, 10)
+	for _, w := range []string{"opened /wt/b in a tmux window", "not inside tmux", "`tmux attach`"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("panel lacks %q:\n%s", w, out)
+		}
+	}
+}
+
+func TestOpenWithTmuxHostExecsConfiguredBinary(t *testing.T) {
+	s := seed(t)
+	saveBranch(t, s, "/wt/b")
+	dir := t.TempDir()
+	bin, log := filepath.Join(dir, "my-tmux"), filepath.Join(dir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + log + "'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Options{
+		Store:    s,
+		Paths:    project.PathsAt(t.TempDir()),
+		Runner:   NewFakeRunner(),
+		Getenv:   func(string) string { return "" },
+		HostKind: "tmux",
+		TmuxBin:  bin,
+	})
+	m.openWorktree("g1/b")
+	got, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the configured tmux did not run: %v\n%s", err, m.cmds.render(0, 10))
+	}
+	if want := "new-window\n-c\n/wt/b\n"; string(got) != want {
+		t.Errorf("tmux args = %q, want %q", got, want)
+	}
+}
+
+func TestOpenAfterHostSelectionErrorShowsItAndRunsShell(t *testing.T) {
+	t.Parallel()
+	s := seed(t)
+	saveBranch(t, s, "/wt/b")
+	var shells []string
+	m := New(Options{
+		Store:   s,
+		Paths:   project.PathsAt(t.TempDir()),
+		Runner:  NewFakeRunner(),
+		Getenv:  func(string) string { return "" },
+		HostErr: errors.New("host.kind = tmux needs the tmux binary, which was not found: install tmux (or set host.tmux_bin), or set host.kind to exec"),
+		ShellCmd: func(_, dir string) *exec.Cmd {
+			shells = append(shells, dir)
+			return exec.Command("true")
+		},
+	})
+	// The whole error must be readable at a normal width, including what to do next.
+	out := strings.Join(strings.Fields(m.cmds.render(80, 10)), " ")
+	for _, w := range []string{"o opens a shell", "which was not found", "set host.kind to exec"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("panel lacks %q:\n%s", w, out)
+		}
+	}
+	if cmd := m.openWorktree("g1/b"); cmd == nil || !reflect.DeepEqual(shells, []string{"/wt/b"}) {
+		t.Errorf("shells = %v", shells)
 	}
 }

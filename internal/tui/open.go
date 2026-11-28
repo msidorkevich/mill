@@ -29,7 +29,7 @@ func runCapture(ctx context.Context, bin string, args []string) (string, string,
 
 // openWorktree opens the task's worktree: in a new herdr pane when mill runs inside herdr,
 // in a new tmux window when the selected host is tmux, otherwise in a shell that suspends the
-// TUI until it exits.
+// TUI until it exits. A tmux window opened from outside tmux needs an attach to be seen.
 func (m *Model) openWorktree(taskID string) tea.Cmd {
 	if taskID == "" {
 		m.cmds.note("open worktree: select a task first")
@@ -62,7 +62,8 @@ func (m *Model) openWorktree(taskID string) tea.Cmd {
 		return nil
 	}
 	if m.opts.HostKind == "tmux" {
-		// No -t: tmux opens the window in the session of the client that runs mill.
+		// No -t: inside tmux the window opens in the current session. Outside tmux ($TMUX unset)
+		// tmux picks a session of the running server, and fails if there is no server.
 		_, stderr, code, err := m.opts.Tmux(ctx, []string{"new-window", "-c", b.Worktree})
 		switch {
 		case err != nil:
@@ -71,6 +72,9 @@ func (m *Model) openWorktree(taskID string) tea.Cmd {
 			m.cmds.note("open worktree: tmux exited %d: %s", code, strings.TrimSpace(stderr))
 		default:
 			m.cmds.note("opened %s in a tmux window", b.Worktree)
+			if m.opts.Getenv("TMUX") == "" {
+				m.cmds.note("mill is not inside tmux: see the window with `%s attach`", m.opts.TmuxBin)
+			}
 		}
 		return nil
 	}

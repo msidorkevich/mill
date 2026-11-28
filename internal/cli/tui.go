@@ -29,15 +29,26 @@ func runTUI(ctx context.Context, env Env, args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	h, _, err := host.Select(cfg.Host.Kind, host.Settings{TmuxBin: cfg.Host.TmuxBin, RepoRoot: paths.Root}, env.getenv, env.lookPath)
-	if err != nil {
-		return fail(err)
-	}
-	m := tui.New(tui.Options{Store: s, Paths: paths, Runner: r, Getenv: env.getenv, LookPath: env.lookPath,
-		HostKind: h.Name(), TmuxBin: cfg.Host.TmuxBin})
+	opts := tuiHostOptions(env, cfg.Host.Kind, cfg.Host.TmuxBin, paths.Root)
+	opts.Store, opts.Paths, opts.Runner = s, paths, r
+	m := tui.New(opts)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithOutput(env.Stdout))
 	if _, err := p.Run(); err != nil {
 		return fail(fmt.Errorf("the terminal UI stopped: %w", err))
 	}
 	return ExitOK
+}
+
+// tuiHostOptions returns the tui.Options that depend on the environment and the host config.
+// The TUI starts no agents itself, so a host that cannot be selected does not stop it: the
+// error goes to HostErr and HostKind stays empty.
+func tuiHostOptions(env Env, kind, tmuxBin, root string) tui.Options {
+	opts := tui.Options{Getenv: env.getenv, LookPath: env.lookPath, TmuxBin: tmuxBin}
+	h, _, err := host.Select(kind, host.Settings{TmuxBin: tmuxBin, RepoRoot: root}, env.getenv, env.lookPath)
+	if err != nil {
+		opts.HostErr = err
+		return opts
+	}
+	opts.HostKind = h.Name()
+	return opts
 }
